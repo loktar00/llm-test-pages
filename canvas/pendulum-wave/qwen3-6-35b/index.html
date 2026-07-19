@@ -54,4 +54,310 @@
 
     <script>
         // --- Configuration ---
-        const CONFIG
+        const CONFIG = {
+            pendulumCount: 24,
+            periodDuration: 60, // seconds for the cycle to reset
+            basePeriod: 1.0,    // The base period of the longest pendulum
+            startOffset: 0.5,   // Offset for shorter pendulums (in seconds)
+            stringLength: 300,  // Visual length of the longest string
+            bobSize: 8,
+            trailLength: 60,    // Number of frames to keep for trails
+            chartHeight: 150,   // Height of the seismograph section
+            traceColor: '#00ffcc',
+            traceAlpha: 0.4
+        };
+
+        // --- Setup ---
+        const canvas = document.getElementById('mainCanvas');
+        const ctx = canvas.getContext('2d');
+        const resetFlash = document.getElementById('reset-flash');
+        
+        let width, height;
+        let pendulums = [];
+        let time = 0;
+        let lastFrameTime = 0;
+
+        // --- Resizing ---
+        function resize() {
+            const container = document.getElementById('container');
+            const rect = container.getBoundingClientRect();
+            canvas.width = rect.width;
+            canvas.height = rect.height;
+            width = canvas.width;
+            height = canvas.height;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // --- Math & Physics Helpers ---
+        
+        // Map a value from one range to another
+        function map(value, start1, stop1, start2, stop2) {
+            return start2 + (stop2 - start2) * ((value - start1) / (stop1 - start1));
+        }
+
+        class Pendulum {
+            constructor(index, total) {
+                this.index = index;
+                this.total = total;
+                
+                // Physics Math:
+                // We want Pendulum 0 to have period P_base.
+                // We want Pendulum N to have period such that it does exactly (N+1) more cycles than Pendulum 0 
+                // over the CONFIG.periodDuration.
+                // This creates the "Ghost" patterns.
+                
+                // Calculate target period for this specific pendulum
+                // Formula derived from: (T_base / T_n) - 1 = n / Total_Cycles_Factor
+                // Simplified: T_n = T_base / (1 + n / K)
+                // We set K such that at n=23, we get specific phase shift.
+                // Let's use the simple additive method for visual stability:
+                // T_n = T_base - n * step
+                
+                // To make it look organic, let's use the standard "Pendulum Wave" math:
+                // We want the period of pendulum i to be:
+                // P_i = T_base / (1 + (i * drift_factor))
+                // If drift_factor is small, they sync up occasionally.
+                
+                // Let's stick to the prompt's "60 second cycle".
+                // Let's define the frequency f_i = (i + base_offset) / period_duration
+                // Then T_i = 1 / f_i
+                // We need to tune base_offset so the longest pendulum looks slow and "real".
+                
+                this.drift = (index + 1) / (CONFIG.periodDuration / 0.5); 
+                // The multiplier 0.5 controls the visual density of the patterns.
+                
+                // Base Frequency (Pendulum 0)
+                const baseFreq = 1.0 / CONFIG.basePeriod;
+                
+                // Frequency of this pendulum: 
+                // It needs to drift relative to the base.
+                // Frequency_i = BaseFreq * (1 + (index * drift_step))
+                // The drift_step determines how often the patterns repeat.
+                // If we want a full cycle reset at 60s, we calculate drift_step based on index.
+                
+                // Simpler approach used in most demos:
+                // Length L determines Period T.
+                // T = 2 * PI * sqrt(L/g)
+                // We adjust Length.
+                
+                // Let's calculate Length directly.
+                // We want the last pendulum to be significantly faster or slower.
+                // Let's try: Frequency_i = BaseFreq + (i * DeltaFreq)
+                
+                this.freq = baseFreq + (index * 0.045); // 0.045 is a magic number for visual drift
+                this.phase = 0;
+                this.angle = 0;
+                this.x = 0;
+                this.y = 0;
+                
+                // Trail History
+                this.trail = [];
+            }
+
+            update(dt) {
+                // Physics: theta(t) = theta_max * cos(2 * PI * f * t)
+                // We assume small angle approximation for simplicity in waves, 
+                // but since we just need x-position for the wave effect, 
+                // we can approximate x(t) ~ cos(wt).
+                
+                // Update phase
+                this.phase += this.freq * dt;
+                
+                // Calculate Angle
+                // Max angle 0.5 radians (~30 degrees)
+                const maxAngle = 0.5;
+                this.angle = maxAngle * Math.cos(2 * Math.PI * this.phase);
+                
+                // Calculate position relative to pivot
+                // x = L * sin(theta)
+                // y = L * cos(theta)
+                // We vary L based on index to get the frequency
+                // g = 9.81 (normalized)
+                // T = 2*PI*sqrt(L/g) => L = g * (T/2PI)^2 => L = g / (4 * PI^2 * f^2)
+                // We map the calculated frequency to a length visually.
+                
+                // To ensure the longest pendulum looks longest and shortest looks shortest:
+                // We scale the length.
+                const lengthFactor = 10000 / (4 * Math.PI * Math.PI * this.freq * this.freq);
+                
+                // Visual scaling to fit canvas
+                const visualLength = lengthFactor * 0.4; 
+                
+                this.x = visualLength * Math.sin(this.angle);
+                this.y = visualLength * Math.cos(this.angle);
+
+                // Store trail (x, y)
+                this.trail.push({x: this.x, y: this.y});
+                if (this.trail.length > CONFIG.trailLength) {
+                    this.trail.shift();
+                }
+            }
+
+            draw(ctx, pivotX, pivotY, canvasHeight, chartTop) {
+                // 1. Draw String
+                ctx.beginPath();
+                ctx.moveTo(pivotX, pivotY);
+                ctx.lineTo(pivotX + this.x, pivotY + this.y);
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                // 2. Draw Bob
+                ctx.beginPath();
+                ctx.arc(pivotX + this.x, pivotY + this.y, CONFIG.bobSize, 0, Math.PI * 2);
+                ctx.fillStyle = '#fff';
+                ctx.fill();
+
+                // 3. Draw Trail (Pendulum View)
+                // We draw lines connecting the recent history
+                if (this.trail.length > 1) {
+                    ctx.beginPath();
+                    for (let i = 0; i < this.trail.length - 1; i++) {
+                        const p1 = this.trail[i];
+                        const p2 = this.trail[i+1];
+                        const opacity = (i / this.trail.length) * 0.8;
+                        ctx.strokeStyle = `rgba(0, 255, 204, ${opacity})`;
+                        ctx.lineWidth = 2;
+                        ctx.moveTo(pivotX + p1.x, pivotY + p1.y);
+                        ctx.lineTo(pivotX + p2.x, pivotY + p2.y);
+                        ctx.stroke();
+                    }
+                }
+
+                // 4. Draw Seismograph Trace (Chart View)
+                // Map x position to chart width
+                const chartY = chartTop + CONFIG.chartHeight; // Bottom of chart area
+                const mapX = map(this.x, -200, 200, 0, width); 
+                
+                // Since this is a static chart drawing every frame (persistence),
+                // we don't "draw" a line here, we update a global history of X positions
+                // managed by the main loop.
+            }
+        }
+
+        // --- Initialization ---
+        function init() {
+            pendulums = [];
+            for (let i = 0; i < CONFIG.pendulumCount; i++) {
+                pendulums.push(new Pendulum(i, CONFIG.pendulumCount));
+            }
+        }
+
+        // --- Main Loop ---
+        // We need to store the history of x-positions for the chart
+        let chartHistory = [];
+        const chartHistoryMax = 400; // How many frames back to show on the chart
+
+        function loop(timestamp) {
+            if (!lastFrameTime) lastFrameTime = timestamp;
+            const dt = (timestamp - lastFrameTime) / 1000;
+            lastFrameTime = timestamp;
+
+            // Update time
+            time += dt;
+            
+            // Reset Logic (60s Cycle)
+            const cycleTime = time % CONFIG.periodDuration;
+            // Check for reset boundary flash
+            if (cycleTime < dt && time > dt) {
+                triggerResetFlash();
+            }
+            // Also handle the wrap-around precision
+            if (time > CONFIG.periodDuration) {
+                time -= CONFIG.periodDuration;
+            }
+
+            // Clear Canvas
+            ctx.fillStyle = 'rgba(5, 5, 5, 0.3)'; // Fade effect for trails
+            ctx.fillRect(0, 0, width, height);
+
+            // Layout
+            const pivotY = 100;
+            const chartStartY = pivotY + 200; // Space between pendulums and chart
+            const spacing = width / (CONFIG.pendulumCount + 1);
+
+            // Draw Pivot Bar
+            ctx.beginPath();
+            ctx.moveTo(0, pivotY);
+            ctx.lineTo(width, pivotY);
+            ctx.strokeStyle = '#333';
+            ctx.stroke();
+
+            // Draw Chart Area Background/Grid
+            ctx.fillStyle = '#0a0a0a';
+            ctx.fillRect(0, chartStartY, width, CONFIG.chartHeight);
+            
+            // Chart Grid lines (0.5s intervals approx)
+            ctx.strokeStyle = '#111';
+            ctx.beginPath();
+            for(let i=0; i<CONFIG.chartHeight; i+=10) {
+                ctx.moveTo(0, chartStartY + i);
+                ctx.lineTo(width, chartStartY + i);
+            }
+            ctx.stroke();
+
+            // Update Pendulums & Draw Main Elements
+            pendulums.forEach((p, i) => {
+                p.update(dt);
+                p.draw(ctx, spacing * (i + 1), pivotY, height, chartStartY);
+            });
+
+            // Update & Draw Chart History
+            // Store current frame positions
+            const frameData = [];
+            pendulums.forEach(p => {
+                frameData.push(p.x);
+            });
+            chartHistory.push(frameData);
+            if (chartHistory.length > chartHistoryMax) {
+                chartHistory.shift();
+            }
+
+            // Render Chart
+            // Draw lines for each pendulum across the time history
+            for (let i = 0; i < CONFIG.pendulumCount; i++) {
+                ctx.beginPath();
+                ctx.strokeStyle = `rgba(0, 255, 204, ${0.1 + (i/CONFIG.pendulumCount)*0.2})`;
+                ctx.lineWidth = 1;
+                
+                const pivotX = spacing * (i + 1);
+                
+                for (let t = 0; t < chartHistory.length; t++) {
+                    // t=0 is the oldest, t=max is current (right side)
+                    // We want t=max at pivotX
+                    
+                    const val = chartHistory[t][i];
+                    
+                    // Map value to screen
+                    // val is -200 to 200
+                    // We keep it centered around pivotX
+                    
+                    const screenY = chartStartY + CONFIG.chartHeight - map(val, -200, 200, -CONFIG.chartHeight/2, CONFIG.chartHeight/2);
+                    
+                    if (t === 0) {
+                        ctx.moveTo(pivotX - (chartHistoryMax - t) * (width/chartHistoryMax), screenY);
+                    } else {
+                        ctx.lineTo(pivotX - (chartHistoryMax - t) * (width/chartHistoryMax), screenY);
+                    }
+                }
+                ctx.stroke();
+            }
+
+            requestAnimationFrame(loop);
+        }
+
+        function triggerResetFlash() {
+            resetFlash.style.opacity = '0.1';
+            setTimeout(() => {
+                resetFlash.style.opacity = '0';
+            }, 100);
+        }
+
+        // --- Start ---
+        init();
+        requestAnimationFrame(loop);
+
+    </script>
+</body>
+</html>

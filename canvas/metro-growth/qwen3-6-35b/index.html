@@ -48,4 +48,372 @@ const CONFIG = {
         '#A8DADC', // Light Blue
         '#9B5DE5', // Purple
         '#00BBF9', // Cyan
-        '#0
+        '#00F5D4'  // Mint
+    ]
+};
+
+let width, height;
+let cityGroup = [];
+let globalTime = 0;
+let fadeState = 'building'; // building, waiting, fading, resetting
+let fadeOpacity = 1;
+
+// Resize handling
+function resize() {
+    width = canvas.width = window.innerWidth;
+    height = canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// --- Math Helpers ---
+
+function dist(x1, y1, x2, y2) {
+    return Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
+}
+
+function getGridPos(x, y) {
+    return {
+        x: Math.round(x / CONFIG.gridSize) * CONFIG.gridSize,
+        y: Math.round(y / CONFIG.gridSize) * CONFIG.gridSize
+    };
+}
+
+// --- Classes ---
+
+class Station {
+    constructor(x, y, id) {
+        this.x = x;
+        this.y = y;
+        this.id = id;
+        this.radius = 4; // Standard radius
+        this.isInterchange = false;
+        this.lines = []; // Array of line IDs
+    }
+}
+
+class Line {
+    constructor(id, color, startX, startY) {
+        this.id = id;
+        this.color = color;
+        this.stations = [];
+        this.path = []; // Points for drawing
+        this.complete = false;
+        this.progress = 0; // 0 to 1 (length based)
+        this.trainProgress = 0;
+        this.direction = 1;
+        this.waiting = 0;
+        
+        // Create initial station
+        const station = new Station(startX, startY, cityGroup.length);
+        station.lines.push(this.id);
+        this.stations.push(station);
+        this.path.push({x: startX, y: startY});
+    }
+
+    extend(direction) {
+        const last = this.path[this.path.length - 1];
+        let nextX = last.x;
+        let nextY = last.y;
+
+        // Random Manhattan movement: 0:Up, 1:Right, 2:Down, 3:Left
+        // Bias slightly away from edges
+        
+        switch(direction) {
+            case 0: nextY -= CONFIG.gridSize; break;
+            case 1: nextX += CONFIG.gridSize; break;
+            case 2: nextY += CONFIG.gridSize; break;
+            case 3: nextX -= CONFIG.gridSize; break;
+        }
+
+        // Clamp to bounds (with padding)
+        const pad = 50;
+        if (nextX < pad || nextX > width - pad || nextY < pad || nextY > height - pad) {
+            return false; // Hit edge, stop
+        }
+
+        // Check if we are adding a new station or connecting to existing
+        const gridPos = getGridPos(nextX, nextY);
+        
+        // Look for existing station at this grid position
+        let targetStation = null;
+        for (let s of cityGroup) {
+            if (Math.abs(s.x - gridPos.x) < 1 && Math.abs(s.y - gridPos.y) < 1) {
+                targetStation = s;
+                break;
+            }
+        }
+
+        if (!targetStation) {
+            // Create new station
+            targetStation = new Station(gridPos.x, gridPos.y, cityGroup.length);
+            cityGroup.push(targetStation);
+        }
+
+        // Mark interchange if needed
+        if (targetStation.lines.length > 0) {
+            targetStation.isInterchange = true;
+        }
+        targetStation.lines.push(this.id);
+
+        // Add to line
+        this.stations.push(targetStation);
+        this.path.push({x: targetStation.x, y: targetStation.y});
+
+        return true;
+    }
+
+    draw(ctx, opacity) {
+        if (this.path.length < 2) return;
+
+        // Calculate total length
+        let totalLen = 0;
+        const segs = [];
+        for (let i = 0; i < this.path.length - 1; i++) {
+            const d = dist(this.path[i].x, this.path[i].y, this.path[i+1].x, this.path[i+1].y);
+            segs.push(d);
+            totalLen += d;
+        }
+
+        // Draw Lines
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = this.color;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        
+        ctx.beginPath();
+        ctx.moveTo(this.path[0].x, this.path[0].y);
+        
+        // Draw segments up to progress
+        let currentLen = 0;
+        let drawUntil = totalLen * this.progress;
+
+        for (let i = 0; i < segs.length; i++) {
+            if (currentLen >= drawUntil) break;
+
+            const p1 = this.path[i];
+            const p2 = this.path[i+1];
+
+            // Calculate how much of this segment to draw
+            const remaining = drawUntil - currentLen;
+            
+            if (remaining >= segs[i]) {
+                ctx.lineTo(p2.x, p2.y);
+                currentLen += segs[i];
+            } else {
+                // Interpolate point
+                const ratio = remaining / segs[i];
+                const ix = p1.x + (p2.x - p1.x) * ratio;
+                const iy = p1.y + (p2.y - p1.y) * ratio;
+                ctx.lineTo(ix, iy);
+                currentLen = drawUntil;
+            }
+        }
+        ctx.stroke();
+
+        // Draw Stations (only those fully passed, plus the active growing point)
+        ctx.fillStyle = '#1a1a1a'; // Match bg
+        ctx.strokeStyle = this.color;
+        
+        for (let i = 0; i < this.stations.length; i++) {
+            const s = this.stations[i];
+            const pathLen = getLengthUpToIndex(this.path, i);
+            
+            // Draw station if it's been passed or is the current tip
+            if (pathLen <= drawUntil + CONFIG.gridSize) {
+                // Fill
+                ctx.beginPath();
+                ctx.arc(s.x, s.y, s.isInterchange ? 6 : 4, 0, Math.PI * 2);
+                ctx.fill();
+                // Stroke
+                ctx.beginPath();
+                ctx.arc(s.x, s.y, s.isInterchange ? 6 : 4, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+        }
+
+        // Draw Train
+        if (this.complete) {
+            this.drawTrain(ctx, totalLen);
+        }
+    }
+
+    drawTrain(ctx, totalLen) {
+        // Calculate current position
+        let distTraveled = (this.trainProgress * totalLen) % totalLen;
+        
+        // Simple linear interpolation for visual
+        let currentLen = 0;
+        let tx, ty;
+        
+        for (let i = 0; i < this.path.length - 1; i++) {
+            if (currentLen + segs[i] >= distTraveled) {
+                const ratio = (distTraveled - currentLen) / segs[i];
+                tx = this.path[i].x + (this.path[i+1].x - this.path[i].x) * ratio;
+                ty = this.path[i].y + (this.path[i+1].y - this.path[i].y) * ratio;
+                break;
+            }
+            currentLen += segs[i];
+        }
+
+        if (tx !== undefined) {
+            ctx.fillStyle = '#FFFFFF';
+            ctx.shadowColor = 'rgba(0,0,0,0.5)';
+            ctx.shadowBlur = 4;
+            
+            // Train shape (simple rectangle with rounded corners)
+            const dx = this.path[Math.min(this.path.length-1, Math.floor(distTraveled / CONFIG.gridSize)) + 1]?.x - this.path[Math.max(0, Math.floor(distTraveled / CONFIG.gridSize)) - 1]?.x || CONFIG.gridSize;
+            const dy = this.path[Math.min(this.path.length-1, Math.floor(distTraveled / CONFIG.gridSize)) + 1]?.y - this.path[Math.max(0, Math.floor(distTraveled / CONFIG.gridSize)) - 1]?.y || CONFIG.gridSize;
+            const angle = Math.atan2(dy, dx);
+
+            ctx.save();
+            ctx.translate(tx, ty);
+            ctx.rotate(angle);
+            ctx.fillRect(-6, -3, 12, 6);
+            ctx.restore();
+            
+            ctx.shadowBlur = 0;
+        }
+    }
+}
+
+// --- Map Generation Logic ---
+
+function generateCity() {
+    cityGroup = [];
+    
+    // Start in center
+    const cx = width / 2;
+    const cy = height / 2;
+    
+    const numLines = CONFIG.minLines + Math.floor(Math.random() * (CONFIG.maxLines - CONFIG.minLines));
+    const lines = [];
+    
+    for (let i = 0; i < numLines; i++) {
+        const color = CONFIG.colors[i % CONFIG.colors.length];
+        const line = new Line(i, color, cx, cy);
+        lines.push(line);
+    }
+
+    return lines;
+}
+
+// Helper to get accumulated length up to a specific point in path
+function getLengthUpToIndex(path, index) {
+    let len = 0;
+    for(let i=0; i<index; i++) {
+        len += dist(path[i].x, path[i].y, path[i+1].x, path[i+1].y);
+    }
+    return len;
+}
+
+// --- Main Loop ---
+
+let activeLines = [];
+let frameCount = 0;
+
+function initCity() {
+    activeLines = generateCity();
+    fadeState = 'building';
+    fadeOpacity = 1;
+    globalTime = 0;
+}
+
+function update() {
+    let allComplete = true;
+    
+    for (let line of activeLines) {
+        // Drawing speed
+        if (line.progress < 1) {
+            allComplete = false;
+            line.progress += 0.015; // Speed of drawing
+            if (line.progress > 1) line.progress = 1;
+        } else {
+            // Line is drawn, now run trains
+            if (!line.complete) {
+                line.complete = true;
+            }
+            
+            line.trainProgress += (CONFIG.trainSpeed / (line.progress * 500)); // Speed relative to line length
+            if (line.trainProgress > 1) {
+                line.trainProgress = 0; // Loop train
+            }
+        }
+    }
+
+    // If all lines complete, wait a bit then fade
+    if (allComplete && fadeState === 'building') {
+        if (frameCount % 100 === 0) fadeState = 'waiting';
+    }
+    
+    if (fadeState === 'waiting') {
+        fadeOpacity -= CONFIG.fadeSpeed;
+        if (fadeOpacity <= 0) {
+            fadeOpacity = 0;
+            fadeState = 'resetting';
+        }
+    } else if (fadeState === 'resetting') {
+        // Instant reset logic for next frame
+        if (frameCount % 60 === 0) { // Small delay
+            initCity();
+        }
+    }
+
+    frameCount++;
+}
+
+function draw() {
+    // Clear background
+    ctx.fillStyle = '#1a1a1a';
+    ctx.fillRect(0, 0, width, height);
+
+    // Draw Map
+    for (let line of activeLines) {
+        line.draw(ctx, fadeOpacity);
+    }
+
+    // Draw Grid dots (aesthetic)
+    if (fadeOpacity > 0.5) {
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.03)';
+        for (let x = 0; x < width; x += CONFIG.gridSize) {
+            for (let y = 0; y < height; y += CONFIG.gridSize) {
+                // Check if near any line
+                let near = false;
+                for (let line of activeLines) {
+                    for (let p of line.path) {
+                        if (dist(x, y, p.x, p.y) < 20) {
+                            near = true;
+                            break;
+                        }
+                    }
+                    if (near) break;
+                }
+                if (near) {
+                    ctx.beginPath();
+                    ctx.arc(x, y, 1, 0, Math.PI*2);
+                    ctx.fill();
+                }
+            }
+        }
+    }
+
+    // Apply global fade
+    if (fadeOpacity < 1) {
+        ctx.fillStyle = `rgba(26, 26, 26, ${1 - fadeOpacity})`;
+        ctx.fillRect(0, 0, width, height);
+    }
+}
+
+function loop() {
+    update();
+    draw();
+    requestAnimationFrame(loop);
+}
+
+// Start
+initCity();
+loop();
+
+</script>
+</body>
+</html>

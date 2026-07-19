@@ -47,4 +47,566 @@
 
         // --- Setup Canvas ---
         const canvas = document.getElementById('simCanvas');
-        const ctx
+        const ctx = canvas.getContext('2d');
+        let width, height, centerX, centerY;
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            centerX = width / 2;
+            centerY = height / 2;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // --- Utilities ---
+        function rand(min, max) { return Math.random() * (max - min) + min; }
+        function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+        function clamp(val, min, max) { return Math.max(min, Math.min(max, val)); }
+        function isFiniteFloat(n) { return typeof n === 'number' && isFinite(n); }
+
+        // --- Classes ---
+
+        class Vector {
+            constructor(x, y) { this.x = x; this.y = y; }
+        }
+
+        class Particle {
+            constructor(x, y, color, speed, life) {
+                this.x = x;
+                this.y = y;
+                this.color = color;
+                const angle = Math.random() * Math.PI * 2;
+                this.vx = Math.cos(angle) * speed;
+                this.vy = Math.sin(angle) * speed;
+                this.life = life;
+                this.maxLife = life;
+                this.size = rand(1, 3);
+            }
+
+            update(dt) {
+                this.x += this.vx * dt;
+                this.y += this.vy * dt;
+                this.life -= dt;
+            }
+
+            draw(ctx) {
+                ctx.globalAlpha = clamp(this.life / this.maxLife, 0, 1);
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.globalAlpha = 1.0;
+            }
+        }
+
+        class Star {
+            constructor() {
+                this.x = rand(0, width);
+                this.y = rand(0, height);
+                this.size = rand(0.5, 2);
+                this.alpha = rand(0.3, 1);
+                this.twinkleSpeed = rand(0.005, 0.02);
+            }
+
+            update() {
+                this.alpha += this.twinkleSpeed;
+                if (this.alpha > 1 || this.alpha < 0.3) this.twinkleSpeed *= -1;
+            }
+
+            draw(ctx) {
+                ctx.fillStyle = `rgba(255, 255, 255, ${this.alpha})`;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        class Debris {
+            constructor() {
+                this.x = rand(0, width);
+                this.y = rand(0, height);
+                this.vx = rand(-5, 5);
+                this.vy = rand(-5, 5);
+                this.size = rand(1, 3);
+                this.rotation = rand(0, Math.PI * 2);
+                this.rotSpeed = rand(-0.05, 0.05);
+                this.color = '#2a2a2a';
+            }
+
+            update(dt) {
+                this.x += this.vx * dt;
+                this.y += this.vy * dt;
+                this.rotation += this.rotSpeed * dt;
+
+                // Wrap around screen
+                if (this.x < -10) this.x = width + 10;
+                if (this.x > width + 10) this.x = -10;
+                if (this.y < -10) this.y = height + 10;
+                if (this.y > height + 10) this.y = -10;
+            }
+
+            draw(ctx) {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.rotation);
+                ctx.fillStyle = this.color;
+                ctx.fillRect(-this.size, -this.size, this.size * 2, this.size * 2);
+                ctx.restore();
+            }
+        }
+
+        class Asteroid {
+            constructor() {
+                this.reset(true);
+                // Initial random rotation
+                this.points = this.generateShape();
+            }
+
+            reset(initial = false) {
+                this.ore = 100;
+                this.maxOre = 100;
+                this.radius = rand(30, 50);
+                this.points = this.generateShape();
+                this.rotation = rand(0, Math.PI * 2);
+                this.rotSpeed = rand(-0.01, 0.01);
+                
+                if (initial) {
+                    // Spawn anywhere
+                    this.x = rand(0, width);
+                    this.y = rand(0, height);
+                } else {
+                    // Spawn at edge when depleted
+                    const angle = rand(0, Math.PI * 2);
+                    const dist = Math.max(width, height) / 1.5;
+                    this.x = centerX + Math.cos(angle) * dist;
+                    this.y = centerY + Math.sin(angle) * dist;
+                }
+                
+                // Drift velocity
+                this.vx = rand(-10, 10);
+                this.vy = rand(-10, 10);
+            }
+
+            generateShape() {
+                const points = [];
+                const segments = 12;
+                for (let i = 0; i < segments; i++) {
+                    const angle = (i / segments) * Math.PI * 2;
+                    const r = this.radius * rand(0.8, 1.2);
+                    points.push({ x: Math.cos(angle) * r, y: Math.sin(angle) * r });
+                }
+                return points;
+            }
+
+            update(dt) {
+                this.x += this.vx * dt;
+                this.y += this.vy * dt;
+                this.rotation += this.rotSpeed * dt;
+            }
+
+            draw(ctx) {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.rotation);
+                
+                // Draw Rock
+                ctx.beginPath();
+                ctx.moveTo(this.points[0].x, this.points[0].y);
+                for (let i = 1; i < this.points.length; i++) {
+                    ctx.lineTo(this.points[i].x, this.points[i].y);
+                }
+                ctx.closePath();
+                ctx.fillStyle = CONFIG.colors.asteroid;
+                ctx.fill();
+                ctx.strokeStyle = CONFIG.colors.asteroidHigh;
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                // Draw Ore highlights
+                const oreRatio = this.ore / this.maxOre;
+                if (oreRatio > 0) {
+                    ctx.fillStyle = CONFIG.colors.ore;
+                    ctx.globalAlpha = 0.3 + (oreRatio * 0.7);
+                    ctx.beginPath();
+                    ctx.arc(-10, -10, 10, 0, Math.PI * 2);
+                    ctx.arc(15, 5, 8, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.globalAlpha = 1.0;
+                }
+
+                ctx.restore();
+            }
+        }
+
+        class Drone {
+            constructor() {
+                this.x = centerX;
+                this.y = centerY;
+                this.angle = 0;
+                this.target = null;
+                this.state = 'goToAsteroid'; // goToAsteroid, mine, returnToStation, unload
+                this.speed = 150;
+                this.mineTimer = 0;
+                this.miningDuration = 2;
+                this.carrying = 0; // Amount of ore carried
+            }
+
+            update(dt) {
+                // State Machine
+                switch (this.state) {
+                    case 'goToAsteroid':
+                        this.flyToTarget(dt);
+                        if (this.distanceToTarget() < 10) {
+                            this.state = 'mine';
+                            this.mineTimer = 0;
+                        }
+                        break;
+
+                    case 'mine':
+                        this.angle += 0.05; // Hover spin
+                        this.mineTimer += dt;
+                        
+                        // Spark particles
+                        if (Math.random() < 0.3 && this.target && this.target.ore > 0) {
+                            const sparkX = this.x + rand(-5, 5);
+                            const sparkY = this.y + rand(-5, 5);
+                            particles.push(new Particle(sparkX, sparkY, CONFIG.colors.ore, 50, 0.5));
+                        }
+
+                        if (this.target) {
+                            this.target.ore -= 5 * dt;
+                        }
+
+                        if (this.target === null || this.target.ore <= 0) {
+                            this.state = 'returnToStation';
+                        } else if (this.mineTimer >= this.miningDuration) {
+                            this.state = 'returnToStation';
+                        }
+                        break;
+
+                    case 'returnToStation':
+                        // Fly to center
+                        const dx = centerX - this.x;
+                        const dy = centerY - this.y;
+                        const d = Math.hypot(dx, dy);
+                        
+                        if (d > 30) {
+                            this.x += (dx / d) * this.speed * dt;
+                            this.y += (dy / d) * this.speed * dt;
+                            this.angle = Math.atan2(dy, dx);
+                        } else {
+                            this.state = 'unload';
+                            this.carrying = 0; // Drop off
+                        }
+                        break;
+
+                    case 'unload':
+                        // Quick pause at station
+                        this.mineTimer += dt;
+                        if (this.mineTimer > 0.5) {
+                            this.state = 'goToAsteroid';
+                            this.selectNewTarget();
+                        }
+                        break;
+                }
+
+                // General Position Check
+                if (!isFiniteFloat(this.x) || !isFiniteFloat(this.y)) {
+                    this.x = centerX;
+                    this.y = centerY;
+                }
+            }
+
+            selectNewTarget() {
+                // Find nearest valid asteroid with ore
+                let nearest = null;
+                let minDist = Infinity;
+
+                for (let a of asteroids) {
+                    if (a.ore > 0) {
+                        const d = dist(this.x, this.y, a.x, a.y);
+                        if (d < minDist) {
+                            minDist = d;
+                            nearest = a;
+                        }
+                    }
+                }
+                
+                // If no asteroids have ore (rare edge case), wait or reset target
+                if (nearest) {
+                    this.target = nearest;
+                } else {
+                    // All depleted? Force reset one to simulate respawn
+                    const depleted = asteroids.find(a => a.ore <= 0);
+                    if (depleted) depleted.reset();
+                    this.selectNewTarget(); // Retry
+                }
+            }
+
+            flyToTarget(dt) {
+                if (!this.target) {
+                    this.selectNewTarget();
+                    return;
+                }
+
+                const dx = this.target.x - this.x;
+                const dy = this.target.y - this.y;
+                const d = Math.hypot(dx, dy);
+
+                if (d > 5) {
+                    this.x += (dx / d) * this.speed * dt;
+                    this.y += (dy / d) * this.speed * dt;
+                    this.angle = Math.atan2(dy, dx);
+                }
+            }
+
+            distanceToTarget() {
+                if (!this.target) return 10000;
+                return dist(this.x, this.y, this.target.x, this.target.y);
+            }
+
+            draw(ctx) {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.angle);
+
+                // Engine trail
+                if (this.state === 'goToAsteroid' || this.state === 'returnToStation') {
+                    ctx.beginPath();
+                    ctx.moveTo(-10, 0);
+                    ctx.lineTo(-20 - Math.random() * 10, 0);
+                    ctx.strokeStyle = CONFIG.colors.droneEngine;
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+
+                // Drone Body (Triangle)
+                ctx.fillStyle = CONFIG.colors.droneBody;
+                ctx.beginPath();
+                ctx.moveTo(10, 0);
+                ctx.lineTo(-5, 5);
+                ctx.lineTo(-5, -5);
+                ctx.closePath();
+                ctx.fill();
+
+                // Carried Ore
+                if (this.state === 'returnToStation') {
+                    ctx.fillStyle = CONFIG.colors.ore;
+                    ctx.beginPath();
+                    ctx.arc(0, 0, 4, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.shadowBlur = 10;
+                    ctx.shadowColor = CONFIG.colors.ore;
+                    ctx.fill();
+                    ctx.shadowBlur = 0;
+                }
+
+                ctx.restore();
+            }
+        }
+
+        class Enemy {
+            constructor() {
+                this.reset();
+            }
+
+            reset() {
+                // Spawn at edge
+                const angle = rand(0, Math.PI * 2);
+                const dist = Math.max(width, height) / 1.2;
+                this.x = centerX + Math.cos(angle) * dist;
+                this.y = centerY + Math.sin(angle) * dist;
+                
+                this.state = 'approach'; // approach, orbit, leave
+                this.speed = 100;
+                this.timer = 0;
+                this.angle = 0;
+            }
+
+            update(dt) {
+                switch (this.state) {
+                    case 'approach':
+                        const dx = centerX - this.x;
+                        const dy = centerY - this.y;
+                        const d = Math.hypot(dx, dy);
+                        
+                        if (d > 150) {
+                            this.x += (dx / d) * this.speed * dt;
+                            this.y += (dy / d) * this.speed * dt;
+                            this.angle = Math.atan2(dy, dx);
+                        } else {
+                            this.state = 'orbit';
+                            this.timer = 0;
+                        }
+                        break;
+
+                    case 'orbit':
+                        this.timer += dt;
+                        this.angle += 0.02;
+                        // Move in a small circle
+                        const orbitR = 150;
+                        this.x = centerX + Math.cos(this.angle + Math.PI) * orbitR;
+                        this.y = centerY + Math.sin(this.angle + Math.PI) * orbitR;
+                        
+                        if (this.timer > 3) { // Stay for 3 seconds
+                            this.state = 'leave';
+                        }
+                        break;
+
+                    case 'leave':
+                        this.timer += dt;
+                        if (this.timer > 1) {
+                            // Explode
+                            createExplosion(this.x, this.y, CONFIG.colors.laserRed, 20);
+                            this.reset();
+                        }
+                        break;
+                }
+            }
+
+            draw(ctx) {
+                if (this.state === 'leave') return; // Don't draw if leaving/just reset
+
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.angle);
+                
+                // Draw Enemy Ship
+                ctx.fillStyle = '#333';
+                ctx.strokeStyle = CONFIG.colors.enemy;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(15, 0);
+                ctx.lineTo(-10, 10);
+                ctx.lineTo(-5, 0);
+                ctx.lineTo(-10, -10);
+                ctx.closePath();
+                ctx.fill();
+                ctx.stroke();
+
+                // Glow
+                ctx.shadowBlur = 10;
+                ctx.shadowColor = CONFIG.colors.enemy;
+                ctx.stroke();
+                ctx.shadowBlur = 0;
+
+                ctx.restore();
+            }
+        }
+
+        // --- Simulation State ---
+        const stars = [];
+        const debris = [];
+        const asteroids = [];
+        const drones = [];
+        const particles = [];
+        const enemies = [];
+        
+        let lastTime = 0;
+        let enemySpawnTimer = 0;
+
+        function init() {
+            // Create Stars
+            for (let i = 0; i < CONFIG.starCount; i++) stars.push(new Star());
+            
+            // Create Debris
+            for (let i = 0; i < CONFIG.debrisCount; i++) debris.push(new Debris());
+
+            // Create Asteroids
+            for (let i = 0; i < CONFIG.asteroidCount; i++) asteroids.push(new Asteroid());
+
+            // Create Drones
+            for (let i = 0; i < CONFIG.droneCount; i++) drones.push(new Drone());
+        }
+
+        function createExplosion(x, y, color, count) {
+            for (let i = 0; i < count; i++) {
+                particles.push(new Particle(x, y, color, rand(50, 150), rand(0.5, 1.5)));
+            }
+        }
+
+        function drawStation(ctx) {
+            ctx.save();
+            ctx.translate(centerX, centerY);
+
+            // Rotating Turrets
+            const time = Date.now() * 0.001;
+            
+            // Turret 1
+            ctx.save();
+            ctx.rotate(Math.sin(time) * 0.5);
+            ctx.fillStyle = '#333';
+            ctx.fillRect(0, -5, 25, 10);
+            ctx.strokeStyle = CONFIG.colors.laserBlue;
+            ctx.strokeRect(0, -5, 25, 10);
+            ctx.restore();
+
+            // Turret 2
+            ctx.save();
+            ctx.rotate(Math.PI + Math.cos(time) * 0.5);
+            ctx.fillStyle = '#333';
+            ctx.fillRect(0, -5, 25, 10);
+            ctx.strokeStyle = CONFIG.colors.laserBlue;
+            ctx.strokeRect(0, -5, 25, 10);
+            ctx.restore();
+
+            // Main Body
+            ctx.fillStyle = '#222';
+            ctx.beginPath();
+            ctx.arc(0, 0, 20, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#555';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Core
+            ctx.fillStyle = '#112';
+            ctx.beginPath();
+            ctx.arc(0, 0, 10, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Blinking Light
+            if (Math.floor(time * 5) % 2 === 0) {
+                ctx.fillStyle = 'red';
+                ctx.beginPath();
+                ctx.arc(0, 0, 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Antenna
+            ctx.strokeStyle = '#666';
+            ctx.beginPath();
+            ctx.moveTo(0, -20);
+            ctx.lineTo(0, -35);
+            ctx.stroke();
+            ctx.fillStyle = 'white';
+            ctx.beginPath();
+            ctx.arc(0, -35, 2, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.restore();
+        }
+
+        function update(dt) {
+            // Spawn Enemies
+            if (enemies.length < CONFIG.maxEnemies) {
+                enemySpawnTimer += dt * 60;
+                if (enemySpawnTimer > CONFIG.enemyFrequency) {
+                    enemies.push(new Enemy());
+                    enemySpawnTimer = 0;
+                }
+            }
+
+            // Update Entities
+            stars.forEach(s => s.update());
+            debris.forEach(d => d.update(dt));
+            asteroids.forEach(a => a.update(dt));
+            drones.forEach(d => d.update(dt));
+            particles.forEach(p => p.update(dt));
+            enemies.forEach(e => e.update(dt));
+
+            // Check Depleted Asteroids
+            asteroids.forEach(a => {
+                if (a.ore <= 0 && a.ore > -10) { // prevent multiple triggers
+                    createExplosion(a.x, a.y, CONFIG.colors.asteroid, 10);

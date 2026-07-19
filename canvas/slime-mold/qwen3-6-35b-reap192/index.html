@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Physarum Slime Mold</title>
+    <title>Physarum Simulation</title>
     <style>
         body, html {
             margin: 0;
@@ -21,33 +21,299 @@
 <body>
     <canvas id="canvas"></canvas>
     <script>
-        (function() {
-            const canvas = document.getElementById('canvas');
-            const ctx = canvas.getContext('2d');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
 
-            // Simulation Parameters
-            const AGENT_COUNT = 15000;
-            const SENSOR_ANGLES = [-0.4, 0, 0.4]; // Relative angles
-            const SENSOR_DIST = 20;
-            const MOVE_SPEED = 3;
-            const TURN_SPEED = 0.2;
-            const DEPOSIT_RATE = 2.5;
-            const DECAY = 0.985;
-            const DIFFUSE_STR = 0.15;
+        // Configuration
+        const AGENT_COUNT = 35000;
+        const SENSOR_DISTANCE = 25;
+        const SENSOR_ANGLE = Math.PI / 6; // 30 degrees
+        const TURN_SPEED = 0.3;
+        const SPEED = 2;
+        const DEPOSIT_RATE = 3;
+        const DECAY_RATE = 0.975;
+        const DIFFUSION_STRENGTH = 0.002;
+        const WARM_UP_FRAMES = 200;
+        
+        // Colors
+        const COLOR_BG = [0, 0, 0];
+        const COLOR_A = [20, 40, 60]; // Deep Blue
+        const COLOR_B = [255, 100, 50]; // Vibrant Orange
+        
+        // State
+        let width, height;
+        let trailMap;
+        let imageData;
+        let pixels;
+        let agents;
+        let foods;
+        let time = 0;
+
+        // Resize handling
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
             
-            // Attractor Parameters
-            const NUM_FOOD = 5;
-            const FOOD_SPEED = 1.5;
+            // Initialize trail map with typed array for performance
+            trailMap = new Float32Array(width * height);
             
-            let width, height;
-            let grid, gridNext;
-            let imageData, pixels;
-            let food = [];
-            let agents = [];
+            // Initialize ImageData for rendering
+            imageData = ctx.createImageData(width, height);
+            pixels = imageData.data;
+            
+            initAgents();
+            initFoods();
+        }
 
-            // Typed Arrays for performance
-            let agentX, agentY, agentAngle;
+        class Agent {
+            constructor() {
+                this.x = 0;
+                this.y = 0;
+                this.angle = Math.random() * Math.PI * 2;
+            }
 
-            function init() {
-                resize();
-                window
+            update() {
+                // 1. Sense
+                const sensorLeft = getSensorValue(this.angle - SENSOR_ANGLE);
+                const sensorStraight = getSensorValue(this.angle);
+                const sensorRight = getSensorValue(this.angle + SENSOR_ANGLE);
+
+                // 2. Steer
+                if (sensorLeft > sensorStraight) {
+                    this.angle -= TURN_SPEED;
+                } else if (sensorStraight > sensorRight) {
+                    this.angle += TURN_SPEED;
+                } else {
+                    // Random jitter to prevent sticking
+                    this.angle += (Math.random() - 0.5) * 0.1;
+                }
+
+                // 3. Move
+                this.x += Math.cos(this.angle) * SPEED;
+                this.y += Math.sin(this.angle) * SPEED;
+
+                // 4. Wrap around edges
+                if (this.x < 0) this.x += width;
+                if (this.x >= width) this.x -= width;
+                if (this.y < 0) this.y += height;
+                if (this.y >= height) this.y -= height;
+
+                // 5. Deposit
+                // Map coordinates to flat index
+                const idx = (this.x | 0) + (this.y | 0) * width;
+                // Simple floor check for safety, though modulo math is faster but more code
+                if (idx >= 0 && idx < trailMap.length) {
+                    trailMap[idx] += DEPOSIT_RATE;
+                }
+            }
+
+            // Helper to read trail map with wrapping
+            getTrailValue(offsetX, offsetY) {
+                const tx = ((this.x | 0) + offsetX + width) % width;
+                const ty = ((this.y | 0) + offsetY + height) % height;
+                return trailMap[tx + ty * width];
+            }
+        }
+
+        class Food {
+            constructor() {
+                this.x = Math.random() * width;
+                this.y = Math.random() * height;
+                this.vx = 0;
+                this.vy = 0;
+                this.targetX = Math.random() * width;
+                this.targetY = Math.random() * height;
+                this.changeTimer = 0;
+                this.changeInterval = 100 + Math.random() * 200;
+            }
+
+            update() {
+                // Move towards target
+                const dx = this.targetX - this.x;
+                const dy = this.targetY - this.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                
+                if (dist < 5) {
+                    // Pick new target
+                    this.targetX = Math.random() * width;
+                    this.targetY = Math.random() * height;
+                } else {
+                    this.vx += (dx / dist) * 0.05;
+                    this.vy += (dy / dist) * 0.05;
+                    this.vx *= 0.95; // Friction
+                    this.vy *= 0.95;
+                    this.x += this.vx;
+                    this.y += this.vy;
+                }
+                
+                // Drop food trail
+                const ix = this.x | 0;
+                const iy = this.y | 0;
+                if(ix >=0 && ix < width && iy >=0 && iy < height) {
+                    trailMap[ix + iy * width] += 10.0;
+                }
+            }
+        }
+
+        function initAgents() {
+            agents = new Array(AGENT_COUNT);
+            for (let i = 0; i < AGENT_COUNT; i++) {
+                agents[i] = new Agent();
+            }
+        }
+
+        function initFoods() {
+            foods = [];
+            for (let i = 0; i < 5; i++) {
+                foods.push(new Food());
+            }
+        }
+
+        // Get value at relative sensor position
+        function getSensorValue(angle) {
+            const offsetX = Math.cos(angle) * SENSOR_DISTANCE;
+            const offsetY = Math.sin(angle) * SENSOR_DISTANCE;
+            return agents[0].getTrailValue(offsetX, offsetY); // Reusing logic, though ideally we pass agent
+            // Optimized: Call directly inside loop or keep vector
+        }
+
+        // Process physics
+        function processAgents() {
+            for (let i = 0; i < AGENT_COUNT; i++) {
+                const a = agents[i];
+                
+                // Inline sensor logic for speed
+                const sL = a.getTrailValue(Math.cos(a.angle - SENSOR_ANGLE) * SENSOR_DISTANCE, Math.sin(a.angle - SENSOR_ANGLE) * SENSOR_DISTANCE);
+                const sF = a.getTrailValue(Math.cos(a.angle) * SENSOR_DISTANCE, Math.sin(a.angle) * SENSOR_DISTANCE);
+                const sR = a.getTrailValue(Math.cos(a.angle + SENSOR_ANGLE) * SENSOR_DISTANCE, Math.sin(a.angle + SENSOR_ANGLE) * SENSOR_DISTANCE);
+
+                if (sL > sF) a.angle -= TURN_SPEED;
+                else if (sR > sF) a.angle += TURN_SPEED;
+                else a.angle += (Math.random() - 0.5) * 0.1;
+
+                a.x += Math.cos(a.angle) * SPEED;
+                a.y += Math.sin(a.angle) * SPEED;
+
+                // Wrapping
+                if (a.x < 0) a.x += width;
+                else if (a.x >= width) a.x -= width;
+                if (a.y < 0) a.y += height;
+                else if (a.y >= height) a.y -= height;
+
+                // Deposit
+                const idx = (a.x | 0) + (a.y | 0) * width;
+                if (idx >= 0 && idx < trailMap.length) {
+                    trailMap[idx] += DEPOSIT_RATE;
+                }
+            }
+        }
+
+        function processFoods() {
+            for (let i = 0; i < foods.length; i++) {
+                foods[i].update();
+            }
+        }
+
+        // Diffusion and Decay
+        function processPhysics() {
+            // Simple Gauss-like blur and decay
+            // To optimize, we skip boundary pixels in loops for the convolution
+            // New array for the next frame to avoid overwriting current frame data during pass
+            const nextFrame = new Float32Array(trailMap.length);
+            
+            // We process in chunks or just linear scan. Linear scan is fastest in JS engines usually.
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    const idx = x + y * width;
+                    let val = trailMap[idx];
+                    
+                    // Diffusion average neighbors
+                    // Center - 1
+                    val -= trailMap[idx] * 0.002;
+                    // Top
+                    if (y > 0) val += trailMap[x + (y - 1) * width] * 0.0005;
+                    // Bottom
+                    if (y < height - 1) val += trailMap[x + (y + 1) * width] * 0.0005;
+                    // Left
+                    if (x > 0) val += trailMap[(x - 1) + y * width] * 0.0005;
+                    // Right
+                    if (x < width - 1) val += trailMap[(x + 1) + y * width] * 0.0005;
+                    
+                    // Decay
+                    val *= DECAY_RATE;
+                    
+                    nextFrame[idx] = val;
+                }
+            }
+            
+            // Copy back
+            trailMap = nextFrame;
+        }
+
+        // Render
+        function render() {
+            // Pre-calculate colors
+            // We will map trailMap values to RGB
+            
+            for (let i = 0, len = trailMap.length; i < len; i++) {
+                const val = trailMap[i];
+                const pi = i << 2; // index * 4
+
+                if (val > 0.5) {
+                    // Simple thresholding and color mixing
+                    // Normalize 0.5 to 50 (approx max) to 0-1
+                    let t = Math.min(1, (val - 0.5) / 50);
+                    
+                    // Palette interpolation: Black -> Blue -> Orange
+                    // If t < 0.5: mix Black and Blue
+                    // If t >= 0.5: mix Blue and Orange
+                    
+                    let r, g, b;
+                    
+                    if (t < 0.5) {
+                        const localT = t * 2;
+                        r = COLOR_A[0] * localT;
+                        g = COLOR_A[1] * localT;
+                        b = COLOR_A[2] * localT;
+                    } else {
+                        const localT = (t - 0.5) * 2;
+                        // Interpolate between COLOR_A and COLOR_B
+                        r = COLOR_A[0] + (COLOR_B[0] - COLOR_A[0]) * localT;
+                        g = COLOR_A[1] + (COLOR_B[1] - COLOR_A[1]) * localT;
+                        b = COLOR_A[2] + (COLOR_B[2] - COLOR_A[2]) * localT;
+                    }
+                    
+                    pixels[pi] = r;
+                    pixels[pi + 1] = g;
+                    pixels[pi + 2] = b;
+                    pixels[pi + 3] = 255; // Alpha
+                } else {
+                    pixels[pi] = 0;
+                    pixels[pi + 1] = 0;
+                    pixels[pi + 2] = 0;
+                    pixels[pi + 3] = 255;
+                }
+            }
+            
+            ctx.putImageData(imageData, 0, 0);
+        }
+
+        // Main Loop
+        function loop() {
+            processAgents();
+            processFoods();
+            processPhysics();
+            render();
+            time++;
+            requestAnimationFrame(loop);
+        }
+
+        window.addEventListener('resize', resize);
+        resize();
+        loop();
+
+    </script>
+</body>
+</html>

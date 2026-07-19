@@ -11,7 +11,7 @@
             width: 100%;
             height: 100%;
             overflow: hidden;
-            background-color: #1a1815; /* Dirt color base */
+            background-color: #1a1a1a;
         }
         canvas {
             display: block;
@@ -21,29 +21,340 @@
 <body>
     <canvas id="simCanvas"></canvas>
     <script>
-        // --- Configuration ---
+        // Configuration
         const CONFIG = {
-            ants: 300,
-            foodRespawnRate: 0.05, // Chance to spawn food per frame
-            foodPerPile: 30,
-            maxFoodPiles: 15,
-            evaporationRate: 0.985,
-            pheromoneStrength: 80,
+            antCount: 400,
+            antSpeed: 1.5,
+            turnSpeed: 0.1,
+            sensorDistance: 25,
             sensorAngle: Math.PI / 4,
-            sensorDist: 20,
-            turnSpeed: 0.2,
-            antSpeed: 2,
-            antSize: 2,
-            nestRadius: 15,
-            gridScale: 1 // Lower for perf, higher for precision
+            evaporationRate: 0.985, // Lower = faster evaporation
+            depositRate: 1.0,
+            foodValue: 10,
+            foodSpawnRate: 2, // Frames between spawns
+            foodLife: 1000, // Frames food lasts
+            gridScale: 4, // Size of one pheromone grid cell in pixels
+            antSize: 3
         };
 
-        // --- Globals ---
         const canvas = document.getElementById('simCanvas');
-        const ctx = canvas.getContext('2d', { alpha: false });
+        const ctx = canvas.getContext('2d', { alpha: false }); // Optimize for no transparency
+
         let width, height;
-        
-        // Data structures
+        let cols, rows;
+        let pX, pY; // Pheromone grid dimensions
+        let gridW, gridH;
+
+        // Pheromone Grids (Float32 for precision)
+        // 0: Pheromone to Home (Red-ish/Heat)
+        // 1: Pheromone to Food (Green-ish/Cool)
+        let gridHome;
+        let gridFood;
+
+        // Simulation State
         let ants = [];
-        let foodPiles = [];
-        let nest =
+        let foods = [];
+        let frameCount = 0;
+
+        // Nest Position
+        let nest = { x: 0, y: 0 };
+
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            
+            // Center nest
+            nest.x = width / 2;
+            nest.y = height / 2;
+
+            // Initialize Grids
+            gridW = Math.ceil(width / CONFIG.gridScale);
+            gridH = Math.ceil(height / CONFIG.gridScale);
+            
+            // Using 1D array for performance
+            gridHome = new Float32Array(gridW * gridH);
+            gridFood = new Float32Array(gridW * gridH);
+        }
+
+        class Ant {
+            constructor() {
+                this.x = nest.x;
+                this.y = nest.y;
+                this.angle = Math.random() * Math.PI * 2;
+                this.hasFood = false;
+                this.wanderAngle = 0;
+            }
+
+            update() {
+                // 1. Sensing
+                this.sense();
+
+                // 2. Movement
+                // Slight random wandering noise
+                this.angle += (Math.random() - 0.5) * 0.2;
+                
+                this.x += Math.cos(this.angle) * CONFIG.antSpeed;
+                this.y += Math.sin(this.angle) * CONFIG.antSpeed;
+
+                // 3. Boundary wrapping/bouncing
+                if (this.x < 0) this.x = width;
+                if (this.x > width) this.x = 0;
+                if (this.y < 0) this.y = height;
+                if (this.y > height) this.y = 0;
+
+                // 4. Interactions
+                
+                // Found Food?
+                if (!this.hasFood) {
+                    for (let i = 0; i < foods.length; i++) {
+                        const f = foods[i];
+                        const dx = this.x - f.x;
+                        const dy = this.y - f.y;
+                        if (dx * dx + dy * dy < 100) { // 10px radius
+                            this.hasFood = true;
+                            f.amount--;
+                            if (f.amount <= 0) {
+                                foods.splice(i, 1);
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                // Reached Nest?
+                if (this.hasFood) {
+                    const distToNest = Math.hypot(this.x - nest.x, this.y - nest.y);
+                    if (distToNest < 15) { // Nest radius
+                        this.hasFood = false;
+                        // Don't turn around immediately, let the trail logic do it
+                    }
+                }
+
+                // 5. Deposit Pheromone
+                this.deposit();
+            }
+
+            sense() {
+                // Define sensor positions
+                const sensorLeftX = this.x + Math.cos(this.angle - CONFIG.sensorAngle) * CONFIG.sensorDistance;
+                const sensorLeftY = this.y + Math.sin(this.angle - CONFIG.sensorAngle) * CONFIG.sensorDistance;
+                
+                const sensorFrontX = this.x + Math.cos(this.angle) * CONFIG.sensorDistance;
+                const sensorFrontY = this.y + Math.sin(this.angle) * CONFIG.sensorDistance;
+                
+                const sensorRightX = this.x + Math.cos(this.angle + CONFIG.sensorAngle) * CONFIG.sensorDistance;
+                const sensorRightY = this.y + Math.sin(this.angle + CONFIG.sensorAngle) * CONFIG.sensorDistance;
+
+                const valLeft = this.getSensorValue(sensorLeftX, sensorLeftY);
+                const valFront = this.getSensorValue(sensorFrontX, sensorFrontY);
+                const valRight = this.getSensorValue(sensorRightX, sensorRightY);
+
+                // Steer based on strongest signal
+                if (valFront > valLeft && valFront > valRight) {
+                    this.angle += (Math.random() - 0.5) * 0.2; // Keep going straight
+                } else if (valFront < valLeft && valFront < valRight) {
+                    this.angle += (Math.random() - 0.5) * 0.4; // Confused
+                } else if (valFront > valRight) {
+                    this.angle -= CONFIG.turnSpeed;
+                } else if (valFront > valLeft) {
+                    this.angle += CONFIG.turnSpeed;
+                } else if (valLeft > valRight) {
+                    this.angle -= CONFIG.turnSpeed * 2;
+                } else if (valRight > valLeft) {
+                    this.angle += CONFIG.turnSpeed * 2;
+                }
+            }
+
+            getSensorValue(x, y) {
+                // Map world coords to grid
+                const gx = Math.floor(x / CONFIG.gridScale);
+                const gy = Math.floor(y / CONFIG.gridScale);
+
+                if (gx >= 0 && gx < gridW && gy >= 0 && gy < gridH) {
+                    const idx = gx + gy * gridW;
+                    // If carrying food, look for Home trail. If not, look for Food trail.
+                    return this.hasFood ? gridHome[idx] : gridFood[idx];
+                }
+                return 0;
+            }
+
+            deposit() {
+                // Map current pos to grid
+                const gx = Math.floor(this.x / CONFIG.gridScale);
+                const gy = Math.floor(this.y / CONFIG.gridScale);
+
+                if (gx >= 0 && gx < gridW && gy >= 0 && gy < gridH) {
+                    const idx = gx + gy * gridW;
+                    
+                    // Deposit specific pheromone type
+                    if (this.hasFood) {
+                        // Leaving food -> Deposit "I have food" (to help others find food)
+                        gridFood[idx] = Math.min(gridFood[idx] + CONFIG.depositRate, 1.0);
+                    } else {
+                        // Returning home -> Deposit "I am home" (to help others find nest)
+                        gridHome[idx] = Math.min(gridHome[idx] + CONFIG.depositRate, 1.0);
+                    }
+                }
+            }
+        }
+
+        function init() {
+            resize();
+            for (let i = 0; i < CONFIG.antCount; i++) {
+                ants.push(new Ant());
+            }
+            // Initial food
+            spawnFood();
+            spawnFood();
+            spawnFood();
+            
+            requestAnimationFrame(loop);
+        }
+
+        function spawnFood() {
+            const margin = 50;
+            foods.push({
+                x: margin + Math.random() * (width - margin * 2),
+                y: margin + Math.random() * (height - margin * 2),
+                amount: CONFIG.foodValue
+            });
+        }
+
+        function update() {
+            // Evaporation
+            // To optimize, we iterate linearly
+            const totalCells = gridHome.length;
+            
+            for (let i = 0; i < totalCells; i++) {
+                // Apply evaporation. If value is low, remove it completely to avoid noise
+                if (gridHome[i] > 0) gridHome[i] *= CONFIG.evaporationRate;
+                if (gridHome[i] < 0.01) gridHome[i] = 0;
+
+                if (gridFood[i] > 0) gridFood[i] *= CONFIG.evaporationRate;
+                if (gridFood[i] < 0.01) gridFood[i] = 0;
+            }
+
+            // Update Ants
+            for (let ant of ants) {
+                ant.update();
+            }
+
+            // Spawn Food
+            frameCount++;
+            if (frameCount % CONFIG.foodSpawnRate === 0) {
+                if (foods.length < 10) {
+                    spawnFood();
+                }
+            }
+        }
+
+        function draw() {
+            // Clear Screen with dark background
+            ctx.fillStyle = '#1a1a1a';
+            ctx.fillRect(0, 0, width, height);
+
+            // --- Draw Pheromones ---
+            // We draw the entire grid as an image using ImageData for performance
+            const imgData = ctx.createImageData(width, height);
+            const data = imgData.data;
+
+            // We need to map the low-res grid to the high-res canvas.
+            // Optimization: Instead of per-pixel lookup in JS, we can use 'drawImage' scaling
+            // on an offscreen canvas, but for a single file, doing pixel manipulation directly 
+            // on the main canvas is complex. 
+            // Better approach for this constraint: Draw rectangles (inefficient) or use an offscreen canvas scaled up.
+            
+            const offCanvas = document.createElement('canvas');
+            offCanvas.width = gridW;
+            offCanvas.height = gridH;
+            const offCtx = offCanvas.getContext('2d');
+            const offImgData = offCtx.createImageData(gridW, gridH);
+            
+            // Fill grid into offscreen image data
+            for (let y = 0; y < gridH; y++) {
+                for (let x = 0; x < gridW; x++) {
+                    const idx = x + y * gridW;
+                    const pIdx = (x + y * gridW) * 4;
+                    
+                    const homeVal = gridHome[idx];
+                    const foodVal = gridFood[idx];
+
+                    // Color map: 
+                    // Home = Red/Orange (Warm)
+                    // Food = Green/Blue (Cool)
+                    // Overlap = Yellow/White
+                    
+                    // Simple Heatmap Logic:
+                    // Intensity is sum of both.
+                    // If Home > Food -> Redder. If Food > Home -> Greener.
+                    
+                    const sum = homeVal + foodVal;
+                    if (sum > 0.05) {
+                        // Normalize 0-1
+                        const r = Math.min(255, (homeVal * 1.5) * 255);
+                        const g = Math.min(255, (foodVal * 1.5) * 255);
+                        const b = Math.min(50, sum * 50); // Slight ambient blue
+                        const a = Math.min(255, sum * 255);
+
+                        offImgData.data[pIdx] = r;
+                        offImgData.data[pIdx + 1] = g;
+                        offImgData.data[pIdx + 2] = b;
+                        offImgData.data[pIdx + 3] = a;
+                    }
+                }
+            }
+
+            offCtx.putImageData(offImgData, 0, 0);
+
+            // Draw the scaled-up pheromone layer
+            ctx.imageSmoothingEnabled = true;
+            ctx.drawImage(offCanvas, 0, 0, width, height);
+
+            // --- Draw Food ---
+            ctx.fillStyle = '#4caf50';
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = '#4caf50';
+            for (let f of foods) {
+                const size = Math.sqrt(f.amount) * 2;
+                ctx.beginPath();
+                ctx.arc(f.x, f.y, size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            ctx.shadowBlur = 0;
+
+            // --- Draw Nest ---
+            ctx.fillStyle = '#222';
+            ctx.strokeStyle = '#444';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(nest.x, nest.y, 15, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+            
+            // Inner dot
+            ctx.fillStyle = '#000';
+            ctx.beginPath();
+            ctx.arc(nest.x, nest.y, 5, 0, Math.PI * 2);
+            ctx.fill();
+
+            // --- Draw Ants ---
+            ctx.fillStyle = '#fff';
+            for (let ant of ants) {
+                ctx.fillRect(ant.x, ant.y, CONFIG.antSize, CONFIG.antSize);
+            }
+        }
+
+        function loop() {
+            update();
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        window.addEventListener('resize', resize);
+        init();
+
+    </script>
+</body>
+</html>

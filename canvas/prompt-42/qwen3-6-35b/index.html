@@ -42,4 +42,467 @@
                 player: '#6b8c42',
                 playerHighlight: '#8fa863',
                 enemy: '#8b3a3a',
-                enemyLight
+                enemyLight: '#a84e4e',
+                zombie: '#4a5e4a',
+                blood: '#8a1c1c',
+                spark: '#ffcc00',
+                smoke: 'rgba(100, 100, 100, 0.4)'
+            }
+        };
+
+        // --- Setup ---
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        let width, height;
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // --- Utilities ---
+        const rand = (min, max) => Math.random() * (max - min) + min;
+        const dist = (x1, y1, x2, y2) => Math.hypot(x2 - x1, y2 - y1);
+        const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
+        const lerp = (start, end, t) => start * (1 - t) + end * t;
+        const getAngle = (x1, y1, x2, y2) => Math.atan2(y2 - y1, x2 - x1);
+
+        // --- World Generation ---
+        const obstacles = [];
+        const markers = []; // Skid marks, blood, etc.
+        
+        function initWorld() {
+            // Generate Obstacles
+            for (let i = 0; i < CONFIG.obstacleCount; i++) {
+                obstacles.push({
+                    x: rand(0, CONFIG.worldWidth),
+                    y: rand(0, CONFIG.worldHeight),
+                    radius: rand(15, 50),
+                    type: Math.random() > 0.5 ? 'rock' : 'wreck'
+                });
+            }
+            // Generate Background Noise (Cracks/Patches)
+            const noiseCanvas = document.createElement('canvas');
+            noiseCanvas.width = width;
+            noiseCanvas.height = height;
+            const nCtx = noiseCanvas.getContext('2d');
+            nCtx.fillStyle = CONFIG.colors.ground;
+            nCtx.fillRect(0, 0, width, height);
+            nCtx.lineWidth = 2;
+            nCtx.strokeStyle = CONFIG.colors.crack;
+            for (let i = 0; i < 200; i++) {
+                nCtx.beginPath();
+                let lx = rand(0, width);
+                let ly = rand(0, height);
+                nCtx.moveTo(lx, ly);
+                for (let j = 0; j < 5; j++) {
+                    lx += rand(-20, 20);
+                    ly += rand(-20, 20);
+                    nCtx.lineTo(lx, ly);
+                }
+                nCtx.stroke();
+            }
+            // Store noise for infinite scrolling
+            CONFIG.noiseImage = ctx.createPattern(noiseCanvas, 'repeat');
+        }
+        initWorld();
+
+        // --- Entities ---
+
+        // Particles System
+        const particles = [];
+        const MAX_PARTICLES = 500;
+
+        function createParticle(x, y, color, life, speed, angle, size) {
+            if (particles.length > MAX_PARTICLES) particles.shift();
+            particles.push({
+                x, y, color, life, maxLife: life,
+                vx: Math.cos(angle) * speed,
+                vy: Math.sin(angle) * speed,
+                size: size || 2
+            });
+        }
+
+        function createExplosion(x, y, count, color) {
+            for (let i = 0; i < count; i++) {
+                createParticle(x, y, color, rand(0.5, 1.0), rand(50, 200), rand(0, Math.PI * 2), rand(2, 5));
+            }
+        }
+
+        // Player
+        const player = {
+            x: CONFIG.worldWidth / 2,
+            y: CONFIG.worldHeight / 2,
+            vx: 0, vy: 0,
+            angle: 0,
+            health: CONFIG.playerHealth,
+            targetX: CONFIG.worldWidth / 2,
+            targetY: CONFIG.worldHeight / 2,
+            cooldown: 0,
+            stuckTimer: 0,
+            dead: false,
+            respawnTimer: 0
+        };
+
+        // Zombies
+        const zombies = [];
+        for (let i = 0; i < CONFIG.zombieCount; i++) {
+            zombies.push(createZombie());
+        }
+
+        function createZombie(x, y) {
+            // If x/y provided, spawn there, else random
+            const spawnX = x || rand(0, CONFIG.worldWidth);
+            const spawnY = y || rand(0, CONFIG.worldHeight);
+            return {
+                x: spawnX, y: spawnY,
+                vx: 0, vy: 0,
+                angle: rand(0, Math.PI * 2),
+                alive: true,
+                state: 'wander',
+                targetX: spawnX, targetY: spawnY,
+                timer: rand(0, 3)
+            };
+        }
+
+        // Enemy Cars
+        const enemyCars = [];
+        for (let i = 0; i < CONFIG.enemyCarCount; i++) {
+            enemyCars.push({
+                x: 0, y: 0,
+                vx: 0, vy: 0,
+                angle: 0,
+                health: 40,
+                active: false,
+                state: 'inactive', // inactive, enter, attack, retreat, explode
+                timer: 0
+            });
+        }
+
+        // --- Logic Helpers ---
+
+        function resolveCollision(entity, obstacles, isPlayer) {
+            for (let obs of obstacles) {
+                const d = dist(entity.x, entity.y, obs.x, obs.y);
+                const minDist = (entity.radius || 10) + obs.radius;
+                if (d < minDist) {
+                    const angle = getAngle(obs.x, obs.y, entity.x, entity.y);
+                    const overlap = minDist - d;
+                    
+                    // Push out
+                    entity.x += Math.cos(angle) * overlap;
+                    entity.y += Math.sin(angle) * overlap;
+                    
+                    // Bounce/Skid
+                    if (isPlayer) {
+                        entity.vx *= 0.5;
+                        entity.vy *= 0.5;
+                        createParticle(entity.x, entity.y, CONFIG.colors.spark, 0.5, 100, angle, 3);
+                        if (entity.health > 0) entity.health -= 0.5; // Take damage
+                    } else {
+                        entity.vx *= 0.7;
+                        entity.vy *= 0.7;
+                    }
+                }
+            }
+        }
+
+        // --- Updates ---
+
+        function update(dt) {
+            if (player.dead) {
+                player.respawnTimer -= dt;
+                if (player.respawnTimer <= 0) {
+                    player.dead = false;
+                    player.x = rand(200, CONFIG.worldWidth - 200);
+                    player.y = rand(200, CONFIG.worldHeight - 200);
+                    player.vx = 0; player.vy = 0;
+                    player.health = CONFIG.playerHealth;
+                    player.cooldown = 0;
+                    createExplosion(player.x, player.y, 50, CONFIG.colors.spark);
+                }
+                return;
+            }
+
+            // 1. Player Logic
+            // Roaming
+            if (dist(player.x, player.y, player.targetX, player.targetY) < 100) {
+                // Pick new target
+                const angle = rand(0, Math.PI * 2);
+                const distToTarget = rand(200, 800);
+                player.targetX = clamp(player.x + Math.cos(angle) * distToTarget, 50, CONFIG.worldWidth - 50);
+                player.targetY = clamp(player.y + Math.sin(angle) * distToTarget, 50, CONFIG.worldHeight - 50);
+            }
+
+            // Steering
+            const targetAngle = getAngle(player.x, player.y, player.targetX, player.targetY);
+            let diff = targetAngle - player.angle;
+            while (diff < -Math.PI) diff += Math.PI * 2;
+            while (diff > Math.PI) diff -= Math.PI * 2;
+            
+            // Smooth rotation
+            player.angle += diff * CONFIG.playerTurnSpeed * dt;
+
+            // Physics
+            const thrust = Math.cos(diff) * CONFIG.playerSpeed; // Only thrust forward-ish
+            player.vx += Math.cos(player.angle) * thrust * dt;
+            player.vy += Math.sin(player.angle) * thrust * dt;
+
+            // Friction
+            player.vx *= CONFIG.playerFriction;
+            player.vy *= CONFIG.playerFriction;
+
+            // Move
+            player.x += player.vx * dt;
+            player.y += player.vy * dt;
+
+            // World Boundaries
+            player.x = clamp(player.x, 10, CONFIG.worldWidth - 10);
+            player.y = clamp(player.y, 10, CONFIG.worldHeight - 10);
+
+            resolveCollision(player, obstacles, true);
+
+            // Skid marks
+            if (Math.abs(diff) > 0.5 || dist(player.x, player.y, player.targetX, player.targetY) < 10) {
+                if (Math.random() > 0.5) {
+                    markers.push({
+                        x: player.x, y: player.y, 
+                        angle: player.angle, 
+                        life: 5.0, 
+                        type: 'skid',
+                        w: 4, h: 8
+                    });
+                }
+            }
+
+            // 2. Combat & Logic
+
+            // Auto Fire
+            player.cooldown -= dt;
+            if (player.cooldown <= 0) {
+                let nearest = null;
+                let minDist = 400; // Range
+
+                // Find nearest zombie
+                for (let z of zombies) {
+                    if (!z.alive) continue;
+                    const d = dist(player.x, player.y, z.x, z.y);
+                    if (d < minDist) {
+                        minDist = d;
+                        nearest = z;
+                    }
+                }
+                // Find nearest enemy car
+                for (let e of enemyCars) {
+                    if (!e.active) continue;
+                    const d = dist(player.x, player.y, e.x, e.y);
+                    if (d < minDist) {
+                        minDist = d;
+                        nearest = e;
+                    }
+                }
+
+                if (nearest) {
+                    player.cooldown = 0.15;
+                    // Line of fire visual
+                    markers.push({
+                        x1: player.x, y1: player.y,
+                        x2: nearest.x, y2: nearest.y,
+                        life: 0.1, type: 'bullet'
+                    });
+                    
+                    // Hit Logic
+                    if (nearest.type === 'zombie') {
+                        nearest.alive = false;
+                        createParticle(nearest.x, nearest.y, CONFIG.colors.blood, 1, 100, rand(0, Math.PI*2), 3);
+                        // Reset zombie
+                        setTimeout(() => Object.assign(nearest, createZombie()), 500);
+                    } else if (nearest.type === 'enemy') {
+                        nearest.health -= 20;
+                        createParticle(nearest.x, nearest.y, CONFIG.colors.spark, 0.5, 50, rand(0, Math.PI*2), 2);
+                        if (nearest.health <= 0) {
+                            nearest.active = false;
+                            nearest.state = 'explode';
+                            createExplosion(nearest.x, nearest.y, 30, CONFIG.colors.spark);
+                        }
+                    }
+                }
+            }
+
+            // Collision with Zombies (Run over)
+            let swarmCount = 0;
+            for (let z of zombies) {
+                if (!z.alive) continue;
+                const d = dist(player.x, player.y, z.x, z.y);
+                if (d < (player.radius + CONFIG.zombieRadius)) {
+                    // Impact
+                    z.alive = false;
+                    createParticle(z.x, z.y, CONFIG.colors.blood, 1.0, 100, rand(0, Math.PI*2), 3);
+                    player.vx *= 0.9; player.vy *= 0.9; // Slow down
+                    player.health -= 0.2; // Minor damage
+                    markers.push({x: z.x, y: z.y, life: 2.0, type: 'blood'});
+                    setTimeout(() => Object.assign(z, createZombie()), 200);
+                }
+            }
+
+            // Swarm Damage
+            for (let z of zombies) if (z.alive) {
+                 const d = dist(player.x, player.y, z.x, z.y);
+                 if (d < 80) swarmCount++;
+            }
+            if (swarmCount > 5) player.health -= (swarmCount - 5) * dt * 2;
+
+            if (player.health <= 0) {
+                player.dead = true;
+                player.respawnTimer = 2.0;
+                createExplosion(player.x, player.y, 100, '#ffaa00');
+            }
+
+            // 3. Zombies Update
+            for (let z of zombies) {
+                if (!z.alive) continue;
+                
+                // State Machine
+                z.timer -= dt;
+                const dToPlayer = dist(z.x, z.y, player.x, player.y);
+
+                if (dToPlayer < 200) {
+                    z.state = 'chase';
+                } else if (z.state === 'chase' && dToPlayer > 400) {
+                    z.state = 'wander';
+                }
+
+                if (z.state === 'chase') {
+                    const angle = getAngle(z.x, z.y, player.x, player.y);
+                    z.vx = Math.cos(angle) * CONFIG.zombieSpeed;
+                    z.vy = Math.sin(angle) * CONFIG.zombieSpeed;
+                } else {
+                    if (z.timer <= 0) {
+                        z.targetX = z.x + rand(-100, 100);
+                        z.targetY = z.y + rand(-100, 100);
+                        z.timer = rand(1, 3);
+                    }
+                    const angle = getAngle(z.x, z.y, z.targetX, z.targetY);
+                    z.vx = Math.cos(angle) * (CONFIG.zombieSpeed * 0.3);
+                    z.vy = Math.sin(angle) * (CONFIG.zombieSpeed * 0.3);
+                }
+
+                z.x += z.vx * dt;
+                z.y += z.vy * dt;
+                
+                // Simple obstacle push
+                resolveCollision(z, obstacles, false);
+
+                // Bounds
+                z.x = clamp(z.x, 0, CONFIG.worldWidth);
+                z.y = clamp(z.y, 0, CONFIG.worldHeight);
+            }
+
+            // 4. Enemy Cars Update
+            // Spawn logic
+            const activeEnemies = enemyCars.filter(e => e.active).length;
+            if (activeEnemies < 3 && Math.random() < 0.01) {
+                const e = enemyCars.find(e => !e.active);
+                if (e) {
+                    e.active = true;
+                    e.state = 'enter';
+                    e.type = 'enemy';
+                    // Spawn far away
+                    const angle = rand(0, Math.PI*2);
+                    const distSpawn = 800;
+                    e.x = player.x + Math.cos(angle) * distSpawn;
+                    e.y = player.y + Math.sin(angle) * distSpawn;
+                    e.vx = 0; e.vy = 0;
+                    e.health = 40;
+                    e.timer = 0;
+                }
+            }
+
+            for (let e of enemyCars) {
+                if (!e.active) continue;
+
+                const dToPlayer = dist(e.x, e.y, player.x, player.y);
+
+                // State Machine
+                if (e.state === 'enter') {
+                    if (dToPlayer < 600) e.state = 'attack';
+                } else if (e.state === 'attack') {
+                    // Strafe
+                    e.timer -= dt;
+                    if (e.timer <= 0) {
+                        e.strafeDir = Math.random() > 0.5 ? 1 : -1;
+                        e.timer = rand(1, 2);
+                    }
+                    
+                    // Aim slightly ahead of player + offset
+                    const strafeAngle = getAngle(e.x, e.y, player.x, player.y) + (e.strafeDir * 1.5);
+                    const targetX = player.x + Math.cos(strafeAngle) * 200;
+                    const targetY = player.y + Math.sin(strafeAngle) * 200;
+
+                    // Steering
+                    let targetAngle = getAngle(e.x, e.y, targetX, targetY);
+                    let diff = targetAngle - e.angle;
+                    while (diff < -Math.PI) diff += Math.PI * 2;
+                    while (diff > Math.PI) diff -= Math.PI * 2;
+                    e.angle += diff * 2.0 * dt;
+
+                    // Move
+                    e.vx += Math.cos(e.angle) * CONFIG.enemyCarSpeed * 0.5 * dt;
+                    e.vy += Math.sin(e.angle) * CONFIG.enemyCarSpeed * 0.5 * dt;
+                    e.vx *= 0.95; e.vy *= 0.95;
+                    e.x += e.vx * dt;
+                    e.y += e.vy * dt;
+
+                    // Shoot Player
+                    if (Math.random() < 0.02 && dToPlayer < 500) {
+                        markers.push({
+                            x1: e.x, y1: e.y,
+                            x2: player.x, y2: player.y,
+                            life: 0.1, type: 'bullet'
+                        });
+                        // Hit player?
+                        if (Math.random() < 0.1) {
+                            player.health -= 2;
+                            createParticle(player.x, player.y, CONFIG.colors.spark, 0.5, 50, 0, 2);
+                        }
+                    }
+
+                    if (e.health <= 0) {
+                        e.active = false;
+                        e.state = 'explode';
+                        createExplosion(e.x, e.y, 40, CONFIG.colors.spark);
+                    }
+                } else if (e.state === 'retreat' || dToPlayer > 900) {
+                    const angle = getAngle(e.x, e.y, player.x, player.y);
+                    e.vx = Math.cos(angle + Math.PI) * CONFIG.enemyCarSpeed;
+                    e.vy = Math.sin(angle + Math.PI) * CONFIG.enemyCarSpeed;
+                    e.x += e.vx * dt;
+                    e.y += e.vy * dt;
+                    e.active = false; // Done
+                }
+
+                resolveCollision(e, obstacles, false);
+
+                // Collision with Zombies (Enemies run them over too)
+                for (let z of zombies) {
+                    if (!z.alive) continue;
+                    if (dist(e.x, e.y, z.x, z.y) < (15 + CONFIG.zombieRadius)) {
+                         z.alive = false;
+                         createParticle(z.x, z.y, CONFIG.colors.blood, 1.0, 100, rand(0, Math.PI*2), 3);
+                    }
+                }
+            }
+
+            // 5. Particle & Marker Update
+            for (let i = particles.length - 1; i >= 0; i--) {
+                let p = particles[i];
+                p.x += p.vx * dt;
+                p.y += p.vy * dt;
+                p.life -= dt;
+                if (p.life <= 0) particles.splice(i, 1);
+            }
+
+            for (let i = markers.length - 1; i >= 0; i--) {
+                markers[i].life -= dt

@@ -34,4 +34,433 @@
         crossWalk: 20,
         pedSpeed: 1.2,
         busSpeed: 2.5,
-        carSpeed
+        carSpeed: 3.5,
+        accel: 0.05,
+        brake: 0.15,
+        safeDist: 15,
+        yellowTime: 100, // frames
+        redTime: 120,    // frames
+        minGreen: 200,   // frames
+        detectDist: 800, // How far back to look for cars
+        detectionGap: 150 // How far apart cars need to be to count
+    };
+
+    // --- SETUP CANVAS ---
+    const canvas = document.getElementById('sim');
+    const ctx = canvas.getContext('2d');
+    const uiQ = document.getElementById('q-count');
+    const uiBus = document.getElementById('bus-status');
+
+    function resize() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // --- UTILS ---
+    const { PI, sin, cos, abs, floor, min, max, random } = Math;
+    const rand = (min, max) => random() * (max - min) + min;
+
+    // --- CLASSES ---
+
+    class Vector {
+        constructor(x, y) { this.x = x; this.y = y; }
+    }
+
+    class Car {
+        constructor(direction, type = 'car') {
+            this.direction = direction; // 0: Up, 1: Right, 2: Down, 3: Left
+            this.type = type;
+            this.color = type === 'bus' ? '#FFD700' : `hsl(${rand(0, 360)}, 70%, 50%)`;
+            this.w = type === 'bus' ? 40 : CFG.carW;
+            this.h = type === 'bus' ? 80 : CFG.carH;
+            
+            // Physics state
+            this.x = 0;
+            this.y = 0;
+            this.speed = 0;
+            this.lane = 0; // 0: Left (straight/left), 1: Right (straight only)
+            this.turning = false; // Is it a left turn?
+            this.targetX = 0;
+            this.targetY = 0;
+            this.finished = false;
+            
+            // Logic state
+            this.waiting = false;
+            this.stopping = false;
+
+            this.initPosition();
+        }
+
+        initPosition() {
+            const cx = canvas.width / 2;
+            const cy = canvas.height / 2;
+            
+            // Spawning offsets
+            const offset = (this.lane === 0) ? -CFG.laneW/2 : CFG.laneW/2;
+            
+            // Initial spawn far away
+            let startX = cx; 
+            let startY = cy;
+
+            if (this.direction === 0) { // Moving Up (from bottom)
+                startX = cx + offset;
+                startY = cy + CFG.headStart + (this.lane === 1 ? -30 : 0); 
+            } else if (this.direction === 1) { // Moving Right (from left)
+                startX = cx - CFG.headStart - (this.lane === 1 ? -30 : 0);
+                startY = cy + offset;
+            } else if (this.direction === 2) { // Moving Down (from top)
+                startX = cx + offset;
+                startY = cy - CFG.headStart;
+            } else if (this.direction === 3) { // Moving Left (from right)
+                startX = cx + CFG.headStart;
+                startY = cy + offset;
+            }
+
+            this.x = startX;
+            this.y = startY;
+            
+            // If spawning near an intersection, check if we need to turn
+            if (CFG.headStart < 400) {
+                 // Logic for left turn lane assignment happens at spawn
+            }
+        }
+
+        update(lights, cars) {
+            if (this.finished) return;
+
+            // 1. Determine Intent & Geometry
+            const cx = canvas.width / 2;
+            const cy = canvas.height / 2;
+            
+            // Determine if turning left
+            if (!this.turning && (this.lane === 0) && (this.direction !== 0)) {
+                // 50% chance to turn left if in left lane and not facing North (North doesn't turn left in this sim logic usually, but let's allow all lefts)
+                if (random() < 0.4) this.turning = true;
+            }
+            
+            // If we turned, update direction
+            if (this.turning) {
+                // If going UP(0) -> turn LEFT(3)
+                // If going RIGHT(1) -> turn UP(0)
+                // If going DOWN(2) -> turn RIGHT(1)
+                // If going LEFT(3) -> turn DOWN(2)
+                this.targetDir = (this.direction + 3) % 4;
+            } else {
+                this.targetDir = this.direction;
+            }
+
+            // 2. Identify Target Stop Line (if not turning) or Turn Center
+            let stopDist = CFG.stopLine;
+            let turnCenter = { x: 0, y: 0 };
+
+            if (this.turning) {
+                // Define center of turn based on entry direction
+                // Up(0) -> turn left, center is TopLeft quadrant
+                // Right(1) -> turn up, center is TopRight
+                // Down(2) -> turn right, center is BottomRight
+                // Left(3) -> turn down, center is BottomLeft
+                const dist = 40; // Radius of turn
+                if(this.direction === 0) turnCenter = { x: cx - dist, y: cy - dist }; // Turn Left
+                if(this.direction === 1) turnCenter = { x: cx + dist, y: cy - dist }; // Turn Up
+                if(this.direction === 2) turnCenter = { x: cx + dist, y: cy + dist }; // Turn Right
+                if(this.direction === 3) turnCenter = { x: cx - dist, y: cy + dist }; // Turn Down
+            }
+
+            // 3. Determine Speed Limit (Red/Yellow Light)
+            let red = false;
+            
+            // Check traffic light for current lane
+            let currentLight = lights[this.direction];
+            if (this.turning) {
+                 // If turning, we follow the light of the street we are entering? 
+                 // Usually left turns yield or have green arrow. Here: Green means go.
+                 // Let's assume standard light controls entry.
+                 currentLight = lights[this.direction];
+            }
+
+            if (currentLight.state === 'RED' || currentLight.state === 'YELLOW') {
+                red = true;
+            }
+
+            // Calculate stop position
+            let desiredX, desiredY;
+            
+            if (this.turning) {
+                // For turning, "stopping" is tricky. Usually you don't stop for left turn unless crossing traffic.
+                // Simplified: Turning cars do not stop for their own light, they yield. 
+                // But let's simplify: Turning cars merge.
+                desiredX = cx; 
+                desiredY = cy;
+                stopDist = 0; // They drive through center
+            } else {
+                // Calculate distance to stop line
+                if (this.direction === 0) { desiredX = cx + (this.lane === 0 ? -CFG.laneW/2 : CFG.laneW/2); desiredY = cy + stopDist; }
+                if (this.direction === 1) { desiredX = cx - stopDist; desiredY = cy + (this.lane === 0 ? -CFG.laneW/2 : CFG.laneW/2); }
+                if (this.direction === 2) { desiredX = cx + (this.lane === 0 ? -CFG.laneW/2 : CFG.laneW/2); desiredY = cy - stopDist; }
+                if (this.direction === 3) { desiredX = cx + stopDist; desiredY = cy + (this.lane === 0 ? -CFG.laneW/2 : CFG.laneW/2); }
+            }
+
+            let distToStop = 9999;
+            if (!this.turning) {
+                distToStop = Math.hypot(this.x - desiredX, this.y - desiredY);
+            }
+
+            // 4. Car Following Logic (Find car ahead)
+            let brakingDist = 0;
+            let leadSpeed = this.speed; // Default no car ahead
+            
+            // Find closest car in same lane/direction
+            // If turning, look for cars in target lane
+            let closestCar = null;
+            let minDist = 9999;
+
+            for (let other of cars) {
+                if (other === this || other.finished || other.type === 'ped') continue;
+                
+                // Check if in same lane
+                if (other.lane === this.lane) {
+                    let d = 0;
+                    if (this.turning) {
+                         // Distance to target (center of turn)
+                         d = Math.hypot(other.x - desiredX, other.y - desiredY);
+                    } else {
+                        d = Math.hypot(other.x - desiredX, other.y - desiredY);
+                    }
+                    
+                    // Only care about cars ahead
+                    // If not turning, need to check Z coordinate logic roughly
+                    if (!this.turning) {
+                         if (this.direction === 0 && other.y > this.y) continue; // other is behind
+                         if (this.direction === 1 && other.x < this.x) continue;
+                         if (this.direction === 2 && other.y < this.y) continue;
+                         if (this.direction === 3 && other.x > this.x) continue;
+                    }
+                    
+                    // If turning, calculate distance along path. 
+                    // Simplified: Euclidean to center.
+                    if (this.turning) {
+                        if (Math.hypot(other.x - this.x, other.y - this.y) < 50) continue; // Don't look at self
+                    }
+
+                    if (d < minDist) {
+                        minDist = d;
+                        closestCar = other;
+                    }
+                }
+            }
+
+            if (closestCar) {
+                // Distance to car ahead
+                let gap = Math.hypot(this.x - closestCar.x, this.y - closestCar.y);
+                
+                // If we are turning and the car ahead is also turning, gap might be deceptive
+                // But for simple sim, Euclidean gap works okay if we treat them as points
+                
+                if (this.turning) {
+                    // If we are turning, we care about gap to car entering same lane
+                    if (closestCar.direction === this.targetDir || closestCar.turning) {
+                         // This logic is complex. Let's just use gap.
+                         // If car ahead is turning left too, gap is distance.
+                         // We want to maintain distance.
+                         if (gap < CFG.safeDist + 20) { // Large gap for turns
+                             leadSpeed = closestCar.speed;
+                         }
+                    }
+                } else {
+                    // Straight lane logic
+                    // Calculate actual distance along vector
+                    if (this.direction === 0 && closestCar.y > this.y) brakingDist = closestCar.y - this.y;
+                    if (this.direction === 1 && closestCar.x < this.x) brakingDist = this.x - closestCar.x;
+                    if (this.direction === 2 && closestCar.y < this.y) brakingDist = this.y - closestCar.y;
+                    if (this.direction === 3 && closestCar.x > this.x) brakingDist = closestCar.x - this.x;
+                    
+                    if (brakingDist < CFG.detectDist) {
+                        leadSpeed = closestCar.speed;
+                    }
+                }
+            }
+
+            // 5. Decision Logic
+            let targetSpeed = CFG.carSpeed * (this.type === 'bus' ? 0.7 : 1);
+            
+            if (this.turning) {
+                targetSpeed = 1.5; // Slow for turn
+                brakingDist = 0; // Turning logic handled by 'gap' logic above
+            }
+
+            // Braking for Light
+            if (red && !this.turning && distToStop > 0 && distToStop < 300) {
+                // If yellow, only brake if close enough to stop safely
+                if (currentLight.state === 'YELLOW' && distToStop > 150) {
+                    // Late yellow, ignore
+                } else {
+                    targetSpeed = 0;
+                    brakingDist = min(brakingDist, distToStop);
+                }
+            }
+
+            // Apply Physics
+            if (brakingDist < CFG.safeDist + 5) {
+                // Brake
+                if (this.speed > 0) this.speed -= CFG.brake;
+            } else {
+                // Accelerate
+                if (this.speed < targetSpeed) this.speed += CFG.accel;
+                if (this.speed > targetSpeed) this.speed -= CFG.brake; // Over speed correction
+            }
+            
+            // Clamp speed
+            this.speed = max(0, min(this.speed, targetSpeed));
+
+            // Move
+            let moveX = 0;
+            let moveY = 0;
+            
+            if (this.turning) {
+                // Move towards center
+                const angle = Math.atan2(desiredX - this.x, desiredY - this.y); // Note: x,y swapped for atan2 usage if treating x as horiz
+                // Actually standard atan2(y, x)
+                const angle2 = Math.atan2(desiredY - this.y, desiredX - this.x);
+                
+                // Just move towards center for simplicity of turning visualization
+                // In a real sim we'd follow a curve.
+                // Let's move towards center, then towards exit.
+                
+                // Simple heuristic: Move to center, then rotate, then move out.
+                // But continuous movement is better.
+                // Move towards (cx, cy)
+                const dist = Math.hypot(desiredX - this.x, desiredY - this.y);
+                if (dist > 5) {
+                     moveX = cos(angle2) * this.speed;
+                     moveY = sin(angle2) * this.speed;
+                } else {
+                    // We are at center, now move towards exit lane
+                    // Exit lane is perpendicular to entry
+                    let exitX = cx, exitY = cy;
+                    if (this.targetDir === 0) exitY = cy - 1000;
+                    if (this.targetDir === 1) exitX = cx + 1000;
+                    if (this.targetDir === 2) exitY = cy + 1000;
+                    if (this.targetDir === 3) exitX = cx - 1000;
+                    
+                    const eAngle = Math.atan2(exitY - this.y, exitX - this.x);
+                    moveX = cos(eAngle) * this.speed;
+                    moveY = sin(eAngle) * this.speed;
+                    
+                    if (dist > 1000) this.finished = true;
+                }
+            } else {
+                if (this.direction === 0) moveY = -this.speed;
+                if (this.direction === 1) moveX = this.speed;
+                if (this.direction === 2) moveY = this.speed;
+                if (this.direction === 3) moveX = -this.speed;
+            }
+
+            this.x += moveX;
+            this.y += moveY;
+            
+            // Cull cars far off screen
+            if (this.x < -500 || this.x > canvas.width + 500 || this.y < -500 || this.y > canvas.height + 500) {
+                this.finished = true;
+            }
+        }
+
+        draw(ctx) {
+            ctx.save();
+            ctx.translate(this.x, this.y);
+            
+            // Rotation
+            let angle = 0;
+            if (this.turning) {
+                // Approximate rotation based on position relative to center
+                // This is a visual hack
+                angle = Math.atan2(canvas.height/2 - this.y, canvas.width/2 - this.x) + PI/2;
+                if (this.direction === 1) angle -= PI/2; // Fix offset
+                if (this.direction === 2) angle -= PI;
+                if (this.direction === 3) angle += PI/2;
+            } else {
+                if (this.direction === 1) angle = PI/2;
+                if (this.direction === 2) angle = PI;
+                if (this.direction === 3) angle = -PI/2;
+            }
+            ctx.rotate(angle);
+
+            // Draw Car Body
+            ctx.fillStyle = this.color;
+            // Headlights on top (relative to rotation)
+            ctx.fillRect(-this.w/2, -this.h/2, this.w, this.h);
+            
+            // Windshield
+            ctx.fillStyle = '#111';
+            ctx.fillRect(-this.w/2 + 2, -this.h/4, this.w - 4, this.h/4);
+            
+            // Headlights
+            ctx.fillStyle = '#fff';
+            ctx.shadowColor = '#fff';
+            ctx.shadowBlur = 5;
+            ctx.fillRect(-this.w/2 + 2, -this.h/2, 6, 4);
+            ctx.fillRect(this.w/2 - 8, -this.h/2, 6, 4);
+            ctx.shadowBlur = 0;
+            
+            // Brake lights
+            if (this.speed < 0.1) {
+                ctx.fillStyle = '#f00';
+                ctx.shadowColor = '#f00';
+                ctx.shadowBlur = 5;
+                ctx.fillRect(-this.w/2 + 2, this.h/2 - 4, 6, 4);
+                ctx.fillRect(this.w/2 - 8, this.h/2 - 4, 6, 4);
+                ctx.shadowBlur = 0;
+            }
+
+            ctx.restore();
+        }
+    }
+
+    class TrafficLight {
+        constructor() {
+            this.state = 'RED'; // RED, YELLOW, GREEN
+            this.timer = 0;
+            this.queue = 0; // Cars waiting
+        }
+    }
+
+    class Pedestrian {
+        constructor() {
+            this.reset();
+            this.finished = false;
+        }
+
+        reset() {
+            const side = floor(random() * 4); // 0:Top, 1:Right, 2:Bottom, 3:Left
+            const cx = canvas.width/2;
+            const cy = canvas.height/2;
+            
+            // Pick a crossing
+            // 0: Top sidewalk to Bottom sidewalk (Crosses East-West roads)
+            // 1: Right sidewalk to Left sidewalk (Crosses North-South roads)
+            
+            this.crossingDir = side; // 0 or 2 for vertical crossing, 1 or 3 for horizontal
+            
+            if (side === 0) { // Top Left corner
+                this.x = cx - CFG.roadW/2 - 10;
+                this.y = cy - CFG.roadW/2 - 10;
+                this.targetX = cx + CFG.roadW/2 + 10;
+                this.targetY = this.y;
+                this.dir = 1; // Facing Right
+            } else if (side === 1) { // Top Right
+                this.x = cx + CFG.roadW/2 + 10;
+                this.y = cy - CFG.roadW/2 - 10;
+                this.targetX = cx - CFG.roadW/2 - 10;
+                this.targetY = this.y;
+                this.dir = 3; // Facing Left
+            } else if (side === 2) { // Bottom Right
+                this.x = cx + CFG.roadW/2 + 10;
+                this.y = cy + CFG.roadW/2 + 10;
+                this.targetX = cx - CFG.roadW/2 - 10;
+                this.targetY = this.y;
+                this.dir = 3; // Facing Left
+            } else { // Bottom Left
+                this.x = cx - CFG.roadW/2 - 10;
+                this.y = cy + CFG.roadW/2 + 10;
+                this.targetX = cx + CFG.roadW/2

@@ -17,31 +17,459 @@
     </style>
 </head>
 <body>
-<canvas id="scene"></canvas>
+<canvas id="canvas"></canvas>
 <script>
 /**
- * Minimalist Procedural Forest
- * A side-scrolling generative art piece.
- * 
- * Logic:
- * 1. Scene Setup: 2048x2048 canvas.
- * 2. Season Cycle: Interpolates colors between Winter, Spring, Summer, Fall.
- * 3. Entities:
- *    - Trees: Procedurally drawn with trunks and canopies.
- *    - Creatures: Minimalist vector shapes (circles/lines).
- *    - Particles: Leaves, snow, pollen, fireflies.
- * 4. Depth: X-axis is side-scrolling. Y-axis is depth (lower = closer).
- *    Speed is mapped to Y position.
+ * PROCEDURAL FOREST SCENE
+ * A minimalist generative art piece cycling through seasons.
  */
 
-const canvas = document.getElementById('scene');
-const ctx = canvas.getContext('2d');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d', { alpha: false });
 
 // --- Configuration ---
-const WIDTH = 2048;
-const HEIGHT = 2048;
-const GROUND_HEIGHT_RATIO = 0.75; // Ground takes up bottom 75%
-const SKY_HEIGHT = HEIGHT * 0.25;
-const HORIZON_Y = SKY_HEIGHT;
+const YEAR_DURATION = 20000; // ms for a full cycle
+const TREE_COUNT = 150;
+const CREATURE_COUNT = 12;
 
-// Season Timing (in seconds)
+// --- Math Helpers ---
+const lerp = (a, b, t) => a + (b - a) * t;
+const dist = (x1, y1, x2, y2) => Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
+
+/**
+ * Interpolate between two colors (hex) based on progress t.
+ */
+const lerpColor = (hex1, hex2, t) => {
+    const hex = (str) => parseInt(str, 16);
+    const r1 = hex(hex1.slice(0, 2)), g1 = hex(hex1.slice(2, 4)), b1 = hex(hex1.slice(4, 6));
+    const r2 = hex(hex2.slice(0, 2)), g2 = hex(hex2.slice(2, 4)), b2 = hex(hex2.slice(4, 6));
+    const r = Math.round(lerp(r1, r2, t));
+    const g = Math.round(lerp(g1, g2, t));
+    const b = Math.round(lerp(b1, b2, t));
+    return `rgb(${r},${g},${b})`;
+};
+
+// --- Color Palettes ---
+const SKY_COLORS = {
+    fall: '#87CEEB',
+    winter: '#C4D8E8',
+    spring: '#A2D2FF',
+    summer: '#6CB4EE'
+};
+
+const GROUND_COLORS = {
+    fall: '#D26826', // Warm orange-brown
+    winter: '#F0F4F8', // Snowy white
+    spring: '#88C492', // Fresh Green
+    summer: '#4C8A58'  // Rich Green
+};
+
+const TREE_COLORS = {
+    fall: ['#FF9F1C', '#D94F4F', '#EAA221', '#C1121F'], // Orange, Red, Yellow
+    winter: ['#8D99AE', '#9A8C98'], // Muted, Snow covered
+    spring: ['#C7F464', '#F4D35E', '#FFC8DD', '#80D6B1'], // Yellow, Pink, Pastel
+    summer: ['#2D6A3B', '#388E4E', '#54B570'] // Deep greens
+};
+
+// --- State ---
+let time = 0;
+let dt = 0;
+let lastFrameTime = performance.now();
+
+// --- Particle System ---
+class Particle {
+    constructor(type, width, height) {
+        this.type = type;
+        this.reset(width, height, true);
+    }
+
+    reset(w, h, init = false) {
+        this.x = Math.random() * w;
+        this.y = init ? Math.random() * h : -10;
+        this.vx = (Math.random() - 0.5) * 0.5;
+        this.vy = Math.random() * 1 + 0.5;
+        this.size = Math.random() * 3 + 1;
+        this.life = 1;
+        this.decay = Math.random() * 0.005 + 0.002;
+        this.swayOffset = Math.random() * Math.PI * 2;
+        this.swaySpeed = Math.random() * 0.02;
+    }
+
+    update(dt, speedMult, w, h) {
+        this.x += this.vx * speedMult;
+        this.y += this.vy * speedMult;
+        this.life -= this.decay;
+        
+        if (this.type === 'leaf') {
+            this.x += Math.sin(time * this.swaySpeed + this.swayOffset) * 0.5;
+        }
+    }
+
+    draw(ctx) {
+        ctx.globalAlpha = this.life;
+        if (this.type === 'leaf') {
+            ctx.fillStyle = this.color || '#D26826';
+            ctx.translate(this.x, this.y);
+            ctx.rotate(time * 0.05);
+            ctx.beginPath();
+            ctx.ellipse(0, 0, this.size, this.size/2, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.setTransform(1, 0, 0, 1, 0, 0); // Reset transform
+        } else if (this.type === 'snow') {
+            ctx.fillStyle = '#FFF';
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+            ctx.fill();
+        } else if (this.type === 'petal') {
+            ctx.fillStyle = '#FFC8DD';
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.size/2, 0, Math.PI * 2);
+            ctx.fill();
+        } else if (this.type === 'pollen') {
+            ctx.fillStyle = '#FFFACD';
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.size/2, 0, Math.PI * 2);
+            ctx.fill();
+        } else if (this.type === 'firefly') {
+            ctx.fillStyle = '#FFFFE0';
+            ctx.shadowBlur = 5;
+            ctx.shadowColor = '#FFFFE0';
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.size * 1.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+        }
+        ctx.globalAlpha = 1;
+    }
+}
+
+// --- Tree System ---
+class Tree {
+    constructor(width, height) {
+        this.width = width;
+        this.height = height;
+        this.reset(true);
+    }
+
+    reset(init = false) {
+        // Depth factor: 0 (far) to 1 (close)
+        this.depth = Math.random(); 
+        
+        // Position
+        this.x = init ? Math.random() * this.width : this.width + Math.random() * 200;
+        
+        // Vertical Position dictates Depth logic slightly more
+        this.y = (this.height * 0.65) + (Math.random() * (this.height * 0.3));
+        
+        // Dimensions based on depth
+        this.trunkHeight = 20 + (this.depth * 40);
+        this.canopyRadius = 10 + (this.depth * 25);
+        
+        // Speed based on depth (parallax)
+        this.speed = 0.5 + (this.depth * 2.5);
+        
+        // Visual randomness
+        this.hueOffset = Math.random() * 100;
+        this.canopyColorIndex = Math.floor(Math.random() * 3); // Pick a base color palette index
+    }
+
+    update(dt, seasonSpeed) {
+        this.x -= this.speed * seasonSpeed;
+        if (this.x < -50) {
+            this.reset();
+        }
+    }
+
+    draw(ctx, season) {
+        const yBase = this.y + this.trunkHeight;
+        
+        // Draw Shadow (Simple angular polygon)
+        ctx.fillStyle = 'rgba(0,0,0,0.1)';
+        ctx.beginPath();
+        ctx.moveTo(this.x, yBase);
+        ctx.lineTo(this.x - this.canopyRadius, yBase + 5);
+        ctx.lineTo(this.x + this.canopyRadius, yBase + 5);
+        ctx.fill();
+
+        // Draw Trunk
+        ctx.fillStyle = '#2C2C2C'; // Tiny black trunks
+        ctx.beginPath();
+        ctx.rect(this.x - 2, this.y, 4, this.trunkHeight);
+        ctx.fill();
+
+        // Draw Canopy (Rounded Blob)
+        // Colors change based on season
+        let colors = TREE_COLORS[season];
+        let color = colors[this.canopyColorIndex % colors.length];
+
+        // Winter specific: Snow cap
+        if (season === 'winter') {
+            ctx.fillStyle = '#E0E0E0';
+            // Main blob
+            ctx.beginPath();
+            ctx.arc(this.x, this.y + this.canopyRadius/2, this.canopyRadius, 0, Math.PI * 2);
+            ctx.fill();
+            // Snow highlight
+            ctx.fillStyle = '#FFF';
+            ctx.beginPath();
+            ctx.arc(this.x, this.y + this.canopyRadius/2 - 2, this.canopyRadius * 0.8, 0, Math.PI, true);
+            ctx.fill();
+            return; 
+        }
+
+        // Spring specific: Blossoms
+        if (season === 'spring') {
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y + this.canopyRadius/2, this.canopyRadius, 0, Math.PI * 2);
+            ctx.fill();
+            // Add dots
+            ctx.fillStyle = '#FFF';
+            for(let i=0; i<5; i++) {
+                ctx.beginPath();
+                ctx.arc(
+                    this.x + (Math.random()-0.5)*this.canopyRadius, 
+                    this.y + (Math.random()-0.5)*this.canopyRadius, 
+                    2, 0, Math.PI*2
+                );
+                ctx.fill();
+            }
+            return;
+        }
+
+        // Standard Drawing
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y + this.canopyRadius/2, this.canopyRadius, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Summer detail: slightly darker inner circle for richness
+        if (season === 'summer') {
+            ctx.fillStyle = 'rgba(0,0,0,0.1)';
+            ctx.beginPath();
+            ctx.arc(this.x, this.y + this.canopyRadius/2 + 5, this.canopyRadius * 0.7, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+}
+
+// --- Creature System ---
+class Creature {
+    constructor(w, h) {
+        this.w = w;
+        this.h = h;
+        this.reset(true);
+    }
+
+    reset(init = false) {
+        this.type = Math.random() > 0.5 ? 'rabbit' : 'bird';
+        this.x = init ? Math.random() * this.w : this.w + Math.random() * 100;
+        this.y = this.h * 0.7 + Math.random() * (this.h * 0.2);
+        this.speed = 1 + Math.random() * 2;
+        this.size = 4 + Math.random() * 3;
+        this.direction = -1; // Moving left
+        
+        this.stateTimer = 0;
+        this.state = 'walk'; // walk, jump, hover
+        this.animPhase = 0;
+    }
+
+    update(dt, seasonSpeed) {
+        this.x += this.speed * this.direction * seasonSpeed;
+        this.animPhase += 0.2;
+
+        if (this.x < -20) this.reset();
+    }
+
+    draw(ctx) {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.scale(this.direction, 1); // Flip if needed
+
+        if (this.type === 'rabbit') {
+            // Body
+            ctx.fillStyle = '#888';
+            ctx.beginPath();
+            ctx.ellipse(0, 0, this.size, this.size/2, 0, 0, Math.PI * 2);
+            ctx.fill();
+            // Head
+            ctx.beginPath();
+            ctx.arc(this.size, -this.size/2, this.size/3, 0, Math.PI * 2);
+            ctx.fill();
+            // Ears
+            ctx.beginPath();
+            ctx.ellipse(this.size + 2, -this.size - 2, 1, 4, 0.2, 0, Math.PI * 2);
+            ctx.fill();
+        } else if (this.type === 'bird') {
+            // Body
+            ctx.fillStyle = '#333';
+            ctx.beginPath();
+            ctx.ellipse(0, 0, this.size, this.size/2, 0, 0, Math.PI * 2);
+            ctx.fill();
+            // Wings (Flapping)
+            ctx.beginPath();
+            ctx.moveTo(-2, 0);
+            ctx.lineTo(5, -5);
+            ctx.lineTo(2, 2);
+            ctx.fill();
+        }
+        ctx.restore();
+    }
+}
+
+// --- Main Class ---
+class Scene {
+    constructor() {
+        this.resize();
+        window.addEventListener('resize', () => this.resize());
+        
+        // Initialize Objects
+        this.trees = [];
+        for (let i = 0; i < TREE_COUNT; i++) this.trees.push(new Tree(this.width, this.height));
+        
+        this.creatures = [];
+        for (let i = 0; i < CREATURE_COUNT; i++) this.creatures.push(new Creature(this.width, this.height));
+        
+        this.particles = [];
+        // Initial batch
+        for (let i = 0; i < 100; i++) {
+            const type = ['leaf', 'snow', 'petal', 'pollen'][Math.floor(Math.random()*4)];
+            this.particles.push(new Particle(type, this.width, this.height));
+        }
+
+        this.loop = this.loop.bind(this);
+        requestAnimationFrame(this.loop);
+    }
+
+    resize() {
+        this.width = window.innerWidth;
+        this.height = window.innerHeight;
+        canvas.width = this.width;
+        canvas.height = this.height;
+    }
+
+    getSeason() {
+        const yearProgress = (time % YEAR_DURATION) / YEAR_DURATION; // 0.0 to 1.0
+        if (yearProgress < 0.25) return { name: 'fall', t: yearProgress * 4 };
+        if (yearProgress < 0.50) return { name: 'winter', t: (yearProgress - 0.25) * 4 };
+        if (yearProgress < 0.75) return { name: 'spring', t: (yearProgress - 0.50) * 4 };
+        return { name: 'summer', t: (yearProgress - 0.75) * 4 };
+    }
+
+    drawBackground(season, t) {
+        // Interpolate Sky
+        const skyKeys = ['fall', 'winter', 'spring', 'summer'];
+        let skyIdx = 0;
+        let skyT = 0;
+
+        if (season.name === 'fall') { skyIdx = 0; skyT = t; }
+        else if (season.name === 'winter') { skyIdx = 1; skyT = t; }
+        else if (season.name === 'spring') { skyIdx = 2; skyT = t; }
+        else { skyIdx = 3; skyT = t; }
+
+        const nextSky = skyKeys[(skyIdx + 1) % 4];
+        const skyColor = lerpColor(SKY_COLORS[season.name], SKY_COLORS[nextSky], t);
+
+        // Draw Sky
+        ctx.fillStyle = skyColor;
+        ctx.fillRect(0, 0, this.width, this.height);
+
+        // Draw Ground
+        const groundKeys = ['fall', 'winter', 'spring', 'summer'];
+        let groundIdx = 0;
+        let groundT = 0;
+
+        if (season.name === 'fall') { groundIdx = 0; groundT = t; }
+        else if (season.name === 'winter') { groundIdx = 1; groundT = t; }
+        else if (season.name === 'spring') { groundIdx = 2; groundT = t; }
+        else { groundIdx = 3; groundT = t; }
+
+        const nextGround = groundKeys[(groundIdx + 1) % 4];
+        const groundColor = lerpColor(GROUND_COLORS[season.name], GROUND_COLORS[nextGround], t);
+
+        // Sharp Horizon Line
+        const horizonY = this.height * 0.65;
+        
+        ctx.fillStyle = groundColor;
+        ctx.fillRect(0, horizonY, this.width, this.height - horizonY);
+        
+        // Minimalist Horizon Line
+        ctx.strokeStyle = 'rgba(0,0,0,0.1)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(0, horizonY);
+        ctx.lineTo(this.width, horizonY);
+        ctx.stroke();
+    }
+
+    updateParticles(season) {
+        // Adjust particle count and types based on season
+        const activeParticles = this.particles;
+        
+        // Spawn logic could be here, but for simplicity we just cycle states
+        
+        activeParticles.forEach(p => {
+            // Update type based on season for "current" particles
+            // This is a simplified approach to avoid massive GC pressure
+            
+            if (season.name === 'fall' && Math.random() < 0.001) p.type = 'leaf';
+            if (season.name === 'winter' && Math.random() < 0.01) p.type = 'snow';
+            if (season.name === 'spring' && Math.random() < 0.005) p.type = 'petal';
+            if (season.name === 'summer' && Math.random() < 0.002) p.type = 'pollen';
+            if (season.name === 'summer' && Math.random() < 0.001) p.type = 'firefly';
+
+            // Assign colors based on type
+            if (p.type === 'leaf') p.color = ['#D26826', '#EAA221', '#D94F4F'][Math.floor(Math.random()*3)];
+            
+            // Update physics
+            p.update(dt, 1, this.width, this.height);
+            if (p.y > this.height || p.x < -20 || p.life <= 0) {
+                p.reset(this.width, this.height);
+                // Re-assign type for spawn
+                if (season.name === 'fall') p.type = 'leaf';
+                if (season.name === 'winter') p.type = 'snow';
+                if (season.name === 'spring') p.type = 'petal';
+                if (season.name === 'summer') p.type = Math.random() > 0.5 ? 'pollen' : 'firefly';
+                if (p.type === 'leaf') p.color = '#D26826';
+            }
+            p.draw(ctx);
+        });
+    }
+
+    loop() {
+        const now = performance.now();
+        dt = now - lastFrameTime;
+        lastFrameTime = now;
+        time += dt;
+
+        const season = this.getSeason();
+
+        // 1. Background
+        this.drawBackground(season.name, season.t);
+
+        // 2. Creatures (Behind trees usually, or mixed? Let's do Creatures -> Trees for depth layering)
+        // Actually, standard depth: Sky -> Far Trees -> Creatures -> Close Trees -> Particles
+        this.creatures.forEach(c => {
+            c.update(dt, (season.name === 'winter' ? 0.8 : 1)); // Slow down in winter
+            c.draw(ctx);
+        });
+
+        // 3. Trees
+        this.trees.forEach(t => {
+            t.update(dt, (season.name === 'winter' ? 0.8 : 1));
+            t.draw(ctx, season.name);
+        });
+
+        // 4. Particles (Foreground)
+        this.updateParticles(season.name);
+
+        requestAnimationFrame(this.loop);
+    }
+}
+
+// Start
+new Scene();
+
+</script>
+</body>
+</html>

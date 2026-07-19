@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Night Campfire</title>
+    <title>Endless Campfire</title>
     <style>
         body, html {
             margin: 0;
@@ -19,35 +19,407 @@
     </style>
 </head>
 <body>
-<canvas id="canvas"></canvas>
-<script>
-    const canvas = document.getElementById('canvas');
-    const ctx = canvas.getContext('2d');
+    <canvas id="c"></canvas>
+    <script>
+        const canvas = document.getElementById('c');
+        const ctx = canvas.getContext('2d');
+        let width, height;
 
-    let width, height;
-    let time = 0;
-    const cx = () => width / 2;
-    const cy = () => height / 2;
-    const campY = () => height * 0.85;
-    const campX = () => width / 2;
+        // --- Configuration ---
+        const config = {
+            logCount: 5,
+            stoneCount: 12,
+            treeCount: 2,
+            starCount: 200,
+            emberCount: 40,
+            grassCount: 300,
+            cricketChirpRate: 0.02
+        };
 
-    // Configuration
-    const MAX_LOGS = 3;
-    const MAX_PARTICLES = 150;
-    const MAX_EMBERS = 80;
-    const MAX_STARS = 200;
-    const MAX_STONES = 24;
-    const CRICKET_INTERVAL = 100; // frames
+        // --- State ---
+        let time = 0;
+        let stars = [];
+        let meteors = [];
+        let stones = [];
+        let logs = [];
+        let embers = [];
+        let grassBlades = [];
+        let trees = [];
 
-    // State
-    let stars = [];
-    let meteors = [];
-    let flames = [];
-    let embers = [];
-    let logs = [];
-    let stones = [];
-    let crickets = [];
+        // --- Resize Handler ---
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            initScene();
+        }
+        window.addEventListener('resize', resize);
 
-    function resize() {
-        width = canvas.width = window.innerWidth;
-        height = canvas
+        // --- Classes ---
+
+        class Star {
+            constructor() {
+                this.x = Math.random() * width;
+                this.y = Math.random() * (height * 0.6);
+                this.size = Math.random() * 1.5 + 0.5;
+                this.alpha = Math.random();
+                this.speed = Math.random() * 0.02 + 0.005;
+            }
+            draw() {
+                this.alpha += this.speed;
+                const flicker = 0.5 + 0.5 * Math.sin(this.alpha);
+                ctx.fillStyle = `rgba(255, 255, 255, ${flicker * 0.8})`;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        class Meteor {
+            constructor() {
+                this.x = Math.random() * width;
+                this.y = Math.random() * (height * 0.4);
+                this.vx = -2 - Math.random() * 3;
+                this.vy = 1 + Math.random() * 2;
+                this.life = 1.0;
+                this.decay = 0.01 + Math.random() * 0.02;
+            }
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.life -= this.decay;
+            }
+            draw() {
+                if (this.life <= 0) return;
+                ctx.strokeStyle = `rgba(200, 230, 255, ${this.life})`;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(this.x, this.y);
+                ctx.lineTo(this.x - this.vx * 10, this.y - this.vy * 10);
+                ctx.stroke();
+            }
+        }
+
+        class Stone {
+            constructor(angle, radius) {
+                this.angle = angle;
+                this.radius = radius;
+                this.size = 15 + Math.random() * 15;
+                this.color = `rgb(${30 + Math.random()*20}, ${25 + Math.random()*15}, ${20 + Math.random()*15})`;
+            }
+            draw(cx, cy) {
+                const x = cx + Math.cos(this.angle) * this.radius;
+                const y = cy + Math.sin(this.angle) * this.radius * 0.4; // Perspective flatten
+                
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.ellipse(x, y, this.size, this.size * 0.6, 0, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Highlight from firelight
+                ctx.fillStyle = 'rgba(255, 140, 0, 0.2)';
+                ctx.beginPath();
+                ctx.ellipse(x, y - 5, this.size * 0.8, this.size * 0.4, 0, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        class Log {
+            constructor(yPos) {
+                this.baseY = yPos;
+                this.x = 0; // Relative to center
+                this.y = this.baseY;
+                this.width = 80 + Math.random() * 40;
+                this.height = 25;
+                this.angle = Math.random() * Math.PI * 2;
+                this.life = 1.0;
+                this.maxLife = 1500 + Math.random() * 500; // frames
+                this.collapsed = false;
+                this.settledAngle = 0;
+            }
+
+            update(time) {
+                this.life--;
+                
+                if (this.life <= 0) return false; // Dead
+
+                // Collapse logic
+                if (this.life < 600 && !this.collapsed) {
+                    this.collapsed = true;
+                    this.settledAngle = (Math.random() - 0.5) * 0.5;
+                }
+
+                // Jitter for burning effect
+                const jitter = (1 - this.life / this.maxLife) * 2;
+                this.y = this.baseY + Math.sin(time * 0.1) * jitter * 0.5;
+
+                return true;
+            }
+
+            draw(cx, cy, fireFlicker) {
+                ctx.save();
+                ctx.translate(cx + this.x, cy + this.y);
+                ctx.rotate(this.angle + (this.collapsed ? this.settledAngle : 0));
+
+                // Darken as it burns
+                const burnFactor = 1 - (1 - this.life / this.maxLife); // 0 to 1
+                const r = 40 - (burnFactor * 30);
+                const g = 30 - (burnFactor * 25);
+                const b = 20 - (burnFactor * 15);
+                
+                // Glow from inside when burning
+                const glow = Math.max(0, (1 - burnFactor) * 150);
+
+                ctx.fillStyle = `rgb(${r+glow/2}, ${g+glow/4}, ${b})`;
+                
+                // Draw log body
+                ctx.beginPath();
+                ctx.roundRect(-this.width/2, -this.height/2, this.width, this.height, 5);
+                ctx.fill();
+
+                // Firelight reflection on top
+                ctx.fillStyle = `rgba(255, 100, 0, ${0.1 + (fireFlicker * 0.2) * (1-burnFactor)})`;
+                ctx.beginPath();
+                ctx.roundRect(-this.width/2, -this.height/2, this.width, this.height/2, 5);
+                ctx.fill();
+
+                ctx.restore();
+            }
+        }
+
+        class Ember {
+            constructor(cx, cy) {
+                this.x = cx + (Math.random() - 0.5) * 40;
+                this.y = cy;
+                this.vx = (Math.random() - 0.5) * 2;
+                this.vy = -1 - Math.random() * 3;
+                this.size = Math.random() * 3;
+                this.life = 1.0;
+                this.decay = 0.005 + Math.random() * 0.01;
+                this.wobbleSpeed = Math.random() * 0.2;
+                this.wobbleOffset = Math.random() * Math.PI;
+            }
+
+            update() {
+                this.x += this.vx + Math.sin(time * this.wobbleSpeed + this.wobbleOffset);
+                this.y += this.vy;
+                this.vy -= 0.01; // Float up faster
+                this.life -= this.decay;
+                return this.life > 0;
+            }
+
+            draw() {
+                ctx.fillStyle = `rgba(255, ${100 + Math.random()*100}, 0, ${this.life})`;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        class GrassBlade {
+            constructor() {
+                this.x = Math.random() * width;
+                this.y = height * 0.7 + Math.random() * (height * 0.3);
+                this.h = 10 + Math.random() * 20;
+                this.sway = Math.random() * Math.PI * 2;
+                this.speed = 0.02 + Math.random() * 0.03;
+                this.intensity = 0; // For cricket twitching
+            }
+
+            draw(cx, cy, fireFlicker) {
+                // Distance to fire for lighting
+                const dist = Math.abs(this.x - cx);
+                const lightIntensity = Math.max(0, 1 - dist / (width * 0.4));
+                
+                // Base green, yellowish near fire
+                const g = Math.floor(30 + (lightIntensity * 80));
+                const r = Math.floor(10 + (lightIntensity * 100) + (fireFlicker * lightIntensity * 50));
+                const b = Math.floor(10 + (lightIntensity * 20));
+
+                ctx.strokeStyle = `rgb(${r}, ${g}, ${b})`;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                
+                const wind = Math.sin(time * 0.1 + this.sway) * 5;
+                const twitch = this.intensity > 0 ? Math.sin(time * 0.8) * 5 : 0;
+                
+                ctx.moveTo(this.x, this.y);
+                ctx.quadraticCurveTo(
+                    this.x + wind, 
+                    this.y - this.h / 2, 
+                    this.x + wind + twitch, 
+                    this.y - this.h
+                );
+                ctx.stroke();
+
+                if (this.intensity > 0) this.intensity -= 0.05;
+            }
+        }
+
+        class Tree {
+            constructor(x) {
+                this.x = x;
+                this.height = height * 0.6;
+                this.width = 60;
+            }
+            
+            draw(cx, cy, lightIntensity) {
+                // Tree Trunk
+                ctx.fillStyle = `rgb(${20 + lightIntensity * 40}, ${15 + lightIntensity * 30}, ${10 + lightIntensity * 20})`;
+                ctx.fillRect(this.x - this.width/2, height - this.height, this.width, this.height);
+                
+                // Firelight hit on one side
+                const isLeft = this.x < cx;
+                const sideColor = isLeft ? 'rgba(255, 100, 0, 0.1)' : 'rgba(0,0,0,0.1)';
+                
+                ctx.fillStyle = sideColor;
+                if(isLeft) ctx.fillRect(this.x - this.width/2, height - this.height, this.width * 0.3, this.height);
+                else ctx.fillRect(this.x + this.width/2 - this.width * 0.3, height - this.height, this.width * 0.3, this.height);
+            }
+        }
+
+        // --- Initialization ---
+        function initScene() {
+            stars = [];
+            for(let i=0; i<config.starCount; i++) stars.push(new Star());
+            
+            stones = [];
+            const cx = width / 2;
+            const cy = height * 0.8;
+            const ringRadius = 60;
+            for(let i=0; i<config.stoneCount; i++) {
+                const angle = (i / config.stoneCount) * Math.PI * 2;
+                stones.push(new Stone(angle, ringRadius));
+            }
+
+            logs = [];
+            for(let i=0; i<config.logCount; i++) {
+                logs.push(new Log(cy));
+            }
+
+            embers = [];
+            for(let i=0; i<config.emberCount; i++) {
+                embers.push(new Ember(cx, cy));
+            }
+
+            grassBlades = [];
+            for(let i=0; i<config.grassCount; i++) {
+                grassBlades.push(new GrassBlade());
+            }
+
+            trees = [];
+            // Place trees randomly but away from center
+            trees.push(new Tree(width * 0.15));
+            trees.push(new Tree(width * 0.85));
+        }
+
+        // --- Main Loop ---
+        function loop() {
+            requestAnimationFrame(loop);
+            time++;
+
+            // 1. Background Sky
+            const grad = ctx.createLinearGradient(0, 0, 0, height);
+            grad.addColorStop(0, '#020205');
+            grad.addColorStop(1, '#0a0a15');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, width, height);
+
+            // 2. Stars & Meteors
+            stars.forEach(s => s.draw());
+            
+            if (Math.random() < 0.005) meteors.push(new Meteor());
+            meteors.forEach((m, i) => {
+                m.update();
+                m.draw();
+                if(m.life <= 0) meteors.splice(i, 1);
+            });
+
+            // 3. Environment (Trees & Ground)
+            const cx = width / 2;
+            const cy = height * 0.8;
+            
+            // Calculate flicker value (pseudo-random based on time)
+            const fireFlicker = 0.8 + 0.2 * Math.sin(time * 0.1) * Math.sin(time * 0.13) * Math.sin(time * 0.17);
+
+            trees.forEach(t => t.draw(cx, cy, fireFlicker));
+
+            // Ground Gradient (Tunnel effect)
+            const groundGrad = ctx.createRadialGradient(cx, cy, 20, cx, cy, width * 0.8);
+            groundGrad.addColorStop(0, `rgba(50, 20, 0, ${0.5 + fireFlicker * 0.3})`);
+            groundGrad.addColorStop(0.4, '#080808');
+            groundGrad.addColorStop(1, '#000000');
+            ctx.fillStyle = groundGrad;
+            ctx.fillRect(0, cy, width, height - cy);
+
+            // 4. Stones
+            stones.forEach(s => s.draw(cx, cy));
+
+            // 5. Logs
+            logs.forEach((log, i) => {
+                const alive = log.update(time);
+                if (!alive) {
+                    // Respawn
+                    logs[i] = new Log(cy);
+                    logs[i].x = (Math.random() - 0.5) * 60;
+                } else {
+                    log.draw(cx, cy, fireFlicker);
+                }
+            });
+
+            // 6. Fire Core (The Flame Particles)
+            // We draw this ON TOP of logs but UNDER embers for glow, 
+            // but actually we want glow behind everything mostly.
+            
+            // Fire Glow (Screen Blend)
+            ctx.globalCompositeOperation = 'lighter';
+            
+            // Central glowing core
+            const coreGrad = ctx.createRadialGradient(cx, cy + 10, 5, cx, cy + 10, 80);
+            coreGrad.addColorStop(0, `rgba(255, 200, 50, ${0.6 + fireFlicker * 0.4})`);
+            coreGrad.addColorStop(0.4, `rgba(255, 100, 0, ${0.3 + fireFlicker * 0.2})`);
+            coreGrad.addColorStop(1, 'rgba(255, 50, 0, 0)');
+            ctx.fillStyle = coreGrad;
+            ctx.fillRect(cx - 100, cy - 100, 200, 200);
+
+            // Procedural Flame Shapes
+            for(let i=0; i<5; i++) {
+                const h = 60 + Math.random() * 40 * fireFlicker;
+                const w = 10 + Math.random() * 20;
+                const xOff = (Math.random() - 0.5) * 30;
+                
+                ctx.fillStyle = `rgba(255, ${150 + Math.random()*100}, 0, ${0.3})`;
+                ctx.beginPath();
+                ctx.moveTo(cx + xOff, cy);
+                ctx.quadraticCurveTo(cx + xOff + w, cy - h/2, cx + xOff, cy - h);
+                ctx.quadraticCurveTo(cx + xOff - w, cy - h/2, cx + xOff, cy);
+                ctx.fill();
+            }
+
+            ctx.globalCompositeOperation = 'source-over';
+
+            // 7. Embers
+            // Update logic
+            embers.forEach((e, i) => {
+                const alive = e.update();
+                if(!alive) embers[i] = new Ember(cx, cy);
+            });
+            // Draw
+            embers.forEach(e => e.draw());
+
+            // 8. Grass
+            grassBlades.forEach(g => g.draw(cx, cy, fireFlicker));
+
+            // Cricket Logic
+            if (Math.random() < config.cricketChirpRate) {
+                grassBlades.forEach(g => {
+                    if (Math.random() < 0.1) g.intensity = 1.0;
+                });
+            }
+        }
+
+        resize();
+        loop();
+
+    </script>
+</body>
+</html>

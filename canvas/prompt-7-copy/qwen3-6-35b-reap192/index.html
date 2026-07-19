@@ -1,46 +1,394 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Verlet City Destruction</title>
-    <style>
-        body {
-            margin: 0;
-            overflow: hidden;
-            background-color: #050505;
-            font-family: monospace;
-        }
-        canvas {
-            display: block;
-        }
-        #ui {
-            position: absolute;
-            top: 10px;
-            left: 10px;
-            color: #00ffcc;
-            pointer-events: none;
-            text-shadow: 0 0 5px #00ffcc;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Verlet City Destruction</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; }
+canvas { display: block; }
+</style>
 </head>
 <body>
-    <div id="ui">
-        VERLET PHYSICS ENGINE v1.0<br>
-        STRUCTURES: <span id="obj-count">0</span><br>
-        CONSTRAINTS: <span id="con-count">0</span>
-    </div>
-    <canvas id="simCanvas"></canvas>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
 
-    <script>
-        // --- CONFIGURATION ---
-        const GRAVITY = 0.5;
-        const FRICTION = 0.99;
-        const GROUND_FRICTION = 0.8;
-        const BOUNCE = 0.5;
-        const ITERATIONS = 5; // Physics constraint iterations per frame
-        const RESOLUTION = 15; // Size of building blocks (px)
-        
-        // --- SETUP CANVAS ---
-        const canvas = document.getElementById('simCanvas');
-        const ctx = canvas.getContext('2d');
+let W, H;
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// --- Verlet Physics ---
+const GRAVITY = 0.4;
+const DAMPING = 0.998;
+const GROUND_Y_OFFSET = 60;
+const CONSTRAINT_ITERATIONS = 8;
+const COLLISION_ITERATIONS = 4;
+
+const points = [];
+const constraints = [];
+const particles = [];
+const buildings = [];
+const meteors = [];
+const stars = [];
+let shakeX = 0, shakeY = 0, shakeMag = 0;
+
+class Point {
+    constructor(x, y, pinned = false, radius = 1) {
+        this.x = x; this.y = y;
+        this.oldX = x; this.oldY = y;
+        this.pinned = pinned;
+        this.radius = radius;
+        this.mass = 1;
+        this.restitution = 0.3;
+    }
+    integrate() {
+        if (this.pinned) return;
+        let vx = (this.x - this.oldX) * DAMPING;
+        let vy = (this.y - this.oldY) * DAMPING;
+        this.oldX = this.x;
+        this.oldY = this.y;
+        this.x += vx;
+        this.y += vy + GRAVITY;
+    }
+}
+
+class Constraint {
+    constructor(p1, p2, length, breakingForce = Infinity, visible = true, color = null, width = 1.5) {
+        this.p1 = p1; this.p2 = p2;
+        this.length = length || Math.hypot(p2.x - p1.x, p2.y - p1.y);
+        this.breakingForce = breakingForce;
+        this.visible = visible;
+        this.color = color;
+        this.width = width;
+        this.alive = true;
+    }
+    solve() {
+        if (!this.alive) return;
+        let dx = this.p2.x - this.p1.x;
+        let dy = this.p2.y - this.p1.y;
+        let dist = Math.hypot(dx, dy) || 0.001;
+        let diff = (this.length - dist) / dist * 0.5;
+        let ox = dx * diff;
+        let oy = dy * diff;
+
+        let force = Math.abs(this.p1.x - this.p1.oldX) + Math.abs(this.p1.y - this.p1.oldY)
+                  + Math.abs(this.p2.x - this.p2.oldX) + Math.abs(this.p2.y - this.p2.oldY);
+
+        if (force > this.breakingForce) {
+            this.alive = false;
+            return;
+        }
+
+        let w1 = this.p1.pinned ? 0 : 1;
+        let w2 = this.p2.pinned ? 0 : 1;
+        let total = w1 + w2 || 1;
+
+        if (!this.p1.pinned) { this.p1.x -= ox * (w2 / total) * 2; this.p1.y -= oy * (w2 / total) * 2; }
+        if (!this.p2.pinned) { this.p2.x += ox * (w1 / total) * 2; this.p2.y += oy * (w1 / total) * 2; }
+    }
+}
+
+// --- Stars ---
+for (let i = 0; i < 200; i++) {
+    stars.push({
+        x: Math.random() * 2000,
+        y: Math.random() * 600,
+        r: Math.random() * 1.5 + 0.3,
+        twinkle: Math.random() * Math.PI * 2
+    });
+}
+
+// --- Buildings ---
+function createBuilding(bx, by, bw, bh, floors, cols) {
+    const pts = [];
+    const cst = [];
+    const groundY = H - GROUND_Y_OFFSET;
+    const floorH = bh / floors;
+    const colW = bw / cols;
+
+    for (let f = 0; f <= floors; f++) {
+        for (let c = 0; c <= cols; c++) {
+            let px = bx + c * colW;
+            let py = groundY - f * floorH;
+            let pinned = (f === floors);
+            pts.push(new Point(px, py, pinned));
+        }
+    }
+
+    // Horizontal constraints
+    for (let f = 0; f <= floors; f++) {
+        for (let c = 0; c < cols; c++) {
+            let idx = f * (cols + 1) + c;
+            cst.push(new Constraint(pts[idx], pts[idx + 1], colW, 15));
+        }
+    }
+
+    // Vertical constraints
+    for (let f = 0; f < floors; f++) {
+        for (let c = 0; c <= cols; c++) {
+            let idx = f * (cols + 1) + c;
+            cst.push(new Constraint(pts[idx], pts[idx + cols + 1], floorH, 10));
+        }
+    }
+
+    // Diagonal constraints (bracing)
+    for (let f = 0; f < floors; f++) {
+        for (let c = 0; c < cols; c++) {
+            let idx = f * (cols + 1) + c;
+            cst.push(new Constraint(pts[idx], pts[idx + cols + 2], Math.hypot(colW * 2, floorH * 2), 8));
+            cst.push(new Constraint(pts[idx + 1], pts[idx + cols + 1], Math.hypot(colW * 2, floorH * 2), 8));
+        }
+    }
+
+    // Corners pinned at ground
+    let baseRow = floors;
+    for (let c = 0; c <= cols; c++) {
+        pts[baseRow * (cols + 1) + c].pinned = true;
+    }
+
+    return { points: pts, constraints: cst, x: bx, y: groundY - bh, w: bw, h: bh, floors, cols };
+}
+
+// Create city skyline
+const groundY = H - GROUND_Y_OFFSET;
+let buildingDefs = [
+    { x: 30, w: 80, h: 280, floors: 10, cols: 6 },
+    { x: 130, w: 60, h: 200, floors: 7, cols: 4 },
+    { x: 210, w: 100, h: 350, floors: 13, cols: 7 },
+    { x: 330, w: 50, h: 160, floors: 5, cols: 3 },
+    { x: 400, w: 90, h: 300, floors: 11, cols: 5 },
+    { x: 510, w: 70, h: 220, floors: 8, cols: 4 },
+    { x: 600, w: 110, h: 380, floors: 14, cols: 8 },
+    { x: 730, w: 55, h: 180, floors: 6, cols: 3 },
+    { x: 800, w: 85, h: 290, floors: 10, cols: 6 },
+    { x: 900, w: 65, h: 240, floors: 8, cols: 4 },
+    { x: 980, w: 100, h: 340, floors: 12, cols: 7 },
+    { x: 1100, w: 75, h: 210, floors: 7, cols: 4 },
+    { x: 1190, w: 90, h: 320, floors: 11, cols: 5 },
+    { x: 1300, w: 60, h: 170, floors: 6, cols: 3 },
+    { x: 1380, w: 120, h: 400, floors: 15, cols: 8 },
+    { x: 1520, w: 70, h: 250, floors: 8, cols: 4 },
+    { x: 1610, w: 95, h: 310, floors: 11, cols: 6 },
+    { x: 1720, w: 55, h: 190, floors: 6, cols: 3 },
+    { x: 1800, w: 80, h: 270, floors: 9, cols: 5 },
+    { x: 1900, w: 100, h: 360, floors: 13, cols: 7 },
+];
+
+// Adjust building positions to fit screen
+let totalW = 0;
+buildingDefs.forEach(b => totalW += b.w + 15);
+let startX = Math.max(20, (W - totalW) / 2);
+let curX = startX;
+buildingDefs.forEach(b => {
+    b.x = curX;
+    buildings.push(createBuilding(b.x, groundY - b.h, b.w, b.h, b.floors, b.cols));
+    curX += b.w + 15 + Math.random() * 10;
+});
+
+// --- Meteors ---
+function createMeteor(cx, cy, radius, count) {
+    const mPoints = [];
+    const mConstraints = [];
+    for (let i = 0; i < count; i++) {
+        let angle = Math.random() * Math.PI * 2;
+        let r = Math.random() * radius;
+        let px = cx + Math.cos(angle) * r;
+        let py = cy + Math.sin(angle) * r;
+        mPoints.push(new Point(px, py, false, 2 + Math.random() * 2));
+    }
+    for (let i = 0; i < mPoints.length; i++) {
+        for (let j = i + 1; j < mPoints.length; j++) {
+            let d = Math.hypot(mPoints[j].x - mPoints[i].x, mPoints[j].y - mPoints[i].y);
+            if (d < radius * 2.2) {
+                mConstraints.push(new Constraint(mPoints[i], mPoints[j], d, 30));
+            }
+        }
+    }
+    // Center constraint for rigidity
+    let center = new Point(cx, cy, true);
+    mPoints.forEach(p => {
+        mConstraints.push(new Constraint(p, center, radius * 0.5, 50));
+    });
+
+    let vx = (Math.random() - 0.5) * 3;
+    let vy = Math.random() * 2 + 3;
+    return { points: mPoints, constraints: mConstraints, vx, vy, radius, center, alive: true };
+}
+
+function spawnMeteor() {
+    let sx = Math.random() * W;
+    let sy = -100 - Math.random() * 200;
+    let targetX = sx + (Math.random() - 0.5) * 400;
+    let radius = 20 + Math.random() * 30;
+    let count = Math.floor(radius * 1.5);
+    let meteor = createMeteor(sx, sy, radius, count);
+    let angle = Math.atan2(H + 200 - sy, targetX - sx);
+    let speed = 4 + Math.random() * 4;
+    meteor.vx = Math.cos(angle) * speed;
+    meteor.vy = Math.sin(angle) * speed;
+    meteor.trailTimer = 0;
+    meteors.push(meteor);
+}
+
+// --- Particles ---
+function spawnExplosion(x, y, count, color, speed = 8) {
+    for (let i = 0; i < count; i++) {
+        let angle = Math.random() * Math.PI * 2;
+        let spd = Math.random() * speed + 2;
+        particles.push({
+            x, y,
+            vx: Math.cos(angle) * spd,
+            vy: Math.sin(angle) * spd - Math.random() * 3,
+            life: 1,
+            decay: 0.008 + Math.random() * 0.02,
+            r: 1 + Math.random() * 3,
+            color: color || `hsl(${Math.random() * 40 + 10}, 100%, ${50 + Math.random() * 30}%)`,
+            gravity: 0.15
+        });
+    }
+}
+
+function spawnDebris(x, y, count) {
+    for (let i = 0; i < count; i++) {
+        let angle = Math.random() * Math.PI - 0.2;
+        let spd = Math.random() * 6 + 1;
+        let hue = Math.random() * 30 + 20;
+        particles.push({
+            x, y,
+            vx: Math.cos(angle) * spd * (Math.random() > 0.5 ? 1 : -1),
+            vy: Math.sin(angle) * spd - 4,
+            life: 1,
+            decay: 0.005 + Math.random() * 0.01,
+            r: 1 + Math.random() * 4,
+            color: `hsl(${hue}, ${30 + Math.random() * 30}%, ${30 + Math.random() * 40}%)`,
+            gravity: 0.25,
+            rotation: Math.random() * Math.PI * 2,
+            rotSpeed: (Math.random() - 0.5) * 0.3
+        });
+    }
+}
+
+function spawnDust(x, y) {
+    for (let i = 0; i < 30; i++) {
+        let angle = Math.random() * Math.PI * 2;
+        let spd = Math.random() * 3 + 0.5;
+        particles.push({
+            x, y,
+            vx: Math.cos(angle) * spd,
+            vy: -Math.random() * 2 - 0.5,
+            life: 1,
+            decay: 0.003 + Math.random() * 0.008,
+            r: 2 + Math.random() * 6,
+            color: `rgba(180,160,140,${0.3 + Math.random() * 0.4})`,
+            gravity: -0.02
+        });
+    }
+}
+
+// --- Collision Detection ---
+const groundYGlobal = H - GROUND_Y_OFFSET;
+
+function handleCollisions() {
+    // Ground collision
+    for (let i = 0; i < points.length; i++) {
+        let p = points[i];
+        if (p.y > groundYGlobal) {
+            let pen = p.y - groundYGlobal;
+            p.y = groundYGlobal;
+            let vy = p.y - p.oldY;
+            p.oldY = p.y + vy * p.restitution;
+            let vx = p.x - p.oldX;
+            p.oldX = p.x - vx * 0.8;
+        }
+    }
+
+    // Meteor vs buildings
+    for (let m of meteors) {
+        if (!m.alive) continue;
+        for (let b of buildings) {
+            for (let c of b.constraints) {
+                if (!c.alive) continue;
+                let cp = c.p1;
+                let cpx = (cp.x + c.p2.x) / 2;
+                let cpy = (cp.y + c.p2.y) / 2;
+
+                for (let mp of m.points) {
+                    let dx = mp.x - cpx;
+                    let dy = mp.y - cpy;
+                    let dist = Math.hypot(dx, dy);
+                    let minDist = mp.radius + 3;
+                    if (dist < minDist && dist > 0.001) {
+                        let nx = dx / dist;
+                        let ny = dy / dist;
+                        let overlap = minDist - dist;
+                        mp.x += nx * overlap;
+                        mp.y += ny * overlap;
+
+                        let relVx = mp.x - mp.oldX;
+                        let relVy = mp.y - mp.oldY;
+                        let dot = relVx * nx + relVy * ny;
+                        if (dot < 0) {
+                            mp.oldX += nx * dot * 0.5;
+                            mp.oldY += ny * dot * 0.5;
+
+                            // Transfer energy to building constraints
+                            if (Math.abs(dot) > 3) {
+                                c.breakingForce = Math.max(2, 15 - Math.abs(dot));
+                                let force = Math.abs(dot);
+                                if (force > 8) {
+                                    c.p1.mass = Math.min(c.p1.mass + force * 0.1, 5);
+                                    c.p2.mass = Math.min(c.p2.mass + force * 0.1, 5);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Meteor vs ground
+        for (let mp of m.points) {
+            if (mp.y > groundYGlobal) {
+                let pen = mp.y - groundYGlobal;
+                mp.y = groundYGlobal;
+                let vy = mp.y - mp.oldY;
+                mp.oldY = mp.y + vy * 0.2;
+                let vx = mp.x - mp.oldX;
+                mp.oldX = mp.x - vx * 0.6;
+            }
+        }
+    }
+}
+
+// --- Meteor trail ---
+function updateMeteors(dt) {
+    for (let m of meteors) {
+        if (!m.alive) continue;
+        m.vx *= 0.999;
+        m.vy += 0.05;
+        m.vx += (m.vx - (m.points[0].x - m.points[0].oldX)) * 0.1;
+
+        for (let p of m.points) {
+            p.oldX = p.x - m.vx;
+            p.oldY = p.y - m.vy;
+        }
+
+        // Trail particles
+        m.trailTimer++;
+        if (m.trailTimer % 2 === 0) {
+            let cx = 0, cy = 0;
+            m.points.forEach(p => { cx += p.x; cy += p.y; });
+            cx /= m.points.length;
+            cy /= m.points.length;
+            for (let i = 0; i < 2; i++) {
+                particles.push({
+                    x: cx + (Math.random() - 0.5) * m.radius,
+                    y: cy + (Math.random() - 0.5) * m.radius,
+                    vx: (Math.random() - 0.5) * 2,

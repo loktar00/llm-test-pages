@@ -45,3 +45,285 @@
         let agents; // Typed array for agent state: x, y, angle (interleaved)
         let foods; // Array of objects {x, y, tx, ty}
         let imgData; // Canvas pixel data buffer
+        let pixels; // Uint8ClampedArray
+        
+        /**
+         * Initialization
+         */
+        function init() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            
+            // Initialize Trail Maps
+            const size = width * height;
+            trailMap = new Float32Array(size);
+            nextTrailMap = new Float32Array(size);
+            
+            // Initialize Image Data
+            imgData = ctx.createImageData(width, height);
+            pixels = imgData.data;
+            
+            // Initialize Agents
+            // Layout: [x, y, angle, x, y, angle, ...] as Float32 for precision
+            agents = new Float32Array(AGENT_COUNT * 3);
+            for (let i = 0; i < AGENT_COUNT; i++) {
+                agents[i * 3] = width / 2 + (Math.random() - 0.5) * 100;
+                agents[i * 3 + 1] = height / 2 + (Math.random() - 0.5) * 100;
+                agents[i * 3 + 2] = Math.random() * Math.PI * 2;
+            }
+            
+            // Initialize Food
+            foods = [];
+            for (let i = 0; i < NUM_FOOD; i++) {
+                pickNewFoodTarget(i);
+            }
+            
+            window.addEventListener('resize', () => {
+                width = window.innerWidth;
+                height = window.innerHeight;
+                canvas.width = width;
+                canvas.height = height;
+                imgData = ctx.createImageData(width, height);
+                pixels = imgData.data;
+                const size = width * height;
+                trailMap = new Float32Array(size);
+                nextTrailMap = new Float32Array(size);
+            });
+            
+            loop();
+        }
+        
+        function pickNewFoodTarget(index) {
+            foods[index].tx = Math.random() * width;
+            foods[index].ty = Math.random() * height;
+        }
+        
+        /**
+         * Update Logic
+         */
+        function update() {
+            const tLen = agents.length;
+            
+            // 1. Update Food Movement
+            foods.forEach((food, i) => {
+                const dx = food.tx - food.x;
+                const dy = food.ty - food.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                
+                if (dist < 1) {
+                    pickNewFoodTarget(i);
+                } else {
+                    // Smooth movement
+                    food.x += dx * 0.01;
+                    food.y += dy * 0.01;
+                }
+            });
+            
+            // 2. Agent Movement & Deposition
+            // We execute multiple steps per frame to make the simulation faster
+            for (let s = 0; s < STEPS_PER_FRAME; s++) {
+                for (let i = 0; i < AGENT_COUNT; i++) {
+                    const idx = i * 3;
+                    let ax = agents[idx];
+                    let ay = agents[idx + 1];
+                    const angle = agents[idx + 2];
+                    
+                    // Sense
+                    // Sensor 1: Left
+                    const lX = ax + SENSOR_DISTANCE * Math.cos(angle - SENSOR_ANGLE);
+                    const lY = ay + SENSOR_DISTANCE * Math.sin(angle - SENSOR_ANGLE);
+                    // Sensor 2: Center
+                    const cX = ax + SENSOR_DISTANCE * Math.cos(angle);
+                    const cY = ay + SENSOR_DISTANCE * Math.sin(angle);
+                    // Sensor 3: Right
+                    const rX = ax + SENSOR_DISTANCE * Math.cos(angle + SENSOR_ANGLE);
+                    const rY = ay + SENSOR_DISTANCE * Math.sin(angle + SENSOR_ANGLE);
+                    
+                    // Sample Trail Map
+                    // Note: Simple bounds checking for speed
+                    const lVal = getVal(lX, lY);
+                    const cVal = getVal(cX, cY);
+                    const rVal = getVal(rX, rY);
+                    
+                    // Steer
+                    let newAngle = angle;
+                    if (cVal > lVal && cVal > rVal) {
+                        // Continue straight
+                    } else if (cVal < lVal && cVal < rVal) {
+                        newAngle += Math.PI / 2; // Random turn if stuck/low
+                    } else if (lVal > rVal) {
+                        newAngle -= TURN_ANGLE;
+                    } else if (rVal > lVal) {
+                        newAngle += TURN_ANGLE;
+                    } else {
+                        // Random perturbation to prevent sticking
+                        newAngle += (Math.random() - 0.5) * 0.1;
+                    }
+                    
+                    // Move
+                    ax += Math.cos(newAngle);
+                    ay += Math.sin(newAngle);
+                    
+                    // Wrap edges
+                    if (ax < 0) ax += width;
+                    if (ax >= width) ax -= width;
+                    if (ay < 0) ay += height;
+                    if (ay >= height) ay -= height;
+                    
+                    // Update Agent State
+                    agents[idx] = ax;
+                    agents[idx + 1] = ay;
+                    agents[idx + 2] = newAngle;
+                    
+                    // Deposit
+                    const ix = Math.floor(ax);
+                    const iy = Math.floor(ay);
+                    if (ix >= 0 && ix < width && iy >= 0 && iy < height) {
+                        trailMap[iy * width + ix] += 1.0;
+                    }
+                    
+                    // Attract to food (very strong pull)
+                    foods.forEach(food => {
+                        const fdx = food.x - ax;
+                        const fdy = food.y - ay;
+                        const fDist = fdx*fdx + fdy*fdy;
+                        // Strong attraction radius
+                        if (fDist < 20000) { 
+                            newAngle = Math.atan2(fdy, fdx);
+                            agents[idx + 2] = newAngle;
+                            // Move towards food slightly
+                            agents[idx] += fdx * 0.01;
+                            agents[idx + 1] += fdy * 0.01;
+                        }
+                    });
+                }
+            }
+            
+            // 3. Diffusion and Decay
+            // Simple kernel diffusion
+            for (let y = 1; y < height - 1; y++) {
+                for (let x = 1; x < width - 1; x++) {
+                    const i = y * width + x;
+                    // Average neighbors
+                    nextTrailMap[i] = (
+                        trailMap[i] +
+                        trailMap[i - 1] +
+                        trailMap[i + 1] +
+                        trailMap[i - width] +
+                        trailMap[i + width]
+                    ) * DIFFUSION_FACTOR;
+                }
+            }
+            
+            // Decay and swap arrays
+            let temp = trailMap;
+            trailMap = nextTrailMap;
+            nextTrailMap = temp;
+            
+            const nLen = nextTrailMap.length;
+            for (let i = 0; i < nLen; i++) {
+                nextTrailMap[i] *= DECAY_RATE;
+            }
+        }
+        
+        function getVal(x, y) {
+            // Fast floor
+            const ix = x | 0;
+            const iy = y | 0;
+            if (ix < 0 || ix >= width || iy < 0 || iy >= height) return 0;
+            return trailMap[iy * width + ix];
+        }
+        
+        /**
+         * Render Logic
+         */
+        function render() {
+            // Clear buffer is implicit by overwriting, but we must iterate efficiently
+            // We iterate pixels directly
+            
+            // To improve performance, we can map 1:1 or use a lower resolution 
+            // but let's stick to full res with optimized logic.
+            
+            // Optimization: Pre-calculate color mapping
+            // We want a two-tone palette. 
+            // Map trailMap[0..Max] to colors.
+            
+            const len = trailMap.length;
+            
+            // We will iterate the trail map and write to pixels
+            // This avoids the overhead of reading pixels, modifying, writing back
+            
+            // Reset pixels to black first (only where trailMap is 0)
+            // Actually, let's just build the image completely.
+            
+            // To avoid O(N*M) color lookups, we'll clamp values manually.
+            
+            let pIdx = 0;
+            
+            // Loop unrolling or simple loop
+            for (let i = 0; i < len; i++) {
+                const val = trailMap[i];
+                
+                if (val <= 0.1) {
+                    pixels[pIdx] = 0;     // R
+                    pixels[pIdx + 1] = 0; // G
+                    pixels[pIdx + 2] = 0; // B
+                    pixels[pIdx + 3] = 255; // A
+                } else {
+                    // Two-tone palette logic
+                    // Tone 1: Cyan/Blue (Low intensity)
+                    // Tone 2: Magenta/Purple (High intensity)
+                    
+                    let r, g, b;
+                    
+                    if (val < 5.0) {
+                        // Cyan-ish
+                        // Interpolate intensity
+                        const t = Math.min(val / 5.0, 1.0);
+                        r = 0;
+                        g = Math.floor(100 * t);
+                        b = Math.floor(255 * t);
+                    } else {
+                        // Purple/Magenta
+                        // Fade out high values slightly or saturate
+                        const t = Math.min((val - 5) / 10.0, 1.0);
+                        r = Math.floor(180 * t + 50); // High R
+                        g = Math.floor(20 + 50 * t);  // Low G
+                        b = Math.floor(255 * t);      // High B
+                    }
+                    
+                    // Add glow effect via alpha or just RGB
+                    // Let's keep it opaque for the trail map, but maybe fade based on value?
+                    // The prompt asks for "glowing", which implies additive blending usually, 
+                    // but we are writing to an ImageData buffer.
+                    // We can simulate glow by increasing brightness.
+                    
+                    pixels[pIdx] = r;
+                    pixels[pIdx + 1] = g;
+                    pixels[pIdx + 2] = b;
+                    pixels[pIdx + 3] = 255;
+                }
+                
+                pIdx += 4;
+            }
+            
+            ctx.putImageData(imgData, 0, 0);
+        }
+        
+        /**
+         * Main Loop
+         */
+        function loop() {
+            update();
+            render();
+            requestAnimationFrame(loop);
+        }
+        
+        // Start
+        init();
+        
+    </script>
+</body>
+</html>

@@ -46,4 +46,343 @@
         let globalTime = 0;
         
         // Camera Drift State
-        let
+        let camera = { x: 0, y: 0, targetX: 0, targetY: 0 };
+
+        // --- Utilities ---
+        const random = (min, max) => Math.random() * (max - min) + min;
+        const randomInt = (min, max) => Math.floor(random(min, max));
+        const randomColor = () => CONFIG.colorPalette[Math.floor(Math.random() * CONFIG.colorPalette.length)];
+        
+        // Japanese Katakana + Latin mix
+        const glyphs = 'アァカサタナハマヤャラワガザダバパイィキシチニヒミリ��ギジヂビピウゥクスツヌフムユュルグズ��ブプエェケセテネヘメレ��ゲゼデベペオォコソトノホモヨョロヲゴゾドボポヴッン0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+        
+        const secretWords = [
+            "SYSTEM", "NEURAL", "MATRIX", "GHOST", "SIGNAL", 
+            "OVERRIDE", "DREAM", "CIRCUIT", "PROTOCOL", "VOID", 
+            "SYNTH", "PULSE", "ERROR", "MEMORY", "HOLLOW"
+        ];
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            // Re-initialize columns to match width
+            initColumns();
+        }
+
+        // --- Classes ---
+
+        class GlyphColumn {
+            constructor(x, layerIndex) {
+                this.x = x;
+                this.layerIndex = layerIndex; // 0 (Back/Small), 1 (Mid), 2 (Front/Large)
+                this.reset();
+            }
+
+            reset() {
+                this.y = random(-height, 0);
+                this.speed = random(1, 5) * (this.layerIndex + 1) * 0.5;
+                this.fontSize = this.layerIndex === 0 ? CONFIG.fonts.layer3 : 
+                               (this.layerIndex === 1 ? CONFIG.fonts.layer2 : CONFIG.fonts.layer1);
+                this.charSize = this.layerIndex === 0 ? 10 : (this.layerIndex === 1 ? 14 : 18);
+                this.chars = [];
+                // Length of the column
+                const length = Math.ceil(height / this.charSize) + randomInt(5, 15);
+                for (let i = 0; i < length; i++) {
+                    this.chars.push(glyphs[randomInt(0, glyphs.length)]);
+                }
+                this.color = randomColor();
+                this.glitchTimer = randomInt(0, 200);
+                this.isGlitching = false;
+            }
+
+            update() {
+                // Glitch logic
+                this.glitchTimer++;
+                if (this.glitchTimer > CONFIG.glitchInterval) {
+                    this.isGlitching = true;
+                    if (this.glitchTimer > CONFIG.glitchInterval + CONFIG.glitchDuration) {
+                        this.isGlitching = false;
+                        this.glitchTimer = 0;
+                    }
+                }
+
+                // Update characters
+                if (this.isGlitching) {
+                    // Randomize all chars during glitch
+                    for (let i = 0; i < this.chars.length; i++) {
+                        this.chars[i] = glyphs[randomInt(0, glyphs.length)];
+                    }
+                } else {
+                    // Randomly change tail chars occasionally
+                    if (Math.random() > 0.95) {
+                        const charIndex = randomInt(0, this.chars.length - 1);
+                        this.chars[charIndex] = glyphs[randomInt(0, glyphs.length)];
+                    }
+                }
+
+                // Move down
+                this.y += this.speed;
+                if (this.y > height + (this.chars.length * this.charSize)) {
+                    this.reset();
+                }
+            }
+
+            draw(ctx, offset) {
+                ctx.font = this.fontSize;
+                ctx.textAlign = "center";
+                
+                // Draw the column
+                for (let i = 0; i < this.chars.length; i++) {
+                    const charY = this.y - (i * this.charSize);
+                    
+                    // Check if this glyph is part of an active word
+                    const isWordMatch = checkWordHit(this.x, charY + offset, this.chars[i]);
+                    
+                    if (isWordMatch) {
+                        // Bright white/neon center for word match
+                        ctx.fillStyle = "#ffffff";
+                        ctx.shadowColor = isWordMatch.color;
+                        ctx.shadowBlur = 10;
+                        ctx.fillText(isWordMatch.char, this.x, charY + offset);
+                    } else {
+                        // Normal tail logic
+                        // Bright head (top of the trail)
+                        if (i === 0) {
+                            ctx.fillStyle = "#ffffff";
+                            ctx.shadowColor = this.color;
+                            ctx.shadowBlur = 15;
+                        } else {
+                            // Fade out tail
+                            const alpha = 1 - (i / this.chars.length);
+                            ctx.fillStyle = hexToRgba(this.color, alpha);
+                            ctx.shadowBlur = 0;
+                        }
+                        ctx.fillText(this.chars[i], this.x, charY + offset);
+                    }
+                }
+            }
+        }
+
+        // --- Word Logic ---
+
+        class ActiveWord {
+            constructor() {
+                const wordStr = secretWords[randomInt(0, secretWords.length)];
+                this.word = wordStr;
+                this.color = randomColor();
+                this.life = CONFIG.wordHighlightTime;
+                this.maxLife = CONFIG.wordHighlightTime;
+                
+                // Find a random column to anchor the word
+                // We approximate column positions. 
+                // Since columns are fixed, we pick a random index in the columns array
+                // and align the word center to that column.
+                const colIndex = randomInt(0, columns.length - 1);
+                const anchorCol = columns[colIndex];
+                this.centerX = anchorCol.x;
+                this.y = anchorCol.y - (randomInt(5, 15) * (anchorCol.layerIndex + 1) * 5); // Offset vertically relative to column head
+                
+                // Determine the column indices this word spans
+                const span = Math.ceil(wordStr.length / 2);
+                this.colIndices = [];
+                for(let i=0; i<wordStr.length; i++) {
+                    this.colIndices.push(colIndex - Math.floor(span/2) + i);
+                }
+            }
+
+            update() {
+                this.life--;
+            }
+
+            draw(ctx, offset) {
+                const alpha = this.life / this.maxLife;
+                if (alpha <= 0) return;
+
+                ctx.save();
+                ctx.font = columns[0].fontSize; // Use base font size for alignment
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                
+                // Calculate starting X to center the word
+                const totalWidth = ctx.measureText(this.word).width;
+                const startX = this.centerX - (totalWidth / 2);
+
+                for (let i = 0; i < this.word.length; i++) {
+                    const char = this.word[i];
+                    const colIdx = this.colIndices[i];
+                    if (colIdx < 0 || colIdx >= columns.length) continue;
+
+                    const charX = startX + (i * (columns[0].charSize * 1.5)); // Approximate width
+                    const charY = this.y + offset;
+
+                    // Check if the column character matches the word character
+                    const col = columns[colIdx];
+                    const colChar = col.chars[0]; // The head of the column
+
+                    if (colChar === char) {
+                        // Draw Highlight
+                        ctx.shadowColor = this.color;
+                        ctx.shadowBlur = 15;
+                        ctx.fillStyle = this.color;
+                        ctx.font = `bold ${col.fontSize}`;
+                        ctx.fillText(char, charX, charY);
+                        
+                        // Store for collision detection
+                        ctx.fillText(char, charX, charY); // Re-render to screen
+                    }
+                }
+                ctx.restore();
+            }
+        }
+
+        // --- Helpers ---
+
+        function hexToRgba(hex, alpha) {
+            const r = parseInt(hex.slice(1, 3), 16);
+            const g = parseInt(hex.slice(3, 5), 16);
+            const b = parseInt(hex.slice(5, 7), 16);
+            return `rgba(${r},${g},${b},${alpha})`;
+        }
+
+        // We need a way to detect if a specific grid position (x, y) is part of a word.
+        // Since words are drawn relative to columns, we store "HitBoxes" for the current frame's words.
+        let wordHitboxes = [];
+
+        function checkWordHit(x, y) {
+            // Find a hitbox that matches this position approximately
+            return wordHitboxes.find(hb => 
+                Math.abs(hb.x - x) < 10 && 
+                Math.abs(hb.y - y) < 10
+            );
+        }
+
+        function initColumns() {
+            columns = [];
+            const layers = [0, 1, 2]; // 0: Background, 1: Mid, 2: Foreground
+            
+            // Distribute columns across screen width
+            // More columns for background to fill space
+            const counts = [Math.floor(width/15), Math.floor(width/30), Math.floor(width/50)]; 
+            
+            layers.forEach((layer, lIdx) => {
+                const count = counts[lIdx];
+                const spacing = width / count;
+                for (let i = 0; i < count; i++) {
+                    const x = (i * spacing) + random(-spacing/2, spacing/2);
+                    columns.push(new GlyphColumn(x, lIdx));
+                }
+            });
+            
+            // Sort by layer so we draw back-to-front
+            columns.sort((a, b) => a.layerIndex - b.layerIndex);
+        }
+
+        // --- Main Loop ---
+
+        function update() {
+            globalTime++;
+            activeWords = activeWords.filter(w => w.life > 0);
+            activeWords.forEach(w => w.update());
+
+            // Spawn words
+            if (Math.random() < CONFIG.wordSpawnRate && activeWords.length < 3) {
+                activeWords.push(new ActiveWord());
+            }
+
+            // Camera Drift (Smooth Lerp)
+            camera.x += (camera.targetX - camera.x) * 0.005;
+            camera.y += (camera.targetY - camera.y) * 0.005;
+            
+            // Change target slowly
+            if (Math.random() < 0.01) {
+                camera.targetX = random(-50, 50);
+                camera.targetY = random(-50, 50);
+            }
+
+            columns.forEach(col => col.update());
+        }
+
+        function draw() {
+            // Fade effect for trails
+            ctx.fillStyle = `rgba(5, 2, 10, ${CONFIG.bgAlpha})`;
+            ctx.fillRect(0, 0, width, height);
+
+            // Apply Camera Drift
+            ctx.save();
+            ctx.translate(camera.x, camera.y);
+
+            // Reset hitboxes for this frame
+            wordHitboxes = [];
+
+            // Draw Active Words (Highlights)
+            // We need to draw words *after* the column heads so we can overwrite specific chars
+            // But we also need to know which chars to overwrite.
+            // Strategy: Draw columns first. Then iterate words and redraw matched chars on top.
+            
+            // Layer 1 & 2 (Background)
+            columns.filter(c => c.layerIndex < 2).forEach(col => col.draw(ctx, 0));
+
+            // Handle Words
+            activeWords.forEach(word => {
+                const startX = word.centerX - (ctx.measureText(word.word).width / 2);
+                const col = columns[0]; // Use base metrics
+                
+                for (let i = 0; i < word.word.length; i++) {
+                    const char = word.word[i];
+                    const colIdx = word.colIndices[i];
+                    if (colIdx < 0 || colIdx >= columns.length) continue;
+
+                    const colObj = columns[colIdx];
+                    const charX = startX + (i * (colObj.charSize * 1.5));
+                    const charY = word.y + colObj.y; // Align roughly with column head
+
+                    // Check if the column's head matches the word char
+                    if (colObj.chars[0] === char) {
+                        // Register hitbox for the main draw loop
+                        wordHitboxes.push({ x: colObj.x, y: word.y, color: word.color });
+                        
+                        // Draw bright highlight
+                        ctx.font = `bold ${colObj.fontSize}`;
+                        ctx.textAlign = "center";
+                        ctx.shadowColor = word.color;
+                        ctx.shadowBlur = 20;
+                        ctx.fillStyle = "#ffffff";
+                        ctx.fillText(char, colObj.x, word.y);
+                    }
+                }
+            });
+
+            // Layer 3 (Foreground) - Draw normally, skipping hits
+            columns.filter(c => c.layerIndex === 2).forEach(col => col.draw(ctx, 0));
+
+            // Draw Word Text (The "Dissolve" effect logic happens in the column draw via hitbox check,
+            // but we add a global overlay here for extra "glow" on the word itself)
+            activeWords.forEach(word => {
+                if(word.life < 30) {
+                    ctx.globalAlpha = word.life / 30;
+                    ctx.fillStyle = word.color;
+                    ctx.font = `bold ${columns[0].fontSize}`;
+                    ctx.textAlign = "center";
+                    ctx.fillText(word.word, word.centerX, word.y);
+                    ctx.globalAlpha = 1;
+                }
+            });
+
+            ctx.restore();
+            
+            requestAnimationFrame(loop);
+        }
+
+        function loop() {
+            update();
+            draw();
+        }
+
+        // --- Initialization ---
+        window.addEventListener('resize', resize);
+        resize();
+        requestAnimationFrame(loop);
+
+    </script>
+</body>
+</html>

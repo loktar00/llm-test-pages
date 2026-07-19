@@ -5,11 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Snow Globe Screensaver</title>
     <style>
-        body {
+        body, html {
             margin: 0;
             padding: 0;
+            width: 100%;
+            height: 100%;
             overflow: hidden;
-            background-color: #050510; /* Deep night blue */
+            background-color: #050510; /* Dark night background */
         }
         canvas {
             display: block;
@@ -22,25 +24,425 @@
         const canvas = document.getElementById('globeCanvas');
         const ctx = canvas.getContext('2d');
 
-        let width, height, cx, cy, radius;
-        const PARTICLE_COUNT = 400;
-        const shakeDuration = 2000; // ms
-        const shakeInterval = 20000; // ms
-        const gravity = 0.05;
-        const friction = 0.99;
-        const turbulenceStrength = 2.5;
-
-        // State
-        let particles = [];
-        let shakeIntensity = 0; // 0 to 1
+        let width, height;
+        let cx, cy, radius;
+        let snow = [];
+        let buildings = [];
+        let trees = [];
+        
+        // Globe State
+        let shakeIntensity = 0;
         let lastShakeTime = 0;
+        const shakeInterval = 20000; // 20 seconds
         let time = 0;
-        let accumulatedSnow = []; // Stores (x, y, size) of settled snow
 
-        // Audio Context for subtle ambience (optional but keeps it visual only per prompt)
-        // Ignoring audio to strictly follow "No external assets" and code-only constraint.
+        // Configuration
+        const SNOW_COUNT = 1200;
+        const GRAVITY = 0.05;
+        const GROUND_LEVEL_RATIO = 0.75; // Ground is at 75% of globe height
+
+        class Snowflake {
+            constructor() {
+                this.reset();
+            }
+
+            reset() {
+                // Start inside the globe
+                const angle = Math.random() * Math.PI * 2;
+                const r = Math.random() * (radius - 10);
+                this.x = cx + Math.cos(angle) * r;
+                this.y = cy - (radius * 0.5) + Math.random() * (radius); // Start higher up
+                
+                this.vx = 0;
+                this.vy = 0;
+                this.size = Math.random() * 2 + 1;
+                this.settled = false;
+                this.settleY = 0;
+                
+                // Refraction offset (visual only)
+                this.refractionOffset = 0;
+            }
+
+            update(dt) {
+                if (this.settled) return;
+
+                // Turbulence (Wind/Swirl)
+                if (shakeIntensity > 0.1) {
+                    const swirl = Math.sin(time * 0.005 + this.y * 0.02) * shakeIntensity * 2;
+                    const updraft = Math.cos(time * 0.003 + this.x * 0.02) * shakeIntensity * 2;
+                    
+                    this.vx += swirl * 0.1;
+                    this.vy += updraft * 0.1;
+                    
+                    // Refraction effect during chaos
+                    this.refractionOffset = Math.random() * shakeIntensity;
+                } else {
+                    this.refractionOffset = 0;
+                }
+
+                // Physics
+                this.vy += GRAVITY;
+                this.vx *= 0.98; // Friction
+                this.vy *= 0.98;
+
+                this.x += this.vx + (shakeIntensity * 0.2); // Shake pushes horizontally
+                this.y += this.vy;
+
+                // Ground Collision & Accumulation
+                // Calculate "ground" height at this x position
+                // We simulate a simple floor curve
+                const floorHeight = cy + (radius * GROUND_LEVEL_RATIO) - 10;
+                
+                // Simple ground check
+                if (this.y > floorHeight) {
+                    this.settled = true;
+                    this.y = floorHeight;
+                    this.vx = 0;
+                    this.vy = 0;
+                }
+
+                // Building Collision (Simple)
+                for (let b of buildings) {
+                    if (this.x > b.x - b.w/2 && this.x < b.x + b.w/2) {
+                        // Hit roof
+                        const roofHeight = b.y - b.h;
+                        if (this.y > roofHeight && Math.abs(this.y - roofHeight) < 5) {
+                            this.settled = true;
+                            this.y = roofHeight - 2; // Sit on top
+                            this.vx = 0;
+                            this.vy = 0;
+                        }
+                    }
+                }
+
+                // Window Collision (Visual only logic)
+                // If inside a window, make it glow
+                for (let b of buildings) {
+                    if (b.windows) {
+                        for (let win of b.windows) {
+                            if (this.x > b.x - win.x && this.x < b.x - win.x + win.w &&
+                                this.y > b.y - win.y && this.y < b.y - win.y + win.h) {
+                                // This is handled in rendering, not physics
+                            }
+                        }
+                    }
+                }
+            }
+
+            draw() {
+                ctx.fillStyle = `rgba(255, 255, 255, ${0.6 + Math.random() * 0.4})`;
+                ctx.beginPath();
+                ctx.arc(this.x + (shakeIntensity > 0 ? (Math.random()-0.5)*shakeIntensity : 0), this.y, this.size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        class Building {
+            constructor(x, w, h) {
+                this.x = x;
+                this.w = w;
+                this.h = h;
+                this.y = cy + (radius * GROUND_LEVEL_RATIO) - 10; // Base Y
+                this.roofH = h * 0.4;
+                this.windows = [];
+                this.generateWindows();
+            }
+
+            generateWindows() {
+                const cols = 2;
+                const rows = 2;
+                const pad = 6;
+                const ww = (this.w - (cols + 1) * pad) / cols;
+                const wh = (this.h - (rows + 1) * pad) / rows;
+
+                for(let r=0; r<rows; r++) {
+                    for(let c=0; c<cols; c++) {
+                        this.windows.push({
+                            x: pad + c * (ww + pad),
+                            y: pad + r * (wh + pad),
+                            w: ww,
+                            h: wh
+                        });
+                    }
+                }
+            }
+
+            draw() {
+                // Main body
+                ctx.fillStyle = '#2c3e50'; // Dark blue/grey
+                ctx.fillRect(this.x - this.w/2, this.y - this.h, this.w, this.h);
+
+                // Roof
+                ctx.fillStyle = '#ecf0f1'; // White snow roof base
+                ctx.beginPath();
+                ctx.moveTo(this.x - this.w/2 - 5, this.y - this.h);
+                ctx.lineTo(this.x, this.y - this.h - this.roofH);
+                ctx.lineTo(this.x + this.w/2 + 5, this.y - this.h);
+                ctx.closePath();
+                ctx.fill();
+
+                // Snow accumulation on roof (procedural, just static for now to save perf)
+                ctx.fillStyle = '#bdc3c7'; 
+                ctx.beginPath();
+                ctx.moveTo(this.x - this.w/2 - 2, this.y - this.h + 4);
+                ctx.lineTo(this.x, this.y - this.h - this.roofH + 4);
+                ctx.lineTo(this.x + this.w/2 + 2, this.y - this.h + 4);
+                ctx.closePath();
+                ctx.fill();
+
+                // Door
+                ctx.fillStyle = '#1a252f';
+                ctx.fillRect(this.x - 6, this.y - 20, 12, 20);
+
+                // Windows
+                for (let win of this.windows) {
+                    // Flicker logic
+                    const flicker = Math.random() * 0.2;
+                    const r = 255;
+                    const g = 200 + Math.random() * 55;
+                    const b = 100;
+                    const alpha = 0.8 + Math.random() * 0.2;
+
+                    ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
+                    ctx.shadowBlur = 10;
+                    ctx.shadowColor = `rgba(${r}, ${g}, ${b}, 0.5)`;
+                    ctx.fillRect(this.x - win.x, this.y - win.y, win.w, win.h);
+                    
+                    // Frame
+                    ctx.shadowBlur = 0;
+                    ctx.strokeStyle = '#1a252f';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(this.x - win.x, this.y - win.y, win.w, win.h);
+                }
+            }
+        }
+
+        class Tree {
+            constructor(x) {
+                this.x = x;
+                this.baseY = cy + (radius * GROUND_LEVEL_RATIO) - 10;
+                this.height = 40 + Math.random() * 20;
+                this.width = 20 + Math.random() * 10;
+                this.segments = 3 + Math.floor(Math.random() * 2);
+            }
+
+            draw() {
+                // Trunk
+                ctx.fillStyle = '#3e2723';
+                ctx.fillRect(this.x - 3, this.baseY - 10, 6, 10);
+
+                // Leaves
+                for(let i=0; i<this.segments; i++) {
+                    const y = this.baseY - 10 - (i * (this.height/this.segments));
+                    const w = this.width * (1 - i/(this.segments+1));
+                    
+                    ctx.fillStyle = '#1b5e20'; // Pine green
+                    ctx.beginPath();
+                    ctx.moveTo(this.x, y - this.height/this.segments);
+                    ctx.lineTo(this.x - w/2, y);
+                    ctx.lineTo(this.x + w/2, y);
+                    ctx.closePath();
+                    ctx.fill();
+
+                    // Snow on branches
+                    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+                    ctx.beginPath();
+                    ctx.moveTo(this.x, y - (this.height/this.segments) + 5);
+                    ctx.lineTo(this.x - w/2 + 2, y - 2);
+                    ctx.lineTo(this.x + w/2 - 2, y - 2);
+                    ctx.closePath();
+                    ctx.fill();
+                }
+            }
+        }
+
+        function init() {
+            resize();
+            createScene();
+            
+            // Initialize snow
+            for(let i=0; i<SNOW_COUNT; i++) {
+                snow.push(new Snowflake());
+            }
+            
+            requestAnimationFrame(loop);
+        }
 
         function resize() {
-            width = canvas.width = window.innerWidth;
-            height = canvas.height = window.innerHeight;
-            cx = width / 
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            cx = width / 2;
+            cy = height / 2;
+            radius = Math.min(width, height) * 0.45;
+        }
+
+        function createScene() {
+            buildings = [];
+            trees = [];
+            
+            // Create Cabins
+            buildings.push(new Building(cx - 60, 50, 60));
+            buildings.push(new Building(cx, 60, 70));
+            buildings.push(new Building(cx + 60, 50, 60));
+
+            // Create Trees
+            const treePositions = [
+                cx - 120, cx + 120,
+                cx - 30, cx + 30,
+                cx - 150, cx + 150,
+                cx - 90, cx + 90
+            ];
+            treePositions.forEach(x => trees.push(new Tree(x)));
+        }
+
+        function drawBase() {
+            // The wooden stand
+            const baseH = 40;
+            const baseW = radius * 1.6;
+            const baseY = cy + radius + 20;
+
+            ctx.beginPath();
+            ctx.moveTo(cx - baseW/2, baseY);
+            ctx.quadraticCurveTo(cx - baseW/2, baseY + baseH, cx, baseY + baseH + 10);
+            ctx.quadraticCurveTo(cx + baseW/2, baseY + baseH, cx + baseW/2, baseY);
+            ctx.fillStyle = '#4a3b2a';
+            ctx.fill();
+            
+            // Highlight
+            ctx.strokeStyle = '#6d543b';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+
+        function drawGlassReflection() {
+            // Top shine
+            const grad = ctx.createLinearGradient(cx - radius, cy - radius, cx + radius, cy + radius);
+            grad.addColorStop(0, 'rgba(255, 255, 255, 0.1)');
+            grad.addColorStop(0.5, 'rgba(255, 255, 255, 0)');
+            grad.addColorStop(1, 'rgba(255, 255, 255, 0.05)');
+
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+            ctx.fillStyle = grad;
+            ctx.fill();
+
+            // Edge reflection (curved)
+            ctx.beginPath();
+            ctx.ellipse(cx, cy - radius * 0.6, radius * 0.4, radius * 0.1, Math.PI / 4, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
+            ctx.fill();
+        }
+
+        function updatePhysics() {
+            const now = Date.now();
+            
+            // Shake Logic
+            if (now - lastShakeTime > shakeInterval) {
+                shakeIntensity = 20; // Start strong
+                lastShakeTime = now;
+                
+                // Reset snow to "air" on shake
+                snow.forEach(p => {
+                    if(p.settled) {
+                        p.settled = false;
+                        p.vx = (Math.random() - 0.5) * 10;
+                        p.vy = -Math.random() * 10 - 2;
+                    }
+                });
+            }
+
+            // Decay shake intensity
+            if (shakeIntensity > 0) {
+                shakeIntensity *= 0.95;
+                if (shakeIntensity < 0.1) shakeIntensity = 0;
+            }
+
+            snow.forEach(p => p.update());
+        }
+
+        function drawGround() {
+            // Draw snow ground inside the globe
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius - 2, 0, Math.PI * 2);
+            ctx.clip();
+
+            ctx.fillStyle = '#dcdcdc';
+            ctx.beginPath();
+            ctx.moveTo(cx - radius, cy + radius);
+            // A gentle curve for the ground inside the globe
+            ctx.bezierCurveTo(
+                cx - radius, cy + radius * 0.8, 
+                cx, cy + radius * 0.75, 
+                cx + radius, cy + radius * 0.8
+            );
+            ctx.lineTo(cx + radius, cy + radius);
+            ctx.fill();
+
+            ctx.restore();
+        }
+
+        function loop() {
+            time++;
+            ctx.clearRect(0, 0, width, height);
+
+            updatePhysics();
+
+            // 1. Draw Globe Background
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+            // Night sky gradient inside globe
+            const skyGrad = ctx.createRadialGradient(cx, cy - radius/2, 0, cx, cy, radius);
+            skyGrad.addColorStop(0, '#1a2a6c');
+            skyGrad.addColorStop(1, '#b21f1f'); // Sunset/Night transition
+            ctx.fillStyle = skyGrad;
+            ctx.fill();
+            ctx.restore();
+
+            // 2. Draw Scene Elements (Trees & Buildings)
+            // Sort by Y for depth? Not strictly necessary for simple shapes, but buildings should be behind trees if overlapping? 
+            // Actually, let's just draw trees then buildings to make buildings pop, or mix them.
+            // Let's do order: Back trees -> Buildings -> Front Trees
+            trees.filter(t => t.x < cx).forEach(t => t.draw()); // Left side trees
+            buildings.forEach(b => b.draw());
+            trees.filter(t => t.x >= cx).forEach(t => t.draw()); // Right side trees
+
+            // 3. Ground Snow
+            drawGround();
+
+            // 4. Snow Particles
+            snow.forEach(p => p.draw());
+
+            // 5. Glass Overlay
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+            ctx.lineWidth = 4;
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+            ctx.stroke();
+            
+            // Inner shadow for depth
+            const innerShadow = ctx.createRadialGradient(cx, cy, radius * 0.8, cx, cy, radius);
+            innerShadow.addColorStop(0, 'rgba(0,0,0,0)');
+            innerShadow.addColorStop(1, 'rgba(0,0,0,0.4)');
+            ctx.fillStyle = innerShadow;
+            ctx.fill();
+
+            drawGlassReflection();
+            ctx.restore();
+
+            // 6. Base
+            drawBase();
+
+            requestAnimationFrame(loop);
+        }
+
+        window.addEventListener('resize', resize);
+        init();
+
+    </script>
+</body>
+</html>

@@ -1,39 +1,433 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Teal-Violet Glyph Rain</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background-color: #050208; /* Deepest violet-black */
-        }
-        canvas {
-            display: block;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Glyph Rain</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #050510; }
+canvas { display: block; }
+</style>
 </head>
 <body>
-    <canvas id="canvas"></canvas>
-    <script>
-        /**
-         * CONFIGURATION
-         */
-        const CONFIG = {
-            font: "monospace",
-            fontSize: 14,
-            colors: {
-                bg: "#050208",
-                head: "#ffffff",
-                tail: ["#00ffcc", "#00bfff", "#8a2be2", "#8400ff", "#d300c3"], // Teal, Cyan, Blue, Violet, Magenta
-                highlight: "#ffffff"
-            },
-            layers: [
-                { count: 20, speedMult: 0.5, size: 10, blur: 2, alpha: 0.4, font: "serif" },
-                { count: 40, speedMult: 1.0, size: 16, blur: 0, alpha: 0.8, font: "monospace" },
-                { count: 15, speedMult: 2.2
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  initColumns();
+}
+window.addEventListener('resize', resize);
+
+// Color palette: teal to violet
+const palette = [
+  [0, 206, 209],    // teal
+  [30, 180, 180],   // deep teal
+  [60, 140, 200],   // teal-blue
+  [100, 80, 210],   // purple
+  [140, 40, 200],   // violet
+  [160, 30, 180],   // deep violet
+  [180, 0, 160],    // magenta-violet
+  [120, 60, 220],   // bright violet
+  [0, 180, 190],    // light teal
+  [80, 100, 230],   // blue-violet
+];
+
+function rgba(c, a) { return `rgba(${c[0]},${c[1]},${c[2]},${a})`; }
+function randColor() { return palette[Math.floor(Math.random() * palette.length)]; }
+
+// Glyphs: katakana + symbols
+const BASE_GLYPHS = 'アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン';
+const EXTRA_GLYPHS = '0123456789ABCDEF!@#$%^&*<>{}[]|;:~';
+const ALL_GLYPHS = BASE_GLYPHS + EXTRA_GLYPHS;
+
+function randomGlyph() {
+  return ALL_GLYPHS[Math.floor(Math.random() * ALL_GLYPHS.length)];
+}
+
+// Hidden words
+const HIDDEN_WORDS = [
+  '光', '闇', '夢', '風', '雷', '星', '月', '海', '空', '火',
+  '水', '土', '雲', '雪', '嵐', '虹', '霧', '炎', '氷', '電',
+  '魂', '心', '声', '影', '力', '愛', '夢見', '星空', '永遠', '生命',
+  'NEON', 'VOID', 'ECHO', 'FLUX', 'PRISM', 'DRIFT', 'PULSE', 'WAVE',
+  'GHOST', 'SHADE', 'CIPHER', 'MATRIX', 'NEXUS', 'QUANT', 'SYNTH', 'VAPOR'
+];
+
+// Layers
+const LAYER_CONFIGS = [
+  { size: 10, speed: 0.4, count: 0.25, blur: 3, alpha: 0.3, yOffset: 0 },
+  { size: 16, speed: 0.7, count: 0.45, blur: 1.5, alpha: 0.55, yOffset: 0 },
+  { size: 24, speed: 1.1, count: 0.8, blur: 0, alpha: 0.85, yOffset: 0 },
+];
+
+let layers = [];
+let columns = [];
+let glitchColumns = [];
+let activeWords = [];
+let cameraOffset = { x: 0, y: 0 };
+let cameraTarget = { x: 0, y: 0 };
+let time = 0;
+let lastTime = 0;
+
+class Column {
+  constructor(x, layerIndex) {
+    this.x = x;
+    this.layerIndex = layerIndex;
+    this.speed = (0.5 + Math.random() * 1.5) * (1 + layerIndex * 0.3);
+    this.glyphs = [];
+    this.headY = Math.random() * H * 1.5;
+    this.tailLength = 12 + Math.floor(Math.random() * 30 + layerIndex * 8);
+    this.color = randColor();
+    this.wordIndex = -1;
+    this.charIndex = -1;
+    this.isWordColumn = false;
+    this.wordTarget = '';
+    this.glowIntensity = 0;
+
+    for (let i = 0; i < this.tailLength; i++) {
+      this.glyphs.push(randomGlyph());
+    }
+  }
+
+  update(dt) {
+    this.headY += this.speed * dt * 60;
+    if (this.headY > H + this.tailLength * 20) {
+      this.headY = -this.tailLength * 20 - Math.random() * H;
+      this.color = randColor();
+      for (let i = 0; i < this.tailLength; i++) {
+        this.glyphs[i] = randomGlyph();
+      }
+    }
+
+    if (this.glowIntensity > 0) {
+      this.glowIntensity = Math.max(0, this.glowIntensity - dt * 2);
+    }
+  }
+
+  draw(layerSize, layerBlur, layerAlpha) {
+    const size = layerSize;
+    const spacing = size * 1.1;
+    const startX = this.x + cameraOffset.x;
+    const startY = this.headY - this.tailLength * spacing + cameraOffset.y;
+
+    ctx.save();
+    if (layerBlur > 0) {
+      ctx.filter = `blur(${layerBlur}px)`;
+    }
+
+    for (let i = 0; i < this.tailLength; i++) {
+      const y = startY + i * spacing;
+      if (y < -size || y > H + size) continue;
+
+      const t = i / this.tailLength;
+      let alpha;
+      if (this.isWordColumn && this.glowIntensity > 0.1) {
+        alpha = this.glowIntensity * (0.3 + t * 0.7);
+      } else {
+        alpha = layerAlpha * (0.15 + t * 0.85);
+      }
+
+      // Bright head
+      if (i < 3) {
+        alpha = Math.min(1, alpha + 0.4);
+      }
+
+      let glyphColor;
+      if (this.isWordColumn && this.glowIntensity > 0.1) {
+        const wc = palette[Math.floor(this.glowIntensity * (palette.length - 1))];
+        glyphColor = rgba(wc, alpha);
+        // Glow effect for word characters
+        if (i === 0 || (this.wordIndex >= 0 && i >= this.wordIndex && i < this.wordIndex + this.wordTarget.length)) {
+          ctx.shadowColor = rgba(wc, this.glowIntensity * 0.8);
+          ctx.shadowBlur = 15 * this.glowIntensity;
+        }
+      } else {
+        glyphColor = rgba(this.color, alpha);
+      }
+
+      ctx.fillStyle = glyphColor;
+      ctx.font = `${size}px "MS Gothic", "Yu Gothic", monospace`;
+      ctx.textAlign = 'center';
+      ctx.fillText(this.glyphs[i], startX, y);
+      ctx.shadowBlur = 0;
+    }
+    ctx.restore();
+  }
+}
+
+class ActiveWord {
+  constructor(word) {
+    this.word = word;
+    this.life = 1.0;
+    this.dissolve = false;
+    this.dissolveStart = 2.5; // seconds before dissolve
+    this.columns = [];
+    this.y = H * 0.2 + Math.random() * H * 0.6;
+    this.highlightPhase = 0; // 0=appearing, 1=held, 2=dissolving
+    this.appearTime = 0;
+  }
+
+  update(dt) {
+    this.appearTime += dt;
+    if (this.appearTime < 0.5) {
+      this.highlightPhase = 0;
+      this.life = Math.min(1, this.life + dt * 2);
+    } else if (this.appearTime < this.dissolveStart) {
+      this.highlightPhase = 1;
+      this.highlightPhase = this.appearTime < 1.0 ? (this.appearTime - 0.5) * 2 : 1;
+    } else if (this.appearTime < this.dissolveStart + 2) {
+      this.highlightPhase = 2;
+      this.life = Math.max(0, 1 - (this.appearTime - this.dissolveStart) / 2);
+      // Dissolve: remove characters from right to left
+      this.dissolve = true;
+    } else {
+      this.highlightPhase = 3;
+      this.life = 0;
+    }
+  }
+
+  draw() {
+    if (this.life <= 0) return;
+    const fontSize = 28;
+    const charWidth = fontSize * 0.7;
+    const totalWidth = this.word.length * charWidth;
+    const startX = (W - totalWidth) / 2;
+
+    ctx.save();
+    ctx.globalAlpha = this.life;
+
+    // Draw each character
+    for (let i = 0; i < this.word.length; i++) {
+      if (this.dissolve && i < this.word.length - Math.floor((this.appearTime - this.dissolveStart) / 0.3)) {
+        continue;
+      }
+
+      const x = startX + i * charWidth + charWidth / 2;
+      const y = this.y + cameraOffset.y;
+
+      // Bright highlight
+      const highlight = this.highlightPhase === 0 ? this.appearTime * 2 :
+                        this.highlightPhase === 1 ? 1 :
+                        1 - (this.appearTime - this.dissolveStart) / 2;
+
+      ctx.shadowColor = `rgba(180, 100, 255, ${highlight * 0.9})`;
+      ctx.shadowBlur = 20 * highlight;
+      ctx.fillStyle = `rgba(220, 180, 255, ${highlight * 0.95})`;
+      ctx.font = `bold ${fontSize}px "MS Gothic", "Yu Gothic", monospace`;
+      ctx.textAlign = 'center';
+      ctx.fillText(this.word[i], x, y);
+
+      // Second pass for glow
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = `rgba(255, 255, 255, ${highlight * 0.3})`;
+      ctx.font = `bold ${fontSize + 2}px "MS Gothic", "Yu Gothic", monospace`;
+      ctx.fillText(this.word[i], x, y);
+    }
+
+    ctx.restore();
+  }
+}
+
+function initColumns() {
+  columns = [];
+  layers = LAYER_CONFIGS.map((cfg, li) => {
+    const cols = [];
+    const colSpacing = 22;
+    const numCols = Math.ceil(W / colSpacing);
+    for (let i = 0; i < numCols; i++) {
+      if (Math.random() < cfg.count) {
+        cols.push(new Column(i * colSpacing + Math.random() * 10, li));
+      }
+    }
+    return cols;
+  });
+}
+
+function triggerGlitch(col) {
+  col.isWordColumn = true;
+  col.glowIntensity = 1.0;
+  col.wordTarget = '';
+  for (let i = 0; i < col.tailLength; i++) {
+    col.glyphs[i] = randomGlyph();
+  }
+  setTimeout(() => {
+    col.isWordColumn = false;
+    col.glowIntensity = 0;
+  }, 300 + Math.random() * 400);
+}
+
+function triggerWordAppearance() {
+  if (activeWords.filter(w => w.life > 0).length >= 3) return;
+
+  const word = HIDDEN_WORDS[Math.floor(Math.random() * HIDDEN_WORDS.length)];
+  const activeWord = new ActiveWord(word);
+
+  // Find columns near the word's y position in the mid/near layer
+  const targetLayer = 1 + Math.floor(Math.random() * 2);
+  const relevantCols = layers[targetLayer];
+
+  const fontSize = 28;
+  const charWidth = fontSize * 0.7;
+  const totalWidth = word.length * charWidth;
+  const startX = (W - totalWidth) / 2;
+
+  // Match columns to word characters
+  for (let i = 0; i < word.length; i++) {
+    const targetX = startX + i * charWidth;
+    let closest = null;
+    let minDist = Infinity;
+    for (const col of relevantCols) {
+      const dist = Math.abs(col.x - targetX);
+      if (dist < minDist) {
+        minDist = dist;
+        closest = col;
+      }
+    }
+    if (closest && minDist < 30) {
+      closest.isWordColumn = true;
+      closest.glowIntensity = 1.0;
+      closest.wordIndex = i;
+      closest.wordTarget = word;
+      closest.glyphs[i] = word[i];
+      activeWord.columns.push(closest);
+    }
+  }
+
+  activeWords.push(activeWord);
+}
+
+function spawnGlitchBurst() {
+  const targetLayer = Math.floor(Math.random() * 3);
+  const targetCols = layers[targetLayer];
+  if (targetCols.length === 0) return;
+  const numGlitches = 1 + Math.floor(Math.random() * 3);
+  const indices = [];
+  while (indices.length < numGlitches) {
+    const idx = Math.floor(Math.random() * targetCols.length);
+    if (!indices.includes(idx)) indices.push(idx);
+  }
+  for (const idx of indices) {
+    triggerGlitch(targetCols[idx]);
+  }
+}
+
+function update(dt) {
+  time += dt;
+
+  // Camera drift
+  cameraTarget.x = Math.sin(time * 0.08) * 15 + Math.sin(time * 0.03) * 8;
+  cameraTarget.y = Math.sin(time * 0.05) * 5 + Math.cos(time * 0.07) * 3;
+  cameraOffset.x += (cameraTarget.x - cameraOffset.x) * dt * 0.5;
+  cameraOffset.y += (cameraTarget.y - cameraOffset.y) * dt * 0.5;
+
+  // Update columns
+  for (const layer of layers) {
+    for (const col of layer) {
+      col.update(dt);
+    }
+  }
+
+  // Update active words
+  for (const aw of activeWords) {
+    aw.update(dt);
+  }
+  activeWords = activeWords.filter(w => w.life > 0);
+
+  // Resync word columns
+  for (const aw of activeWords) {
+    if (aw.life > 0) {
+      for (let i = 0; i < aw.word.length; i++) {
+        const col = aw.columns[i];
+        if (col) {
+          col.isWordColumn = true;
+          col.glowIntensity = Math.max(col.glowIntensity, aw.life);
+          if (i < col.tailLength) {
+            col.glyphs[i] = aw.word[i];
+          }
+        }
+      }
+    }
+  }
+
+  // Random word appearance
+  if (Math.random() < dt * 0.08) {
+    triggerWordAppearance();
+  }
+
+  // Random glitch bursts
+  if (Math.random() < dt * 0.15) {
+    spawnGlitchBurst();
+  }
+}
+
+function drawBackground() {
+  // Deep dark background with subtle gradient
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#050510');
+  grad.addColorStop(0.5, '#0a0a1a');
+  grad.addColorStop(1, '#080515');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Subtle ambient glow
+  const glowX = W / 2 + cameraOffset.x * 0.5;
+  const glowY = H / 2 + cameraOffset.y * 0.3;
+  const ambGrad = ctx.createRadialGradient(glowX, glowY, 0, glowX, glowY, H * 0.6);
+  ambGrad.addColorStop(0, 'rgba(40, 20, 80, 0.08)');
+  ambGrad.addColorStop(0.5, 'rgba(20, 40, 60, 0.04)');
+  ambGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  ctx.fillStyle = ambGrad;
+  ctx.fillRect(0, 0, W, H);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawBackground();
+
+  // Draw layers back to front
+  for (let li = 0; li < 3; li++) {
+    const cfg = LAYER_CONFIGS[li];
+    ctx.save();
+    if (cfg.blur > 0) {
+      ctx.filter = `blur(${cfg.blur}px)`;
+    }
+    for (const col of layers[li]) {
+      col.draw(cfg.size, 0, 1); // blur handled at layer level
+    }
+    ctx.restore();
+  }
+
+  // Draw active words on top
+  for (const aw of activeWords) {
+    aw.draw();
+  }
+
+  // Subtle vignette
+  const vigGrad = ctx.createRadialGradient(W/2, H/2, H*0.3, W/2, H/2, H*0.9);
+  vigGrad.addColorStop(0, 'rgba(0,0,0,0)');
+  vigGrad.addColorStop(1, 'rgba(0,0,0,0.5)');
+  ctx.fillStyle = vigGrad;
+  ctx.fillRect(0, 0, W, H);
+}
+
+function frame(timestamp) {
+  if (!lastTime) lastTime = timestamp;
+  const dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+  lastTime = timestamp;
+
+  update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+resize();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

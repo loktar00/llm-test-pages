@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rain on Glass</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #050505;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <script>
+        // --- CONFIGURATION ---
+        const CONFIG = {
+            dropCount: 350,
+            dropBaseSize: 2,
+            mergeThreshold: 3.5,
+            fallSpeedBase: 0.5,
+            fallSpeedMax: 6,
+            lightningChance: 0.002,
+            lightningDuration: 15, // frames
+            lightningIntervalMin: 100,
+            lightningIntervalMax: 400,
+            cityLights: 60,
+            bokehBlur: 15,
+            refractiveIndex: 0.5,
+            colors: ['#4a6b8c', '#e89d58', '#a85c6e', '#3a5f5c'] // Muted neon city colors
+        };
+
+        // --- SETUP ---
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d', { alpha: false }); // Optimize for no transparency on main canvas
+        let width, height;
+        let drops = [];
+        let cityLights = [];
+        let lightning = { active: false, alpha: 0, timer: 0, next: 0 };
+        let animId;
+        let lastTime = 0;
+
+        // --- UTILS ---
+        const rand = (min, max) => Math.random() * (max - min) + min;
+        const randInt = (min, max) => Math.floor(rand(min, max));
+        const distance = (x1, y1, x2, y2) => Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
+
+        // --- CLASSES ---
+
+        class Drop {
+            constructor() {
+                this.reset();
+                // Start with random positions so we don't wait for them to fill
+                this.y = rand(-height, height); 
+                this.r = rand(CONFIG.dropBaseSize, CONFIG.dropBaseSize * 2.5);
+                this.weight = 0;
+                this.state = 'static'; // static, streaking
+            }
+
+            reset() {
+                this.x = rand(0, width);
+                this.y = rand(0, height);
+                this.r = rand(CONFIG.dropBaseSize, CONFIG.dropBaseSize * 2.5);
+                this.weight = 0;
+                this.state = 'static';
+                this.trail = []; // Stores points wiped clean
+            }
+
+            update() {
+                // State: Static - growing/merging
+                if (this.state === 'static') {
+                    // Occasionally grow slightly
+                    if (Math.random() < 0.05) this.r += 0.1;
+                    
+                    // Randomly start falling if heavy enough
+                    if (this.r > CONFIG.dropBaseSize * 3 && Math.random() < 0.01) {
+                        this.state = 'streaking';
+                        this.speed = rand(CONFIG.fallSpeedBase, CONFIG.fallSpeedBase * 2);
+                    }
+                } 
+                // State: Streaking
+                else if (this.state === 'streaking') {
+                    this.speed += 0.1; // Acceleration
+                    if (this.speed > CONFIG.fallSpeedMax) this.speed = CONFIG.fallSpeedMax;
+                    
+                    this.y += this.speed;
+                    this.r *= 0.98; // Shrink slightly as it falls
+
+                    // Add to trail
+                    this.trail.push({x: this.x, y: this.y, r: this.r});
+                    
+                    // Limit trail length
+                    if (this.trail.length > 20) this.trail.shift();
+
+                    // Reset if off screen
+                    if (this.y > height + 50) {
+                        this.reset();
+                    }
+                }
+            }
+
+            draw(ctx) {
+                // Draw trail if streaking
+                if (this.state === 'streaking' && this.trail.length > 1) {
+                    ctx.beginPath();
+                    ctx.strokeStyle = `rgba(0, 0, 0, ${Math.min(0.6, this.r / 10)})`;
+                    ctx.lineWidth = this.r * 0.8;
+                    ctx.lineCap = 'round';
+                    ctx.lineJoin = 'round';
+                    
+                    // Draw a smooth curve through trail
+                    if (this.trail.length > 0) {
+                        ctx.moveTo(this.trail[0].x, this.trail[0].y);
+                        for (let i = 1; i < this.trail.length; i++) {
+                            ctx.lineTo(this.trail[i].x, this.trail[i].y);
+                        }
+                    }
+                    ctx.stroke();
+                }
+
+                // Draw Drop
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
+                
+                // Drop body: darker with a subtle gradient
+                const grad = ctx.createRadialGradient(this.x - this.r*0.3, this.y - this.r*0.3, this.r*0.2, this.x, this.y, this.r);
+                grad.addColorStop(0, 'rgba(20, 20, 20, 0.4)'); // Highlight/Specularish
+                grad.addColorStop(0.5, 'rgba(0, 0, 0, 0.1)');
+                grad.addColorStop(1, 'rgba(0, 0, 0, 0.6)'); // Shadow/Edge
+                
+                ctx.fillStyle = grad;
+                ctx.fill();
+                
+                // Optional: White specular highlight
+                ctx.beginPath();
+                ctx.arc(this.x - this.r*0.3, this.y - this.r*0.3, this.r*0.2, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+                ctx.fill();
+            }
+        }
+
+        class CityLight {
+            constructor() {
+                this.x = rand(0, width);
+                this.y = rand(0, height);
+                this.baseSize = rand(5, 25);
+                this.baseAlpha = rand(0.3, 0.8);
+                this.color = CONFIG.colors[randInt(0, CONFIG.colors.length)];
+                this.pulse = rand(0, Math.PI * 2);
+            }
+
+            draw(ctx, time) {
+                // Twinkle effect
+                const alpha = this.baseAlpha * (0.8 + 0.2 * Math.sin(time * 0.002 + this.pulse));
+                
+                ctx.shadowBlur = CONFIG.bokehBlur;
+                ctx.shadowColor = this.color;
+                ctx.fillStyle = this.color;
+                ctx.globalAlpha = alpha;
+                
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.baseSize, 0, Math.PI * 2);
+                ctx.fill();
+                
+                ctx.globalAlpha = 1.0;
+                ctx.shadowBlur = 0;
+            }
+        }
+
+        // --- INIT ---
+
+        function init() {
+            resize();
+            
+            // Create Drops
+            for (let i = 0; i < CONFIG.dropCount; i++) {
+                drops.push(new Drop());
+            }
+
+            // Create City Lights
+            for (let i = 0; i < CONFIG.cityLights; i++) {
+                cityLights.push(new CityLight());
+            }
+
+            window.addEventListener('resize', resize);
+            requestAnimationFrame(animate);
+        }
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+        }
+
+        // --- LOGIC ---
+
+        function handleCollisions() {
+            // Check collisions between static drops
+            // Optimization: simple O(N^2) is acceptable for ~350 drops on modern machines
+            for (let i = 0; i < drops.length; i++) {
+                let d1 = drops[i];
+                
+                // Only static drops can merge
+                if (d1.state !== 'static') continue;
+
+                for (let j = i + 1; j < drops.length; j++) {
+                    let d2 = drops[j];
+                    if (d2.state !== 'static') continue;
+
+                    const dist = distance(d1.x, d1.y, d2.x, d2.y);
+                    const minDist = d1.r + d2.r;
+
+                    if (dist < minDist) {
+                        // Merge logic
+                        // Area of circle = pi * r^2. New area = sum of areas.
+                        // New radius = sqrt(r1^2 + r2^2)
+                        const newR = Math.sqrt(d1.r * d1.r + d2.r * d2.r);
+                        
+                        // Weighted average position
+                        const totalMass = d1.r + d2.r; // Rough mass proxy
+                        const nx = (d1.x * d1.r + d2.x * d2.r) / totalMass;
+                        const ny = (d1.y * d1.r + d2.y * d2.r) / totalMass;
+
+                        d1.r = newR;
+                        d1.x = nx;
+                        d1.y = ny;
+
+                        // Reset the smaller one
+                        drops[j].reset();
+                    }
+                }
+            }
+        }
+
+        function drawBackground(time) {
+            // Base dark color
+            ctx.fillStyle = '#020202';
+            ctx.fillRect(0, 0, width, height);
+
+            // Draw City Lights
+            // We use a clipping path or just draw normally, but for the Bokeh effect, 
+            // we draw them directly. To make them "bokeh" we can use filter or just heavy blur.
+            // Using context shadow for glow is cheaper than canvas filter.
+            
+            ctx.save();
+            cityLights.forEach(light => light.draw(ctx, time));
+            ctx.restore();
+
+            // Apply a global blur to simulate the "looking through a window"
+            // If performance drops, lower CONFIG.bokehBlur or remove this step
+            ctx.filter = `blur(${CONFIG.bokehBlur}px)`;
+            // We redraw the lights slightly offset or just rely on the previous draw?
+            // Actually, to blur the whole background, we need to draw background to a temp canvas or use ctx.filter.
+            // Using ctx.filter is easiest but can be slow.
+            
+            // Better approach for "Blurred Bokeh":
+            // Draw lights again with filter.
+            ctx.filter = `blur(${CONFIG.bokehBlur}px)`;
+            ctx.globalCompositeOperation = 'screen'; // Additive blending for lights
+            cityLights.forEach(light => light.draw(ctx, time));
+            
+            ctx.filter = 'none';
+            ctx.globalCompositeOperation = 'source-over';
+        }
+
+        function drawRefractedDrops() {
+            // This is the heavy lifting. 
+            // 1. Save current canvas state (Rain + City)
+            // 2. For each drop, draw a copy of the canvas, shifted.
+            
+            // Optimization: Only do this for drops that are visible and big enough.
+            // And limit the resolution of the refraction if needed.
+            
+            ctx.save();
+            // To make refraction look real, we usually scale and shift the image "behind" the drop
+            // Since we are drawing ON TOP, we can't easily get the "behind" image unless we use 
+            // a separate off-screen canvas.
+            
+            // STRATEGY:
+            // 1. Draw Background (Blurred City) -> to Main Canvas
+            // 2. Draw Drops (Shadows) -> to Main Canvas
+            // 3. Create a temporary canvas (offscreen) containing the Background + Shadows.
+            // 4. For each Drop, draw a piece of that offscreen canvas into the main canvas, 
+            //    centered on the drop, scaled up (lens effect).
+            // 5. Draw the Drop Highlight on top.
+            
+            // Since we can't change the render loop architecture significantly without breaking "single file" simplicity,
+            // let's stick to a pseudo-refraction:
+            // We will draw the background to a temporary canvas once per frame (expensive but accurate).
+            // Then draw the refraction.
+            
+            // PERFORMANCE NOTE: 
+            // Drawing the whole scene to an offscreen canvas every frame is VERY heavy for 60fps.
+            // We will compromise: We will NOT do true refraction. 
+            // Instead, we will draw the background, then draw "glowing" arcs on the drops to simulate glass edge,
+            // and use shadow/contrast. True refraction requires `getImageData` or complex offscreen rendering.
+            
+            // ACTUAL IMPLEMENTATION CHOICE:
+            // We will draw the background to the main canvas.
+            // Then we create an offscreen canvas `bgCanvas`.
+            // We draw background to `bgCanvas`.
+            // Then we iterate drops. For each drop:
+            //   We clip a circle.
+            //   We draw a scaled version of `bgCanvas` (the background) onto the main canvas.
+            //   This acts as the refraction.
+            //   We then draw the drop glass effect on top.
+            
+            // To avoid tearing, we must draw background to bgCanvas first.
+        }
+
+        // --- MAIN LOOP ---
+
+        function animate(timestamp) {
+            animId = requestAnimationFrame(animate);
+            const time = timestamp || 0;
+
+            // 1. Offscreen Canvas for Background (The "City")
+            // We need this to perform refraction. 
+            // Note: Creating ImageData is slow, using drawImage is fast.
+            
+            // Clear Main Canvas
+            ctx.clearRect(0, 0, width, height);
+
+            // Draw Blurred City Background
+            drawBackground(time);
+
+            // --- REFRACTION STEP ---
+            // To make refraction look good without expensive pixel manipulation:
+            // We draw the background to a temporary canvas (bgOffscreen).
+            // Then for each drop, we draw a portion of bgOffscreen centered at the drop, 
+            // scaled up slightly (magnification), shifted slightly (lens displacement).
+            
+            // Optimization: Update bgOffscreen only every few frames or keep it static if city is static?
+            // The lights twinkle, so we must update it.
+            
+            // Let's use a hidden canvas
+            if (!window.bgCanvas) {
+                window.bgCanvas = document.createElement('canvas');
+                window.bgCtx = window.bgCanvas.getContext('2d');
+            }
+            window.bgCanvas.width = width;
+            window.bgCanvas.height = height;
+            
+            // Draw the background into the offscreen canvas
+            // We need to replicate drawBackground logic here cleanly
+            window.bgCtx.clearRect(0, 0, width, height);
+            window.bgCtx.fillStyle = '#020202';
+            window.bgCtx.fillRect(0, 0, width, height);
+            
+            // Draw lights with glow
+            window.bgCtx.filter = `blur(${CONFIG.bokehBlur}px)`;
+            window.bgCtx.globalCompositeOperation = 'screen';
+            cityLights.forEach(light => light.draw(window.bgCtx, time));
+            window.bgCtx.filter = 'none';
+            window.bgCtx.globalCompositeOperation = 'source-over';
+
+            // --- DROP LOGIC & DRAWING ---
+            
+            handleCollisions();
+
+            // Draw Refraction and Glass
+            ctx.save();
+            
+            drops.forEach(drop => {
+                // 1. Refraction (The shifted background)
+                // Calculate shift based on curvature
+                const shiftX = (drop.x - width/2) * 0.05; // Simple lens distortion proxy
+                const shiftY = (drop.y - height/2) * 0.05;
+                
+                // Magnification
+                const scale = 1.2; 
+                
+                // Draw the magnified background
+                // We draw the bgCanvas to main canvas, but centered on the drop
+                const dW = width * scale;
+                const dH = height * scale;
+                
+                ctx.drawImage(
+                    window.bgCanvas, 
+                    0, 0, width, height, // Source
+                    drop.x - dW/2, drop.y - dH/2, dW, dH // Dest (Centered on drop)
+                );
+
+                // 2. Drop Shape / Glass Effect
+                ctx.beginPath();
+                ctx.arc(drop.x, drop.y, drop.r, 0, Math.PI * 2);
+                
+                // Clipping to ensure the refraction doesn't bleed out (though we draw on top of bg, so it's fine)
+                // But to keep it clean, we can clip.
+                // Actually, clipping is expensive. Since we drew the drop on top of the background, 
+                // we just need to add the "Glass" overlay.
+
+                // Inner Shadow (Glass thickness)
+                const grad = ctx.createRadialGradient(
+                    drop.x - drop.r*0.3, drop.y - drop.r*0.3, drop.r*0.1,
+                    drop.x, drop.y, drop.r
+                );
+                
+                // Glass is darker on edges, lighter on specular
+                grad.addColorStop(0, 'rgba(255, 255, 255, 0.1)'); // Specular
+                grad.addColorStop(0.4, 'rgba(0, 0, 0, 0.0)'); // Clear
+                grad.addColorStop(0.8, 'rgba(0, 0, 0, 0.3)'); // Edge shadow
+                grad.addColorStop(1, 'rgba(0, 0, 0, 0.6)'); // Deep edge
+
+                ctx.fillStyle = grad;
+                ctx.fill();
+                
+                // Outer rim highlight (Fresnel effect)
+                ctx.lineWidth = drop.r * 0.15;
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+                ctx.stroke();
+            });
+
+            ctx.restore();
+
+            // 3. Draw Trails (Clear trails drawn on top of background, but below refraction? 
+            // No, trails clear the background. 
+            // But since we did refraction by drawing the background image ON TOP of the background,
+            // the trails are effectively "under" the refraction unless we handle them.
+            // Simplification: Trails are just drawn as dark streaks on the main canvas.
+            // Since refraction is drawn as an image of the background, the trail (which is background-colored)
+            // will be covered by the refraction drop.
+            // Wait, if I draw the refraction drop, it covers the trail.
+            // We need to draw trails AFTER refraction? No.
+            // Visual hierarchy:
+            // 1. Background
+            // 2. Trails (Darker streaks on background)
+            // 3. Refraction (Magnified BG) -> This covers the trail!
+            // 4. Glass overlay
+            
+            // To fix: We need to draw the trails on the OFFSCREEN canvas?
+            // Or just accept that the refraction creates a "bubble" that reveals the clear background.
+            // Let's try: Draw trails on the main canvas AFTER the background but BEFORE drops.
+            // Then draw drops (refraction). The refraction draws the BLURRED city, not the clear trail.
+            // This creates a weird effect where drops show the background, not the trail.
+            
+            // BETTER APPROACH FOR SINGLE FILE:
+            // Skip the offscreen canvas refraction for perfect realism.
+            // Instead, just draw the background, then draw the "glass" circles.
+            // The "refraction" is implied by the glass distortion (we can't do it easily without offscreen).
+            // OR: Use the offscreen canvas, but don't draw the refraction image. 
+            // Just draw the "Glass" overlay. The trail will be visible.
+            // The prompt asks for "Refract the bokeh".
+            // I will implement a simple pseudo-refraction: 
+            // I will draw the background to bgCanvas.
+            // I will draw the trails to bgCanvas.
+            // Then I will draw the drops.
+            // Inside the drop, I will draw a piece of bgCanvas.
+            
+            // Let's adjust the loop:
+            // 1. Draw BG to Main.
+            // 2. Draw Trails to Main.
+            // 3. Draw BG to bgCanvas (clean BG + Trails).
+            // 4. Iterate Drops:
+            //    a. Draw Magnified bgCanvas piece (Refraction).
+            //    b. Draw Glass Overlay.
+            
+            // BUT: If I draw bgCanvas (which has trails) into the drop, the drop shows the trail.
+            // This works.
+            
+            // Let's implement this properly now.
+        }
+
+        // --- REWRITING ANIMATE FOR CORRECT HIERARCHY ---
+
+        // We need to redraw the loop logic to handle trails on the offscreen canvas
+        // to support refraction properly.
+        
+        // Clear
+        ctx.clearRect(0, 0, width, height);
+
+        // 1. Draw Background to Main Canvas
+        drawBackground(time);
+
+        // 2. Update Physics
+        handleCollisions();
+
+        // 3. Draw Trails to MAIN Canvas
+        // We need to know which drops are streaking.
+        ctx.save();
+        drops.forEach(drop => {
+            if (drop.state === 'streaking') {
+                // Draw the clear trail. 
+                // Since the background is blurred, a "clear" trail is just the background color (black

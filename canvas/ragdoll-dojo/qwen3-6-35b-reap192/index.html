@@ -5,37 +5,538 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Ragdoll Dojo</title>
     <style>
-        body { margin: 0; overflow: hidden; background-color: #111; font-family: sans-serif; }
-        canvas { display: block; }
-        #ui {
-            position: absolute;
-            top: 10px;
-            left: 10px;
-            color: rgba(255, 255, 255, 0.5);
-            pointer-events: none;
-        }
+        body { margin: 0; overflow: hidden; background: #222; }
+        canvas { display: block; width: 100vw; height: 100vh; }
     </style>
 </head>
 <body>
-    <div id="ui">Ragdoll Dojo - Verlet Physics</div>
-    <canvas id="c"></canvas>
-    <script>
-        // --- Configuration ---
-        const CONFIG = {
-            gravity: 0.5,
-            friction: 0.99,
-            floorFriction: 0.8,
-            bounce: 0.6,
-            constraintIterations: 10,
-            particleRadius: 4,
-            constraintRadius: 2,
-            subSteps: 2,
-            slowMoTrigger: 0.2, // Velocity threshold for slow-mo
-            slowMoFactor: 0.2,
-            spawnRate: 200, // Frames between spawns
-        };
+<canvas id="c"></canvas>
+<script>
+/**
+ * RAGDOLL DOJO
+ * A procedural physics playground using Verlet integration.
+ * No external libraries.
+ */
 
-        // --- Vector Math ---
-        class Vec {
-            constructor(x, y) { this.x = x; this.y = y; }
-            add(v) { return new Vec(this.x + v.x, this.y + v.y); }
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+let width, height;
+function resize() {
+    width = canvas.width = window.innerWidth;
+    height = canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// --- MATH & UTILS ---
+const Vec2 = {
+    add: (v1, v2) => ({ x: v1.x + v2.x, y: v1.y + v2.y }),
+    sub: (v1, v2) => ({ x: v1.x - v2.x, y: v1.y - v2.y }),
+    mul: (v, s) => ({ x: v.x * s, y: v.y * s }),
+    dot: (v1, v2) => v1.x * v2.x + v1.y * v2.y,
+    cross: (v1, v2) => v1.x * v2.y - v1.y * v2.x,
+    len: (v) => Math.sqrt(v.x * v.x + v.y * v.y),
+    dist: (v1, v2) => Math.sqrt((v1.x - v2.x) ** 2 + (v1.y - v2.y) ** 2),
+    normalize: (v) => {
+        const l = Math.sqrt(v.x * v.x + v.y * v.y);
+        return l === 0 ? { x: 0, y: 0 } : { x: v.x / l, y: v.y / l };
+    }
+};
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+// --- PHYSICS CONSTANTS ---
+const GRAVITY = 0.5;
+const FRICTION = 0.99;
+const BOUNCE = 0.7;
+const ITERATIONS = 10; // Constraint solver passes
+const PAUSE_FRAMES = 120; // Slow-mo duration
+const SLOWMO_FACTOR = 0.2;
+
+// --- CLASSES ---
+
+class Point {
+    constructor(x, y, pinned = false) {
+        this.x = x;
+        this.y = y;
+        this.oldx = x;
+        this.oldy = y;
+        this.pinned = pinned;
+    }
+
+    update() {
+        if (this.pinned) return;
+        const vx = (this.x - this.oldx) * FRICTION;
+        const vy = (this.y - this.oldy) * FRICTION;
+        this.oldx = this.x;
+        this.oldy = this.y;
+        this.x += vx;
+        this.y += vy;
+        this.y += GRAVITY;
+    }
+}
+
+class Stick {
+    constructor(p1, p2, length = null, visible = true, width = 2) {
+        this.p1 = p1;
+        this.p2 = p2;
+        this.length = length || Vec2.dist(p1, p2);
+        this.visible = visible;
+        this.width = width;
+        this.color = '#ccc';
+    }
+
+    update() {
+        const dx = this.p2.x - this.p1.x;
+        const dy = this.p2.y - this.p1.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist === 0) return;
+        const diff = (this.length - dist) / dist;
+        const offsetX = dx * diff * 0.5;
+        const offsetY = dy * diff * 0.5;
+
+        if (!this.p1.pinned) {
+            this.p1.x -= offsetX;
+            this.p1.y -= offsetY;
+        }
+        if (!this.p2.pinned) {
+            this.p2.x += offsetX;
+            this.p2.y += offsetY;
+        }
+    }
+
+    draw(ctx) {
+        if (!this.visible) return;
+        ctx.beginPath();
+        ctx.moveTo(this.p1.x, this.p1.y);
+        ctx.lineTo(this.p2.x, this.p2.y);
+        ctx.strokeStyle = this.color;
+        ctx.lineWidth = this.width;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+    }
+}
+
+class Ragdoll {
+    constructor(x, y) {
+        this.points = [];
+        this.sticks = [];
+        this.active = true;
+        this.color = `hsl(${Math.random() * 360}, 70%, 60%)`;
+
+        // Create joints
+        const head = new Point(x, y);
+        const neck = new Point(x, y + 20);
+        const hip = new Point(x, y + 50);
+        const lKnee = new Point(x, y + 80);
+        const rKnee = new Point(x, y + 80);
+        const lAnkle = new Point(x, y + 110);
+        const rAnkle = new Point(x, y + 110);
+        const lElbow = new Point(x - 15, y + 30);
+        const rElbow = new Point(x + 15, y + 30);
+        const lHand = new Point(x - 20, y + 50);
+        const rHand = new Point(x + 20, y + 50);
+
+        this.points.push(head, neck, hip, lKnee, rKnee, lAnkle, rAnkle, lElbow, rElbow, lHand, rHand);
+
+        // Structure
+        this.addStick(head, neck, true);
+        this.addStick(neck, hip, true); // Spine
+        this.addStick(neck, lElbow, true);
+        this.addStick(lElbow, lHand, true); // L Arm
+        this.addStick(neck, rElbow, true);
+        this.addStick(rElbow, rHand, true); // R Arm
+        this.addStick(hip, lKnee, true);
+        this.addStick(lKnee, lAnkle, true); // L Leg
+        this.addStick(hip, rKnee, true);
+        this.addStick(rKnee, rAnkle, true); // R Leg
+
+        // Extra Sticks for structural integrity / stiffness
+        this.addStick(head, hip, false, 0); // Invisible stiffener? No, too floppy.
+        // Add knee bends to prevent 180 folds
+        this.addStick(neck, hip, false, 0, 0); // Keep spine straight-ish
+        // Add cross supports
+        this.addStick(lElbow, rElbow, false, 0);
+        this.addStick(lKnee, rKnee, false, 0);
+    }
+
+    addStick(p1, p2, visible = true, w = 2) {
+        this.sticks.push(new Stick(p1, p2, null, visible, w));
+    }
+
+    update() {
+        for (let p of this.points) p.update();
+        for (let i = 0; i < ITERATIONS; i++) {
+            for (let s of this.sticks) {
+                s.update();
+            }
+            this.enforceBounds();
+        }
+    }
+
+    enforceBounds() {
+        const r = 5; // Point radius
+        for (let p of this.points) {
+            if (p.y > height - r) { p.y = height - r; p.oldy = p.y; }
+            if (p.x < r) { p.x = r; p.oldx = p.x; }
+            if (p.x > width - r) { p.x = width - r; p.oldx = p.x; }
+        }
+    }
+
+    draw(ctx) {
+        ctx.strokeStyle = this.color;
+        ctx.lineCap = 'round';
+        for (let s of this.sticks) s.draw(ctx);
+        
+        // Draw Head
+        ctx.beginPath();
+        ctx.arc(this.points[0].x, this.points[0].y, 10, 0, Math.PI * 2);
+        ctx.fillStyle = this.color;
+        ctx.fill();
+    }
+}
+
+// --- ENVIRONMENT OBJECTS ---
+
+class Obstacle {
+    constructor(x, y, w, h) {
+        this.x = x; this.y = y; this.w = w; this.h = h;
+    }
+    
+    draw(ctx) {
+        ctx.fillStyle = '#444';
+        ctx.fillRect(this.x, this.y, this.w, this.h);
+    }
+
+    check(p) {
+        // Simple AABB collision
+        // Check closest point on rect to circle center
+        let testX = p.x;
+        let testY = p.y;
+        if (p.x < this.x) testX = this.x;
+        else if (p.x > this.x + this.w) testX = this.x + this.w;
+        if (p.y < this.y) testY = this.y;
+        else if (p.y > this.y + this.h) testY = this.y + this.h;
+
+        const distX = p.x - testX;
+        const distY = p.y - testY;
+        const distance = Math.sqrt(distX * distX + distY * distY);
+
+        if (distance < 5) { // Point radius approx
+             // Push back
+             const overlap = 5 - distance;
+             if (distance === 0) { p.y -= 5; return; } // Prevent zero div
+             const nx = distX / distance;
+             const ny = distY / distance;
+             p.x += nx * overlap;
+             p.y += ny * overlap;
+             p.oldx = p.x - (p.x - p.oldx) * BOUNCE;
+             p.oldy = p.y - (p.y - p.oldy) * BOUNCE;
+        }
+    }
+}
+
+class Trampoline extends Obstacle {
+    constructor(x, y, w, h) {
+        super(x, y, w, h);
+        this.color = '#349';
+        this.maxStretch = 10;
+        this.displacement = 0;
+    }
+
+    check(p) {
+        // Override AABB to be more lenient
+        if (p.x > this.x - 10 && p.x < this.x + this.w + 10 &&
+            p.y > this.y - 10 && p.y < this.y + this.h + 10) {
+            
+            // Top surface bounce
+            if (p.y > this.y && p.y < this.y + 20 && 
+                p.x > this.x && p.x < this.x + this.w &&
+                p.oldy >= this.y) {
+                
+                p.y = this.y;
+                p.oldy = p.y + Math.abs(p.y - p.oldy) * 2.5; // Super bounce
+                this.displacement = 10;
+            }
+        }
+    }
+
+    update() {
+        this.displacement *= 0.9;
+        if (this.displacement < 0.5) this.displacement = 0;
+    }
+
+    draw(ctx) {
+        ctx.fillStyle = '#222';
+        ctx.fillRect(this.x + 5, this.y + this.h, this.w - 10, 10);
+        ctx.strokeStyle = '#0f0';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(this.x, this.y);
+        ctx.lineTo(this.x + this.w, this.y + this.displacement);
+        ctx.stroke();
+    }
+}
+
+class SawBlade extends Obstacle {
+    constructor(x, y, r) {
+        super(x, y, r*2, r*2);
+        this.r = r;
+        this.angle = 0;
+        this.rotSpeed = 0.2;
+    }
+
+    update() {
+        this.angle += this.rotSpeed;
+    }
+
+    check(p) {
+        const dx = p.x - this.x;
+        const dy = p.y - this.y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        
+        // Collision with circle
+        if (dist < this.r + 5) {
+            const nx = dx / dist;
+            const ny = dy / dist;
+            
+            // Push out
+            p.x = this.x + nx * (this.r + 5);
+            p.y = this.y + ny * (this.r + 5);
+            
+            // Spin friction
+            const tangentX = -ny;
+            const tangentY = nx;
+            
+            p.oldx += tangentX * this.rotSpeed * 2;
+            p.oldy += tangentY * this.rotSpeed * 2;
+        }
+    }
+
+    draw(ctx) {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.angle);
+        ctx.fillStyle = '#888';
+        ctx.beginPath();
+        ctx.arc(0, 0, this.r, 0, Math.PI*2);
+        ctx.fill();
+        // Teeth
+        ctx.strokeStyle = '#ccc';
+        ctx.lineWidth = 2;
+        for(let i=0; i<8; i++) {
+            ctx.rotate(Math.PI/4);
+            ctx.beginPath();
+            ctx.moveTo(this.r, 0);
+            ctx.lineTo(this.r + 5, 0);
+            ctx.stroke();
+        }
+        ctx.restore();
+    }
+}
+
+class Pendulum extends Obstacle {
+    constructor(x, y, l, r) {
+        super(x, y, r*2, r*2);
+        this.origin = {x, y};
+        this.length = l;
+        this.r = r;
+        this.angle = Math.PI / 4;
+        this.angVel = 0.02;
+    }
+
+    update() {
+        // Simple pendulum physics
+        const gravityComp = -0.05 * Math.sin(this.angle);
+        this.angVel += gravityComp;
+        this.angVel *= 0.999; // Air resistance
+        this.angle += this.angVel;
+    }
+
+    getTip() {
+        return {
+            x: this.origin.x + Math.cos(this.angle) * this.length,
+            y: this.origin.y + Math.sin(this.angle) * this.length
+        };
+    }
+
+    check(p) {
+        const tip = this.getTip();
+        const dx = p.x - tip.x;
+        const dy = p.y - tip.y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        
+        if (dist < this.r + 5) {
+            const nx = dx / dist;
+            const ny = dy / dist;
+            p.x = tip.x + nx * (this.r + 5);
+            p.y = tip.y + ny * (this.r + 5);
+            
+            // Spin it
+            p.oldx += (nx * -1) * this.angVel * 20;
+            p.oldy += (ny * -1) * this.angVel * 20;
+        }
+    }
+
+    draw(ctx) {
+        const tip = this.getTip();
+        ctx.strokeStyle = '#555';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(this.origin.x, this.origin.y);
+        ctx.lineTo(tip.x, tip.y);
+        ctx.stroke();
+        
+        ctx.fillStyle = '#d00';
+        ctx.beginPath();
+        ctx.arc(tip.x, tip.y, this.r, 0, Math.PI*2);
+        ctx.fill();
+    }
+}
+
+// --- GAME LOGIC ---
+
+const obstacles = [];
+const ragdolls = [];
+let lastTime = 0;
+let accumulator = 0;
+let dropCounter = 0;
+let slowMo = false;
+let slowMoTimer = 0;
+let currentSpeed = 1.0;
+
+// Init Environment
+function initWorld() {
+    // Floor is implicit at height
+    // Walls implicit at width/0
+    
+    // Saw 1
+    obstacles.push(new SawBlade(width * 0.2, height * 0.4, 30));
+    
+    // Saw 2
+    obstacles.push(new SawBlade(width * 0.8, height * 0.3, 40));
+
+    // Pendulum
+    obstacles.push(new Pendulum(width * 0.5, 0, height * 0.6, 20));
+
+    // Trampolines
+    obstacles.push(new Trampoline(width * 0.3, height * 0.85, 100, 20));
+    obstacles.push(new Trampoline(width * 0.6, height * 0.85, 100, 20));
+    
+    // Static boxes
+    obstacles.push(new Obstacle(width * 0.4, height * 0.6, 50, 150));
+    obstacles.push(new Obstacle(width * 0.1, height * 0.5, 100, 20));
+}
+
+function spawnRagdoll(x, y) {
+    ragdolls.push(new Ragdoll(x || Math.random() * width * 0.8 + 50, y || -50));
+}
+
+function checkCollisions() {
+    let maxImpact = 0;
+
+    // Check Ragdoll vs Obstacle
+    for (let r of ragdolls) {
+        for (let p of r.points) {
+            for (let o of obstacles) {
+                o.check(p);
+                // Calculate impact speed
+                const vx = p.x - p.oldx;
+                const vy = p.y - p.oldy;
+                const impact = Math.sqrt(vx*vx + vy*vy);
+                if (impact > maxImpact) maxImpact = impact;
+            }
+        }
+    }
+
+    // Check Ragdoll vs Ragdoll
+    for (let i=0; i<ragdolls.length; i++) {
+        for (let j=i+1; j<ragdolls.length; j++) {
+            const r1 = ragdolls[i];
+            const r2 = ragdolls[j];
+            
+            for (let p1 of r1.points) {
+                for (let p2 of r2.points) {
+                    const dx = p1.x - p2.x;
+                    const dy = p1.y - p2.y;
+                    const dist = Math.sqrt(dx*dx + dy*dy);
+                    const minDist = 10; // Approx radius
+                    
+                    if (dist < minDist && dist > 0) {
+                        const nx = dx/dist;
+                        const ny = dy/dist;
+                        const overlap = (minDist - dist);
+                        
+                        p1.x += nx * overlap * 0.5;
+                        p1.y += ny * overlap * 0.5;
+                        p2.x -= nx * overlap * 0.5;
+                        p2.y -= ny * overlap * 0.5;
+                        
+                        // Energy check for slowmo
+                        const impact = Math.abs((p1.x - p1.oldx) - (p2.x - p2.oldx));
+                        if (impact > maxImpact) maxImpact = impact;
+                    }
+                }
+            }
+        }
+    }
+
+    // Slow-mo trigger
+    if (maxImpact > 4) {
+        slowMo = true;
+        slowMoTimer = PAUSE_FRAMES;
+    }
+}
+
+function update() {
+    // Slow Motion Logic
+    if (slowMo) {
+        currentSpeed = SLOWMO_FACTOR;
+        slowMoTimer--;
+        if (slowMoTimer <= 0) {
+            slowMo = false;
+            currentSpeed = 1.0;
+        }
+    }
+
+    // Update Obstacles
+    for (let o of obstacles) {
+        if (o.update) o.update();
+    }
+
+    // Update Ragdolls
+    for (let r of ragdolls) {
+        r.update();
+    }
+
+    // Physics Interactions
+    checkCollisions();
+
+    // Cleanup dead ragdolls
+    // A ragdoll is dead if it is on the floor, still, and old
+    for (let i = ragdolls.length - 1; i >= 0; i--) {
+        const r = ragdolls[i];
+        let settled = true;
+        for(let p of r.points) {
+            const v = Math.abs(p.x - p.oldx) + Math.abs(p.y - p.oldy);
+            if (v > 0.1) settled = false;
+            if (p.y > height - 10) p.y = height - 10; // Floor safety
+        }
+        
+        if (settled) {
+            r.active = false;
+            // Dissolve effect
+            const cx = r.points[0].x;
+            const cy = r.points[0].y;
+            // Simple fade out logic could be added here, but for now we just remove after a delay
+            setTimeout(() => {
+                const idx = ragdolls.indexOf(r);
+                if(idx > -1) ragdolls.splice(idx, 1);
+            }, 1000);
+        }
+    }
+
+    // Spawn Logic
+    dropCounter++;
+    const spawnRate = slowMo ? 100 : 150; // Slower

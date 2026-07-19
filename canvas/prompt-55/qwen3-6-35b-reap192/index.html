@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Organic Scribble</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #ffffff;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <script>
+        // --- Configuration ---
+        const config = {
+            numTentacles: 25,         // Number of organic structures
+            tentacleLength: 200,      // Number of segments per tentacle
+            baseRadius: 20,           // Starting radius of the blob
+            expansionRate: 3.5,       // How fast the tentacles stretch
+            noiseScale: 0.15,         // How "wiggly" the movement is
+            rotationSpeed: 0.005,     // Global rotation speed
+            perspective: 600,         // Focal length
+            inkWidth: 1.5             // Line weight
+        };
+
+        // --- Vector Math Helpers ---
+        class Vector3 {
+            constructor(x, y, z) {
+                this.x = x; this.y = y; this.z = z;
+            }
+            add(v) { return new Vector3(this.x + v.x, this.y + v.y, this.z + v.z); }
+            sub(v) { return new Vector3(this.x - v.x, this.y - v.y, this.z - v.z); }
+            mult(s) { return new Vector3(this.x * s, this.y * s, this.z * s); }
+            normalize() {
+                const len = Math.sqrt(this.x * this.x + this.y * this.y + this.z * this.z);
+                return len === 0 ? new Vector3(0,0,0) : new Vector3(this.x/len, this.y/len, this.z/len);
+            }
+            // 3D Rotation
+            rotateX(a) {
+                const c = Math.cos(a), s = Math.sin(a);
+                const ny = this.y * c - this.z * s;
+                const nz = this.z * c + this.y * s;
+                this.y = ny; this.z = nz;
+            }
+            rotateY(a) {
+                const c = Math.cos(a), s = Math.sin(a);
+                const nx = this.x * c - this.z * s;
+                const nz = this.z * c + this.x * s;
+                this.x = nx; this.z = nz;
+            }
+            rotateZ(a) {
+                const c = Math.cos(a), s = Math.sin(a);
+                const nx = this.x * c - this.y * s;
+                const ny = this.y * c + this.x * s;
+                this.x = nx; this.y = ny;
+            }
+        }
+
+        // --- Simplex-like Noise (Simplified for standalone) ---
+        // Basic pseudo-noise for organic movement
+        function noise(x, y, z) {
+            return Math.sin(x) * Math.cos(y) * Math.sin(z) 
+                 + Math.sin(x * 0.5 + y * 0.5) * Math.cos(z * 0.3);
+        }
+
+        // --- Core Classes ---
+
+        class Segment {
+            constructor(pos, parent) {
+                this.pos = pos; // Current physical position in space
+                this.restPos = pos; // Where it "wants" to be relative to parent
+                this.parent = parent;
+                this.angle = new Vector3(
+                    Math.random() * Math.PI,
+                    Math.random() * Math.PI,
+                    Math.random() * Math.PI
+                );
+            }
+
+            update(time) {
+                // Organic jitter
+                const jitter = 2.5;
+                this.angle.x += (Math.random() - 0.5) * config.noiseScale * 0.2;
+                this.angle.y += (Math.random() - 0.5) * config.noiseScale * 0.2;
+                this.angle.z += (Math.random() - 0.5) * config.noiseScale * 0.1;
+
+                // Apply orientation
+                this.pos.rotateX(this.angle.x);
+                this.pos.rotateY(this.angle.y);
+                this.pos.rotateZ(this.angle.z);
+
+                // Chain up (if not root)
+                if (this.parent) {
+                    this.pos = this.pos.add(this.parent.pos);
+                }
+            }
+        }
+
+        class Tentacle {
+            constructor() {
+                this.segments = [];
+                this.currentPos = new Vector3(0, 0, 0);
+                
+                // Create base blob (root)
+                this.segments.push(new Segment(this.currentPos, null));
+
+                // Build the tentacle chain
+                for (let i = 0; i < config.tentacleLength; i++) {
+                    const direction = this.currentPos.normalize();
+                    
+                    // Add random organic spread
+                    const spread = (Math.random() - 0.5) * 1.5;
+                    const spread2 = (Math.random() - 0.5) * 1.5;
+                    
+                    // Move forward and slightly random
+                    const nextPos = new Vector3(
+                        direction.x * config.expansionRate + spread,
+                        direction.y * config.expansionRate + spread2,
+                        direction.z * config.expansionRate
+                    );
+
+                    const seg = new Segment(nextPos, this.currentPos);
+                    this.segments.push(seg);
+                    this.currentPos = nextPos;
+                }
+            }
+
+            update(time, globalAngleX, globalAngleY) {
+                // Reset the physical position calculation every frame
+                // We start from 0,0,0 for the root every frame to prevent drift
+                // but we update the internal angles
+                
+                for (let i = 0; i < this.segments.length; i++) {
+                    // 1. Update local organic rotation
+                    this.segments[i].update(time);
+                    
+                    // 2. Apply global world rotation
+                    this.segments[i].pos.rotateY(globalAngleY);
+                    this.segments[i].pos.rotateX(globalAngleX);
+                }
+            }
+
+            render(ctx, focal, centerX, centerY) {
+                ctx.beginPath();
+                
+                let prevMap = null;
+
+                for (let i = 0; i < this.segments.length; i++) {
+                    const seg = this.segments[i];
+                    
+                    // Project 3D to 2D
+                    // We use the z position to determine opacity/depth scaling
+                    const scale = focal / (focal + seg.pos.z);
+                    
+                    const x = centerX + seg.pos.x * scale;
+                    const y = centerY + seg.pos.y * scale;
+
+                    // Depth based opacity
+                    const opacity = Math.max(0.1, Math.min(1, (scale - 0.2)));
+                    
+                    // Connect previous point
+                    if (prevMap) {
+                        ctx.moveTo(prevMap.x, prevMap.y);
+                        ctx.lineTo(x, y);
+                    }
+                    
+                    prevMap = { x, y, scale, z: seg.pos.z };
+                }
+                
+                // Draw the line
+                ctx.stroke();
+            }
+        }
+
+        // --- Main Application ---
+
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let width, height;
+        
+        let tentacles = [];
+        let time = 0;
+
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            initScene();
+        }
+
+        function initScene() {
+            tentacles = [];
+            for (let i = 0; i < config.numTentacles; i++) {
+                tentacles.push(new Tentacle());
+            }
+        }
+
+        function animate() {
+            // Clear with white
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, width, height);
+
+            time += 0.01;
+
+            // Global rotation logic
+            const rotY = time * config.rotationSpeed;
+            // Add some swaying to the X rotation
+            const rotX = Math.sin(time * 0.5) * 0.5 + Math.PI * 0.1; 
+
+            // Configure ink style
+            ctx.strokeStyle = '#000000';
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+
+            // Render tentacles
+            // Sort by average Z depth for painter's algorithm (optional but helps with "layering" ink)
+            // For pure scribble, simple layering is often fine, but let's sort slightly for depth
+            
+            // We don't fully sort, we just draw. The "ink" look works best with transparency or raw overlap.
+            
+            for (let t = 0; t < tentacles.length; t++) {
+                const tentacle = tentacles[t];
+                
+                // Update physics
+                tentacle.update(time, rotX, rotY);
+
+                // Set stroke style based on depth (creates illusion of volume)
+                // Since we can't do per-vertex stroke width easily in standard canvas, 
+                // we do a "shadow pass" and a "core pass"
+                
+                // 1. Shadow/Depth Pass (Thicker, fainter)
+                ctx.beginPath();
+                ctx.lineWidth = config.inkWidth * 2.5;
+                ctx.globalAlpha = 0.15;
+                ctx.strokeStyle = '#000000';
+                
+                let prevM = null;
+                const focal = config.perspective + (width / 2);
+                const cx = width / 2;
+                const cy = height / 2;
+
+                for(let s=0; s<tentacle.segments.length; s++) {
+                    const seg = tentacle.segments[s];
+                    const scale = focal / (focal + seg.pos.z);
+                    const x = cx + seg.pos.x * scale;
+                    const y = cy + seg.pos.y * scale;
+                    
+                    if(!prevM) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                    prevM = {x,y};
+                }
+                ctx.stroke();
+
+                // 2. Core Pass (Thin, sharp, solid)
+                ctx.beginPath();
+                ctx.lineWidth = config.inkWidth;
+                ctx.globalAlpha = 0.85;
+                ctx.strokeStyle = '#000000';
+                
+                prevM = null;
+                for(let s=0; s<tentacle.segments.length; s++) {
+                    const seg = tentacle.segments[s];
+                    const scale = focal / (focal + seg.pos.z);
+                    const x = cx + seg.pos.x * scale;
+                    const y = cy + seg.pos.y * scale;
+                    
+                    if(!prevM) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                    prevM = {x,y};
+                }
+                ctx.stroke();
+                
+                // Reset alpha
+                ctx.globalAlpha = 1.0;
+            }
+
+            requestAnimationFrame(animate);
+        }
+
+        // Initialize
+        window.addEventListener('resize', resize);
+        resize();
+        animate();
+
+    </script>
+</body>
+</html>

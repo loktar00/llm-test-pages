@@ -5,11 +5,527 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Wasteland Auto-Combat</title>
     <style>
-        body { margin: 0; overflow: hidden; background: #111; font-family: 'Courier New', Courier, monospace; user-select: none; }
-        canvas { display: block; }
-        #ui { position: absolute; top: 20px; left: 20px; color: #fff; pointer-events: none; text-shadow: 1px 1px 0 #000; }
-        .stat { margin-bottom: 5px; font-size: 14px; font-weight: bold; }
-        #controls { position: absolute; bottom: 20px; left: 20px; color: rgba(255,255,255,0.5); font-size: 12px; pointer-events: none; }
-        #game-over { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #d00; font-size: 40px; font-weight: bold; display: none; text-shadow: 2px 2px 0 #000; text-align: center; }
-        #ammo-bar { width: 200px; height: 20px; border: 2px solid #444; background: #222; margin-top: 5px; }
-        #ammo-fill { height: 100%; background: #f80; width:
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #1a1510; /* Dark rusty background */
+            font-family: 'Courier New', Courier, monospace;
+            user-select: none;
+        }
+        canvas {
+            display: block;
+        }
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+        .hud-panel {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.7);
+            border: 2px solid #554433;
+            padding: 10px;
+            color: #dcbfa0;
+            border-radius: 4px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.5);
+        }
+        #stats-panel {
+            bottom: 20px;
+            left: 20px;
+            width: 250px;
+        }
+        #controls-panel {
+            top: 20px;
+            left: 20px;
+            font-size: 12px;
+            opacity: 0.8;
+        }
+        #weapon-name {
+            color: #ffaa00;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        .bar-container {
+            width: 100%;
+            height: 10px;
+            background: #333;
+            margin-top: 5px;
+            border: 1px solid #555;
+        }
+        .bar-fill {
+            height: 100%;
+            background: #8b0000;
+            width: 100%;
+            transition: width 0.1s;
+        }
+        .bar-fill.health { background: #4caf50; }
+        .bar-fill.aim { background: #2196f2; }
+    </style>
+</head>
+<body>
+
+    <canvas id="gameCanvas"></canvas>
+    
+    <div id="ui-layer">
+        <div id="controls-panel" class="hud-panel">
+            <strong>CONTROLS</strong><br>
+            WASD / Arrows: Drive<br>
+            Mouse: Aim<br>
+            Click / Space: Fire
+        </div>
+        <div id="stats-panel" class="hud-panel">
+            <div id="weapon-name">PISTOL</div>
+            <div>ARMOR</div>
+            <div class="bar-container"><div id="health-bar" class="bar-fill health"></div></div>
+            <div style="margin-top:5px; font-size: 12px; color: #aaa;">TARGETS: <span id="enemy-count">0</span></div>
+            <div style="font-size: 12px; color: #aaa;">ZOMBIES: <span id="zombie-count">0</span></div>
+        </div>
+    </div>
+
+<script>
+/**
+ * WASTELAND AUTO-COMBAT
+ * A single-file simulation.
+ */
+
+// --- Configuration ---
+const CFG = {
+    mapWidth: 4000,
+    mapHeight: 4000,
+    zombieCap: 250,
+    aiCount: 10,
+    colors: {
+        ground: '#2c2820',
+        grid: '#36312a',
+        player: '#4a90e2',
+        playerOutline: '#8ab4f7',
+        ai: ['#d32f2f', '#827777', '#43a047', '#7cb342', '#fdd835'], // Red, Grey, Green, Lime, Yellow
+        zombie: '#689f38',
+        projectile: '#fff',
+        blood: '#8a0303'
+    },
+    physics: {
+        friction: 0.96,
+        turnSpeed: 0.06,
+        accel: 0.4,
+        maxSpeed: 12,
+        brakeForce: 0.5
+    }
+};
+
+// --- Globals ---
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d', { alpha: false });
+const persistentCanvas = document.createElement('canvas');
+const pCtx = persistentCanvas.getContext('2d');
+
+let width, height;
+let lastTime = 0;
+let camera = { x: 0, y: 0, shake: 0 };
+let keys = {};
+let mouse = { x: 0, y: 0, down: false };
+
+// --- Entities ---
+let cars = [];
+let zombies = [];
+let projectiles = [];
+let particles = [];
+let pickups = [];
+let obstacles = [];
+
+// --- Weapon Definitions ---
+const WEAPONS = {
+    pistol: { name: 'PISTOL', rate: 400, damage: 15, speed: 15, spread: 0.05, color: '#fff', type: 'bullet', count: 1 },
+    machinegun: { name: 'MACHINE GUN', rate: 100, damage: 8, speed: 18, spread: 0.1, color: '#ffeb3b', type: 'bullet', count: 1 },
+    shotgun: { name: 'SHOTGUN', rate: 800, damage: 12, speed: 14, spread: 0.3, color: '#fff', type: 'bullet', count: 6 },
+    rocket: { name: 'ROCKET', rate: 1200, damage: 80, speed: 8, spread: 0.02, color: '#ff5722', type: 'explosive', count: 1, radius: 100 },
+    flamethrower: { name: 'FLAMETHROWER', rate: 50, damage: 2, speed: 10, spread: 0.2, color: '#ff9800', type: 'cone', count: 1, radius: 150 }
+};
+
+// --- Vector Math Helpers ---
+const Vec2 = {
+    add: (v1, v2) => ({ x: v1.x + v2.x, y: v1.y + v2.y }),
+    sub: (v1, v2) => ({ x: v1.x - v2.x, y: v1.y - v2.y }),
+    mag: (v) => Math.sqrt(v.x * v.x + v.y * v.y),
+    norm: (v) => { let m = Math.sqrt(v.x*v.x + v.y*v.y); return m > 0 ? {x: v.x/m, y: v.y/m} : {x:0, y:0}; },
+    dist: (v1, v2) => Math.sqrt((v1.x - v2.x)**2 + (v1.y - v2.y)**2),
+    limit: (v, max) => {
+        let m = Math.sqrt(v.x*v.x + v.y*v.y);
+        if (m > max) return { x: (v.x/m)*max, y: (v.y/m)*max };
+        return v;
+    },
+    angle: (v1, v2) => Math.atan2(v2.y - v1.y, v2.x - v1.x)
+};
+
+// --- Classes ---
+
+class Obstacle {
+    constructor(x, y, w, h) {
+        this.x = x; this.y = y; this.w = w; this.h = h;
+    }
+    draw(ctx) {
+        ctx.fillStyle = '#1a1612';
+        ctx.fillRect(this.x, this.y, this.w, this.h);
+        ctx.strokeStyle = '#3a3530';
+        ctx.strokeRect(this.x, this.y, this.w, this.h);
+        // Debris
+        ctx.fillStyle = '#25201a';
+        ctx.beginPath();
+        ctx.arc(this.x + Math.random()*this.w, this.y + Math.random()*this.h, 2, 0, Math.PI*2);
+        ctx.fill();
+    }
+}
+
+class Pickup {
+    constructor(x, y) {
+        this.x = x; this.y = y;
+        this.type = Object.keys(WEAPONS)[Math.floor(Math.random() * 3)]; // Only give better guns
+        this.life = 1000; // frames
+    }
+    update() { this.life--; }
+    draw(ctx) {
+        if (this.life < 60 && Math.floor(Date.now() / 100) % 2 === 0) return;
+        const w = WEAPONS[this.type];
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(Date.now() / 500);
+        ctx.fillStyle = w.color;
+        ctx.shadowColor = w.color;
+        ctx.shadowBlur = 10;
+        ctx.fillRect(-8, -8, 16, 16);
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = '#000';
+        ctx.font = '10px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText(this.type[0].toUpperCase(), 0, 4);
+        ctx.restore();
+    }
+}
+
+class Zombie {
+    constructor(x, y) {
+        this.x = x; this.y = y;
+        this.vx = 0; this.vy = 0;
+        this.hp = 30;
+        this.angle = Math.random() * Math.PI * 2;
+        this.size = 6;
+        this.wobbleOffset = Math.random() * 100;
+    }
+
+    update(dt) {
+        // Find nearest car
+        let target = null;
+        let minDist = 800; // Aggro range
+
+        for (let c of cars) {
+            let d = Vec2.dist(this, c);
+            if (d < minDist) {
+                minDist = d;
+                target = c;
+            }
+        }
+
+        if (target) {
+            let angle = Vec2.angle(this, target);
+            this.vx = Math.cos(angle) * 1.5;
+            this.vy = Math.sin(angle) * 1.5;
+            this.angle = angle;
+        } else {
+            // Wander
+            this.angle += (Math.random() - 0.5) * 0.2;
+            this.vx = Math.cos(this.angle) * 0.5;
+            this.vy = Math.sin(this.angle) * 0.5;
+        }
+
+        this.x += this.vx;
+        this.y += this.vy;
+
+        // Bounds
+        if (this.x < 0) this.x = 0;
+        if (this.x > CFG.mapWidth) this.x = CFG.mapWidth;
+        if (this.y < 0) this.y = 0;
+        if (this.y > CFG.mapHeight) this.y = CFG.mapHeight;
+    }
+
+    draw(ctx) {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.angle);
+        
+        // Wobble animation
+        let wobble = Math.sin((Date.now() / 100) + this.wobbleOffset) * 0.2;
+        
+        ctx.fillStyle = CFG.colors.zombie;
+        ctx.beginPath();
+        // Body
+        ctx.moveTo(0, -this.size);
+        ctx.lineTo(this.size, this.size);
+        ctx.lineTo(-this.size, this.size);
+        ctx.fill();
+
+        // Arms
+        ctx.fillStyle = '#558020';
+        ctx.fillRect(-this.size - 2, -2, 4, 8);
+        ctx.fillRect(this.size - 2, -2, 4, 8);
+        
+        ctx.restore();
+    }
+}
+
+class Projectile {
+    constructor(x, y, angle, owner, weapon) {
+        this.x = x; this.y = y;
+        this.vx = Math.cos(angle) * weapon.speed;
+        this.vy = Math.sin(angle) * weapon.speed;
+        this.owner = owner; // 'player', 'enemy', or 'zombie'
+        this.weapon = weapon;
+        this.life = 100;
+        this.active = true;
+    }
+
+    update() {
+        this.x += this.vx;
+        this.y += this.vy;
+        this.life--;
+        if (this.life <= 0) this.active = false;
+
+        // Bounds check
+        if (this.x < 0 || this.x > CFG.mapWidth || this.y < 0 || this.y > CFG.mapHeight) this.active = false;
+        
+        // Obstacle check
+        for (let obs of obstacles) {
+            if (this.x > obs.x && this.x < obs.x + obs.w && this.y > obs.y && this.y < obs.y + obs.h) {
+                this.active = false;
+                createParticles(this.x, this.y, '#888', 5);
+            }
+        }
+    }
+
+    draw(ctx) {
+        ctx.fillStyle = this.weapon.color;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.weapon.type === 'explosive' ? 4 : 2, 0, Math.PI * 2);
+        ctx.fill();
+    }
+}
+
+class Car {
+    constructor(x, y, isPlayer = false) {
+        this.x = x;
+        this.y = y;
+        this.vx = 0;
+        this.vy = 0;
+        this.angle = 0;
+        this.isPlayer = isPlayer;
+        this.width = 24;
+        this.height = 14;
+        this.hp = 100;
+        this.maxHp = 100;
+        this.dead = false;
+        this.respawnTimer = 0;
+        
+        // Combat
+        this.weaponKey = 'pistol';
+        this.lastShotTime = 0;
+        
+        // AI State
+        this.state = 'patrol';
+        this.target = null;
+        this.stuckTimer = 0;
+        this.lastPos = {x, y};
+    }
+
+    getWeapon() { return WEAPONS[this.weaponKey]; }
+
+    update(dt) {
+        if (this.dead) {
+            this.respawnTimer--;
+            if (this.respawnTimer <= 0) this.respawn();
+            return;
+        }
+
+        // Physics
+        this.vx *= CFG.physics.friction;
+        this.vy *= CFG.physics.friction;
+        this.x += this.vx;
+        this.y += this.vy;
+
+        // Bounds
+        if (this.x < 0) { this.x = 0; this.vx *= -0.5; }
+        if (this.x > CFG.mapWidth) { this.x = CFG.mapWidth; this.vx *= -0.5; }
+        if (this.y < 0) { this.y = 0; this.vy *= -0.5; }
+        if (this.y > CFG.mapHeight) { this.y = CFG.mapHeight; this.vy *= -0.5; }
+
+        // Obstacle Collision
+        for (let obs of obstacles) {
+            if (this.x > obs.x - this.width && this.x < obs.x + obs.w + this.width &&
+                this.y > obs.y - this.height && this.y < obs.y + obs.h + this.height) {
+                // Simple resolution: push back
+                let dx = this.x - (obs.x + obs.w/2);
+                let dy = this.y - (obs.y + obs.h/2);
+                if (Math.abs(dx) > Math.abs(dy)) {
+                    this.vx *= -0.8;
+                    this.x += (dx > 0 ? 1 : -1) * 2;
+                } else {
+                    this.vy *= -0.8;
+                    this.y += (dy > 0 ? 1 : -1) * 2;
+                }
+                this.takeDamage(2);
+            }
+        }
+
+        // Zombie Collision
+        let zombieHitCount = 0;
+        for (let i = zombies.length - 1; i >= 0; i--) {
+            let z = zombies[i];
+            let dist = Vec2.dist(this, z);
+            if (dist < 20) {
+                zombieHitCount++;
+                // Kill zombie
+                z.hp = 0;
+                createParticles(z.x, z.y, CFG.colors.blood, 5);
+                stampBlood(z.x, z.y);
+                zombies.splice(i, 1);
+                
+                // Slow down
+                if (this.vx !== 0 || this.vy !== 0) {
+                    this.vx *= 0.9;
+                    this.vy *= 0.9;
+                }
+            }
+        }
+
+        // Logic (Player or AI)
+        if (this.isPlayer) {
+            this.handlePlayerInput();
+        } else {
+            this.handleAI();
+        }
+
+        // Fire
+        this.fire();
+    }
+
+    handlePlayerInput() {
+        let accel = 0;
+        let turn = 0;
+
+        if (keys['w'] || keys['ArrowUp']) accel = 1;
+        if (keys['s'] || keys['ArrowDown']) accel = -1;
+        if (keys['a'] || keys['ArrowLeft']) turn = -1;
+        if (keys['d'] || keys['ArrowRight']) turn = 1;
+
+        // Steering
+        if (Math.abs(this.vx) > 0.5 || Math.abs(this.vy) > 0.5) {
+            this.angle += turn * CFG.physics.turnSpeed;
+        }
+
+        // Acceleration
+        if (accel !== 0) {
+            this.vx += Math.cos(this.angle) * accel * CFG.physics.accel;
+            this.vy += Math.sin(this.angle) * accel * CFG.physics.accel;
+        }
+
+        // Limits
+        let speed = Math.sqrt(this.vx**2 + this.vy**2);
+        if (speed > CFG.physics.maxSpeed) {
+            this.vx = (this.vx / speed) * CFG.physics.maxSpeed;
+            this.vy = (this.vy / speed) * CFG.physics.maxSpeed;
+        }
+
+        // Aim
+        // Convert mouse screen pos to world pos
+        let worldMouseX = mouse.x + camera.x;
+        let worldMouseY = mouse.y + camera.y;
+        this.angle = Math.atan2(worldMouseY - this.y, worldMouseX - this.x);
+    }
+
+    handleAI() {
+        // 1. Find Targets
+        let bestTarget = null;
+        let bestDist = 600; // Vision range
+
+        // Find cars
+        for (let c of cars) {
+            if (c === this || c.dead) continue;
+            let d = Vec2.dist(this, c);
+            if (d < bestDist) {
+                bestDist = d;
+                bestTarget = c;
+            }
+        }
+        
+        // Also find zombies if close
+        let zombieTarget = null;
+        for (let z of zombies) {
+            if (Vec2.dist(this, z) < 200) {
+                zombieTarget = z;
+                break;
+            }
+        }
+
+        // State Machine
+        if (bestTarget) {
+            this.target = bestTarget;
+            this.state = 'attack';
+        } else {
+            this.state = 'patrol';
+            this.target = null;
+        }
+
+        // Actions
+        let desiredAngle = this.angle;
+        let accel = 0;
+
+        if (this.state === 'attack' && this.target) {
+            desiredAngle = Vec2.angle(this, this.target);
+            // Move randomly while attacking
+            if (Math.random() < 0.05) this.moveDir = Math.random() * Math.PI * 2;
+            
+            // If too close, back up or strafe
+            if (bestDist < 100) {
+                accel = -0.5;
+            } else {
+                accel = 0.5;
+            }
+            
+            // Avoid Zombies
+            let avoidAngle = 0;
+            let avoidCount = 0;
+            for(let z of zombies) {
+                if(Vec2.dist(this, z) < 80) {
+                    avoidAngle -= Vec2.angle(this, z); // Turn away
+                    avoidCount++;
+                }
+            }
+            if (avoidCount > 0) {
+                desiredAngle += avoidAngle / avoidCount;
+            }
+        } else {
+            // Patrol
+            if (!this.moveAngle || Math.random() < 0.01) {
+                this.moveAngle = Math.random() * Math.PI * 2;
+            }
+            desiredAngle = this.moveAngle;
+            accel = 1; // Cruise
+            
+            // Check for pickups
+            let nearestPickup = null;
+            let nearestPickupDist = 400;
+            for(let p of pickups) {
+                let d = Vec2.dist(this, p);
+                if(d < nearestPickupDist) {
+                    nearestPickupDist = d;
+                    nearestPickup = p;
+                }
+            }
+            if(nearestPickup) {
+                desiredAngle = Vec2.angle(this, nearestPickup);
+            }
+        }
+
+        // Smooth steering
+        let diff = desiredAngle - this.angle

@@ -1,45 +1,294 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Isometric Heightmap</title>
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            background-color: #1a1a1a;
-            overflow: hidden;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            color: #333;
-        }
-        canvas {
-            box-shadow: 0 0 50px rgba(0,0,0,0.5);
-        }
-    </style>
+<meta charset="UTF-8">
+<title>Isometric Heightmap</title>
+<style>
+* { margin: 0; padding: 0; }
+body { background: #1a1a2e; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; }
+canvas { display: block; }
+</style>
 </head>
 <body>
-    <canvas id="heightmapCanvas"></canvas>
-    <script>
-        const canvas = document.getElementById('heightmapCanvas');
-        const ctx = canvas.getContext('2d');
+<canvas id="c"></canvas>
+<script>
+const SIZE = 256;
+const SCALE = 2.5;
+const TILE_W = 2;
+const TILE_H = 1;
+const HEIGHT_SCALE = 180;
 
-        const SIZE = 256;
-        const TILE_WIDTH = 32;
-        const TILE_HEIGHT = 16;
-        const LAYER_DEPTH = 4; // How far down the Z-axis we go
-        const HEIGHT_SCALE = 6; // Multiplier for height to determine Z-depth
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
 
-        // Setup Canvas
-        canvas.width = (SIZE * TILE_WIDTH) + (SIZE * TILE_WIDTH / 2);
-        canvas.height = (SIZE * TILE_HEIGHT) + (SIZE * TILE_HEIGHT / 2);
+// Simplex-like noise
+class Noise {
+  constructor(seed) {
+    this.perm = new Uint8Array(512);
+    const p = new Uint8Array(256);
+    for (let i = 0; i < 256; i++) p[i] = i;
+    let s = seed || 42;
+    for (let i = 255; i > 0; i--) {
+      s = (s * 16807 + 0) % 2147483647;
+      const j = s % (i + 1);
+      [p[i], p[j]] = [p[j], p[i]];
+    }
+    for (let i = 0; i < 512; i++) this.perm[i] = p[i & 255];
+  }
+  fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+  lerp(a, b, t) { return a + t * (b - a); }
+  grad(hash, x, y) {
+    const h = hash & 3;
+    const u = h < 2 ? x : y;
+    const v = h < 2 ? y : x;
+    return ((h & 1) ? -u : u) + ((h & 2) ? -v : v);
+  }
+  noise2D(x, y) {
+    const X = Math.floor(x) & 255;
+    const Y = Math.floor(y) & 255;
+    const xf = x - Math.floor(x);
+    const yf = y - Math.floor(y);
+    const u = this.fade(xf);
+    const v = this.fade(yf);
+    const p = this.perm;
+    const aa = p[p[X] + Y];
+    const ab = p[p[X] + Y + 1];
+    const ba = p[p[X + 1] + Y];
+    const bb = p[p[X + 1] + Y + 1];
+    const x1 = this.lerp(this.grad(aa, xf, yf), this.grad(ba, xf - 1, yf), u);
+    const x2 = this.lerp(this.grad(ab, xf, yf - 1), this.grad(bb, xf - 1, yf - 1), u);
+    return this.lerp(x1, x2, v);
+  }
+  fbm(x, y, octaves, lacunarity, gain) {
+    let total = 0, frequency = 1, amplitude = 1, maxVal = 0;
+    for (let i = 0; i < octaves; i++) {
+      total += this.noise2D(x * frequency, y * frequency) * amplitude;
+      maxVal += amplitude;
+      amplitude *= gain;
+      frequency *= lacunarity;
+    }
+    return total / maxVal;
+  }
+}
 
-        // Initialize Map
-        const map = [];
-        for (let x = 0; x < SIZE; x++) {
-            map[x] = [];
-            for (let y = 0; y < SIZE; y++) {
-               
+// Generate heightmap
+const noise = new Noise(Math.random() * 99999);
+const heightmap = new Float32Array(SIZE * SIZE);
+let minH = Infinity, maxH = -Infinity;
+
+for (let y = 0; y < SIZE; y++) {
+  for (let x = 0; x < SIZE; x++) {
+    let h = noise.fbm(x / 60, y / 60, 6, 2.0, 0.5);
+    // Add ridges
+    h = 1 - Math.abs(h * 2 - 1);
+    h = h * h;
+    // Normalize
+    if (h < minH) minH = h;
+    if (h > maxH) maxH = h;
+    heightmap[y * SIZE + x] = h;
+  }
+}
+
+// Normalize to 0-1
+const range = maxH - minH || 1;
+for (let i = 0; i < heightmap.length; i++) {
+  heightmap[i] = (heightmap[i] - minH) / range;
+}
+
+// Color based on height
+function getHeightColor(h) {
+  if (h < 0.35) {
+    // Deep water
+    const t = h / 0.35;
+    const r = Math.floor(10 + t * 20);
+    const g = Math.floor(30 + t * 50);
+    const b = Math.floor(80 + t * 60);
+    return [r, g, b];
+  } else if (h < 0.38) {
+    // Shallow water / shoreline
+    const t = (h - 0.35) / 0.03;
+    return [
+      Math.floor(20 + t * 180),
+      Math.floor(80 + t * 150),
+      Math.floor(140 + t * 100)
+    ];
+  } else if (h < 0.42) {
+    // Beach / sand
+    const t = (h - 0.38) / 0.04;
+    return [
+      Math.floor(194 + t * 20),
+      Math.floor(178 + t * 20),
+      Math.floor(128 + t * 10)
+    ];
+  } else if (h < 0.65) {
+    // Grass / green
+    const t = (h - 0.42) / 0.23;
+    if (t < 0.3) {
+      const s = t / 0.3;
+      return [
+        Math.floor(100 + s * 40),
+        Math.floor(160 + s * 30),
+        Math.floor(60 + s * 20)
+      ];
+    } else if (t < 0.7) {
+      const s = (t - 0.3) / 0.4;
+      return [
+        Math.floor(140 + s * 10),
+        Math.floor(190 + s * 10),
+        Math.floor(80 + s * 10)
+      ];
+    } else {
+      const s = (t - 0.7) / 0.3;
+      return [
+        Math.floor(150 + s * 30),
+        Math.floor(200 - s * 40),
+        Math.floor(90 - s * 30)
+      ];
+    }
+  } else if (h < 0.78) {
+    // Brown / mountain
+    const t = (h - 0.65) / 0.13;
+    return [
+      Math.floor(140 + t * 40),
+      Math.floor(130 + t * 30),
+      Math.floor(80 + t * 20)
+    ];
+  } else if (h < 0.88) {
+    // Rock / grey
+    const t = (h - 0.78) / 0.10;
+    return [
+      Math.floor(150 + t * 30),
+      Math.floor(140 + t * 30),
+      Math.floor(120 + t * 30)
+    ];
+  } else {
+    // Snow
+    const t = (h - 0.88) / 0.12;
+    return [
+      Math.floor(180 + t * 70),
+      Math.floor(180 + t * 70),
+      Math.floor(185 + t * 65)
+    ];
+  }
+}
+
+// Get height with sub-pixel interpolation for smoother rendering
+function getInterpolatedHeight(px, py) {
+  const fx = px / SCALE;
+  const fy = py / SCALE;
+  const ix = Math.floor(fx);
+  const iy = Math.floor(fy);
+  const dx = fx - ix;
+  const dy = fy - iy;
+  const ix1 = Math.min(ix + 1, SIZE - 1);
+  const iy1 = Math.min(iy + 1, SIZE - 1);
+  const ix0 = Math.max(ix, 0);
+  const iy0 = Math.max(iy, 0);
+  const h00 = heightmap[iy0 * SIZE + ix0];
+  const h10 = heightmap[iy0 * SIZE + ix1];
+  const h01 = heightmap[iy1 * SIZE + ix0];
+  const h11 = heightmap[iy1 * SIZE + ix1];
+  const h0 = h00 * (1 - dx) + h10 * dx;
+  const h1 = h01 * (1 - dx) + h11 * dx;
+  return h0 * (1 - dy) + h1 * dy;
+}
+
+// Isometric projection: render rows from back to front
+// For each row y in heightmap, draw a "layer" shifted down
+const cx = canvas.width / 2;
+const cy = canvas.height / 2;
+
+// Draw from back to front (y = 0 to SIZE-1)
+// Each row is drawn as a horizontal strip with isometric X offset
+const layerThickness = 1.5;
+
+for (let y = 0; y < SIZE; y++) {
+  const screenY = cy + (y - SIZE / 2) * TILE_H * layerThickness;
+
+  for (let x = 0; x < SIZE; x++) {
+    const h = heightmap[y * SIZE + x];
+    const isoX = cx + (x - SIZE / 2) * TILE_W;
+    const isoY = screenY - h * HEIGHT_SCALE;
+
+    // Draw a small diamond/quad for each cell
+    const hw = TILE_W;
+    const hh = TILE_H;
+
+    const r = h * HEIGHT_SCALE * 0.3;
+
+    // Color
+    const [cr, cg, cb] = getHeightColor(h);
+
+    // Light shading based on height and position
+    const light = 0.55 + h * 0.25;
+    const lr = Math.min(255, Math.floor(cr * light));
+    const lg = Math.min(255, Math.floor(cg * light));
+    const lb = Math.min(255, Math.floor(cb * light));
+
+    // Draw the quad (isometric diamond)
+    ctx.fillStyle = `rgb(${lr},${lg},${lb})`;
+    ctx.beginPath();
+    ctx.moveTo(isoX, isoY - hh);
+    ctx.lineTo(isoX + hw, isoY);
+    ctx.lineTo(isoX, isoY + hh);
+    ctx.lineTo(isoX - hw, isoY);
+    ctx.closePath();
+    ctx.fill();
+
+    // Top face highlight
+    ctx.fillStyle = `rgba(255,255,255,${0.03 + h * 0.05})`;
+    ctx.fill();
+  }
+}
+
+// Draw front edge highlights for depth
+for (let y = 0; y < SIZE; y++) {
+  const screenY = cy + (y - SIZE / 2) * TILE_H * layerThickness;
+  for (let x = 0; x < SIZE; x++) {
+    const h = heightmap[y * SIZE + x];
+    const isoX = cx + (x - SIZE / 2) * TILE_W;
+    const isoY = screenY - h * HEIGHT_SCALE;
+
+    // Check neighbors for edge detection
+    const hRight = (x < SIZE - 1) ? heightmap[y * SIZE + x + 1] : h;
+    const hDown = (y < SIZE - 1) ? heightmap[(y + 1) * SIZE + x] : h;
+
+    if (h > hRight || h > hDown) {
+      const edge = Math.min(1, (h - Math.min(hRight, hDown)) * 3);
+      ctx.strokeStyle = `rgba(0,0,0,${edge * 0.15})`;
+      ctx.lineWidth = 0.5;
+      ctx.beginPath();
+      ctx.moveTo(isoX - TILE_W, isoY);
+      ctx.lineTo(isoX + TILE_W, isoY);
+      ctx.stroke();
+    }
+  }
+}
+
+// Water surface effect - draw a water plane at water level
+ctx.save();
+ctx.globalAlpha = 0.3;
+for (let y = 0; y < SIZE; y++) {
+  for (let x = 0; x < SIZE; x++) {
+    if (heightmap[y * SIZE + x] < 0.38) {
+      const h = heightmap[y * SIZE + x];
+      const isoX = cx + (x - SIZE / 2) * TILE_W;
+      const isoY = cy + (y - SIZE / 2) * TILE_H * layerThickness - 0.38 * HEIGHT_SCALE;
+      const brightness = 0.6 + (x + y) % 2 * 0.1;
+      ctx.fillStyle = `rgba(30,100,180,${brightness * 0.4})`;
+      ctx.beginPath();
+      ctx.moveTo(isoX, isoY - TILE_H);
+      ctx.lineTo(isoX + TILE_W, isoY);
+      ctx.lineTo(isoX, isoY + TILE_H);
+      ctx.lineTo(isoX - TILE_W, isoY);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+}
+ctx.restore();
+</script>
+</body>
+</html>

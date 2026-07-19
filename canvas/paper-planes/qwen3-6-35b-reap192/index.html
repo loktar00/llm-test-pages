@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sunlit Atrium Paper Airplanes</title>
+    <title>Atrium Paper Planes</title>
     <style>
         body, html {
             margin: 0;
@@ -11,7 +11,7 @@
             width: 100%;
             height: 100%;
             overflow: hidden;
-            background-color: #000;
+            background-color: #1a1a1a; /* Fallback */
         }
         canvas {
             display: block;
@@ -19,32 +19,435 @@
     </style>
 </head>
 <body>
-    <canvas id="canvas"></canvas>
-    <script>
-        /**
-         * Setup & Globals
-         */
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
-        
-        let width, height;
-        let planes = [];
-        let dustMotes = [];
-        const NUM_PLANES = 10;
-        const NUM_MOTES = 150;
+<canvas id="screensaver"></canvas>
+<script>
+/**
+ * Atrium Paper Planes Screensaver
+ * Logic:
+ * 1. Setup Canvas and Atrium Geometry.
+ * 2. Particle System for Dust Motes.
+ * 3. Plane Class with Lift/Drag/Gravity physics.
+ * 4. State Machine: Launch -> Glide -> Thermal -> Land -> Flash -> Relaunch.
+ */
 
-        // Configuration
-        const GRAVITY = 0.15;
-        const LIFT_FACTOR = 0.08; // Lift relative to speed
-        const DRAG_FACTOR = 0.005; // Air resistance
-        const THERMAL_STRENGTH = 0.12; // Upward force
-        const THERMAL_RADIUS = 0.6; // How wide the column is (fraction of width)
-        const THERMAL_CENTER_X = 0.5; // Center of the column
-        const MAX_SPEED = 8;
-        const TURN_SPEED = 0.03;
-        
-        /**
-         * Classes
-         */
+const canvas = document.getElementById('screensaver');
+const ctx = canvas.getContext('2d');
 
-        class DustM
+let width, height;
+let planes = [];
+let dustParticles = [];
+let sunAngle = 0;
+let time = 0;
+
+// Configuration
+const CONFIG = {
+    planeCount: 10,
+    gravity: 0.15,
+    liftFactor: 0.04, // Upward force proportional to speed
+    dragFactor: 0.005, // Deceleration
+    thermalStrength: 0.08, // Upward force in thermal
+    thermalRadius: 150,
+    dustCount: 150,
+    colors: ['#ffffff', '#f0f0f0', '#e0e0e0', '#d4d4d4', '#fafafa']
+};
+
+// Atrium Geometry
+const ATRIUM = {
+    floorY: 0,
+    ceilingY: 0,
+    leftWallX: 0,
+    rightWallX: 0,
+    centerX: 0,
+    thermalX: 0,
+    thermalY: 0
+};
+
+function resize() {
+    width = canvas.width = window.innerWidth;
+    height = canvas.height = window.innerHeight;
+    
+    ATRIUM.floorY = height;
+    ATRIUM.ceilingY = 0;
+    ATRIUM.leftWallX = 0;
+    ATRIUM.rightWallX = width;
+    ATRIUM.centerX = width / 2;
+    ATRIUM.thermalX = width / 2;
+    ATRIUM.thermalY = height / 2;
+}
+
+window.addEventListener('resize', resize);
+resize();
+
+// --- Dust Particle System ---
+class Dust {
+    constructor() {
+        this.reset();
+    }
+
+    reset() {
+        // Distribute mostly in light shafts
+        const shaftWidth = width * 0.4;
+        const xOffset = (Math.random() - 0.5) * shaftWidth;
+        this.x = (width / 2) + xOffset;
+        this.y = Math.random() * height;
+        this.z = Math.random() * 200; // Fake depth
+        this.size = Math.random() * 2 + 0.5;
+        this.vx = (Math.random() - 0.5) * 0.3;
+        this.vy = (Math.random() - 0.5) * 0.3;
+        this.brightness = Math.random();
+    }
+
+    update() {
+        this.x += this.vx;
+        this.y += this.vy;
+        
+        // Keep within bounds loosely
+        if (this.x < width/4 || this.x > width*3/4) this.vx *= -1;
+        if (this.y < 0 || this.y > height) this.vy *= -1;
+    }
+
+    draw() {
+        // Light shafts are static, but let's make brightness pulse
+        const flicker = 0.5 + 0.5 * Math.sin(time * 0.05 + this.x);
+        const alpha = this.brightness * flicker * (0.3 + (this.z / 200) * 0.5);
+        
+        ctx.fillStyle = `rgba(255, 255, 240, ${alpha})`;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+        ctx.fill();
+    }
+}
+
+// --- Paper Plane Class ---
+class Plane {
+    constructor(id) {
+        this.id = id;
+        this.reset();
+    }
+
+    reset() {
+        // Pick a balcony (Left or Right side)
+        const side = Math.random() > 0.5 ? 1 : -1;
+        this.x = ATRIUM.centerX + (side * (width * 0.4));
+        this.y = height * 0.2;
+        this.z = Math.random() * 100; // Depth
+        
+        // Initial Velocity (towards center and down)
+        const angle = (side === 1 ? Math.PI : 0) + (Math.random() * 0.5 + 0.2); // Outward or Inward spread
+        this.vx = Math.cos(angle) * 2;
+        this.vy = Math.sin(angle) * 1.5 + 1; // Slight downward start
+        this.vz = (Math.random() - 0.5) * 1;
+
+        this.angle = 0; // Visual rotation
+        this.bank = 0; // Visual banking
+        this.targetAngle = 0;
+        this.targetBank = 0;
+        
+        this.color = CONFIG.colors[Math.floor(Math.random() * CONFIG.colors.length)];
+        this.state = 'GLIDE'; // GLIDE, THERMAL, LAND, FOLD
+        this.foldTimer = 0;
+        this.shadowOffset = {x:0, y:0};
+        
+        // Aerodynamic properties
+        this.speed = 0;
+        this.lift = 0;
+        this.mass = 1 + Math.random() * 0.5;
+    }
+
+    update() {
+        if (this.state === 'FOLD') {
+            this.foldTimer++;
+            if (this.foldTimer > 40) {
+                this.reset();
+            }
+            return;
+        }
+
+        // 1. Physics Calculations
+        this.speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy + this.vz * this.vz);
+        
+        // Lift: Proportional to speed squared, perpendicular to velocity vector (simplified)
+        // Actually, simple "lift opposes gravity" logic for screensaver feel
+        const liftForce = this.speed * CONFIG.liftFactor;
+        this.vy -= liftForce;
+
+        // Gravity
+        this.vy += CONFIG.gravity;
+
+        // Drag (Air resistance)
+        this.vx *= (1 - CONFIG.dragFactor);
+        this.vy *= (1 - CONFIG.dragFactor);
+        this.vz *= (1 - CONFIG.dragFactor);
+
+        // Thermal Lift: If near center and low enough
+        const distToCenter = Math.abs(this.x - ATRIUM.centerX);
+        const distToThermalY = Math.abs(this.y - ATRIUM.thermalY);
+        
+        if (distToCenter < CONFIG.thermalRadius && this.y > height * 0.4) {
+            this.state = 'THERMAL';
+            // Spiral inwards slightly
+            const toCenterX = (ATRIUM.centerX - this.x) * 0.005;
+            const toCenterY = (ATRIUM.thermalY - this.y) * 0.005;
+            this.vx += toCenterX;
+            this.vy += toCenterY;
+            // Upward boost
+            this.vy -= CONFIG.thermalStrength;
+            // Add spin to visual bank
+            this.bank += 0.1;
+        } else {
+            this.state = 'GLIDE';
+            // If high up, try to dive down to catch thermal
+            if (this.y < height * 0.5 && this.state === 'GLIDE') {
+                 this.vy += 0.05; // Dive
+            }
+            // If low and fast, try to climb out
+            if (this.y > height * 0.8) {
+                this.vy -= 0.05; // Climb
+            }
+            // Gentle banking turns
+            this.bank += (Math.random() - 0.5) * 0.05;
+        }
+
+        // 2. Movement Integration
+        this.x += this.vx;
+        this.y += this.vy;
+        this.z += this.vz;
+
+        // Z-bounds (depth)
+        if (this.z < 0) this.z = 0;
+        if (this.z > 200) this.z = 200;
+
+        // 3. State Checks
+        
+        // Landing
+        if (this.y > height - 10) {
+            this.y = height - 10;
+            this.vy = -this.vy * 0.2; // Bounce slightly
+            this.vx *= 0.8; // Friction
+            this.vz *= 0.8;
+            
+            if (Math.abs(this.vx) < 0.1 && Math.abs(this.vy) < 0.1) {
+                this.state = 'LAND';
+                // Wait a moment then fold
+                if (this.foldTimer === 0) {
+                    // Reset timer for land duration
+                    this.foldTimer = 10; 
+                } else {
+                    this.foldTimer++;
+                    if (this.foldTimer > 60) { // Wait 60 frames
+                        this.state = 'FOLD';
+                        this.foldTimer = 0;
+                    }
+                }
+            }
+        }
+
+        // Wall Collisions
+        if (this.x < 10) { this.x = 10; this.vx *= -1; }
+        if (this.x > width - 10) { this.x = width - 10; this.vx *= -1; }
+
+        // 4. Visual Angle Calculations
+        // Nose points in direction of velocity
+        this.targetAngle = Math.atan2(this.vy, this.vx);
+        
+        // Smooth rotation
+        const angleDiff = this.targetAngle - this.angle;
+        this.angle += angleDiff * 0.1;
+
+        // Shadow Calculation
+        // Light source is top-center
+        const lightX = width / 2;
+        const lightY = 0;
+        const groundY = height;
+        
+        // Simple perspective shadow
+        const ratio = (groundY - this.y) / (groundY - lightY);
+        this.shadowOffset.x = this.x + (this.x - lightX) * ratio * 0.5;
+        this.shadowOffset.y = groundY - 5; // On floor
+    }
+
+    draw() {
+        ctx.save();
+
+        // --- Draw Shadow ---
+        ctx.save();
+        ctx.translate(this.shadowOffset.x, this.shadowOffset.y);
+        ctx.scale(1 - (this.z/300), 0.2); // Flatten based on height
+        ctx.rotate(this.angle);
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
+        this.drawPlaneShape(0, 0, 1);
+        ctx.restore();
+
+        // --- Draw Plane ---
+        // Scale based on Z (Depth)
+        const scale = 0.5 + (this.z / 400);
+        const drawX = this.x;
+        const drawY = this.y;
+
+        // Folding Animation
+        let foldScale = 1;
+        if (this.state === 'FOLD') {
+            foldScale = 1 - (this.foldTimer / 40);
+            if (foldScale <= 0) foldScale = 0;
+        }
+
+        ctx.translate(drawX, drawY);
+        ctx.rotate(this.angle);
+        ctx.scale(scale * foldScale, scale);
+
+        // Lighting / Shading
+        // Simple fake 3D lighting
+        ctx.shadowColor = "rgba(0,0,0,0.2)";
+        ctx.shadowBlur = 10;
+        ctx.shadowOffsetX = 5;
+        ctx.shadowOffsetY = 5;
+
+        this.drawPlaneShape(0, 0, 1); // Main body
+
+        ctx.restore();
+    }
+
+    drawPlaneShape(x, y, s) {
+        ctx.beginPath();
+        // Paper airplane shape (top down view)
+        ctx.moveTo(x + 15 * s, y); // Nose
+        ctx.lineTo(x - 10 * s, y - 8 * s); // Left Wing tip
+        ctx.lineTo(x - 5 * s, y); // Fold
+        ctx.lineTo(x - 10 * s, y + 8 * s); // Right Wing tip
+        ctx.closePath();
+        
+        ctx.fillStyle = this.color;
+        ctx.fill();
+        
+        // Fold line
+        ctx.beginPath();
+        ctx.moveTo(x - 5 * s, y);
+        ctx.lineTo(x + 15 * s, y);
+        ctx.strokeStyle = 'rgba(0,0,0,0.1)';
+        ctx.stroke();
+    }
+}
+
+// --- Environment Drawing ---
+function drawAtriumBackground() {
+    // 1. Main Walls
+    const gradient = ctx.createLinearGradient(0, 0, 0, height);
+    gradient.addColorStop(0, '#2c3e50');
+    gradient.addColorStop(0.5, '#34495e');
+    gradient.addColorStop(1, '#1a252f');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, width, height);
+
+    // 2. Floor
+    const floorGrad = ctx.createLinearGradient(0, height * 0.7, 0, height);
+    floorGrad.addColorStop(0, 'rgba(0,0,0,0)');
+    floorGrad.addColorStop(0.1, 'rgba(0,0,0,0.3)');
+    floorGrad.addColorStop(1, '#0f141a');
+    ctx.fillStyle = floorGrad;
+    ctx.fillRect(0, height * 0.6, width, height * 0.4);
+
+    // 3. Sunlight Shafts (God Rays)
+    ctx.save();
+    ctx.globalCompositeOperation = 'overlay';
+    
+    // Create a central light source
+    const sunX = width / 2;
+    const sunY = -50;
+    
+    // Draw rays
+    for (let i = -3; i <= 3; i++) {
+        const angle = (i * 15) * (Math.PI / 180) + Math.sin(time * 0.001) * 0.05;
+        
+        ctx.beginPath();
+        ctx.moveTo(sunX, sunY);
+        ctx.lineTo(sunX + Math.cos(angle) * width * 1.5, height);
+        ctx.lineTo(sunX + Math.cos(angle + 0.05) * width * 1.5, height);
+        ctx.closePath();
+        
+        const rayGrad = ctx.createLinearGradient(0, 0, 0, height);
+        rayGrad.addColorStop(0, 'rgba(255, 255, 240, 0.3)');
+        rayGrad.addColorStop(1, 'rgba(255, 255, 240, 0.05)');
+        ctx.fillStyle = rayGrad;
+        ctx.fill();
+    }
+    ctx.restore();
+
+    // 4. Thermal Column Visual (Subtle)
+    ctx.save();
+    const grad = ctx.createRadialGradient(ATRIUM.thermalX, ATRIUM.thermalY, 10, ATRIUM.thermalX, ATRIUM.thermalY, CONFIG.thermalRadius);
+    grad.addColorStop(0, 'rgba(255, 255, 200, 0.0)');
+    grad.addColorStop(0.5, 'rgba(255, 255, 200, 0.02)');
+    grad.addColorStop(1, 'rgba(255, 255, 200, 0.0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(ATRIUM.thermalX - CONFIG.thermalRadius, ATRIUM.thermalY - CONFIG.thermalRadius, CONFIG.thermalRadius*2, CONFIG.thermalRadius*2);
+    
+    // Rising particles in thermal
+    for(let i=0; i<5; i++) {
+        ctx.beginPath();
+        ctx.arc(ATRIUM.thermalX + Math.sin(time*0.1 + i)*20, height - (time * 2 + i * 100) % height, 2, 0, Math.PI*2);
+        ctx.fillStyle = 'rgba(255,255,255,0.1)';
+        ctx.fill();
+    }
+    ctx.restore();
+    
+    // 5. Structural Columns/Balconies (Simple framing)
+    ctx.fillStyle = '#111';
+    // Left Balcony
+    ctx.fillRect(0, height * 0.2, width * 0.05, height * 0.02);
+    ctx.fillRect(0, height * 0.5, width * 0.05, height * 0.02);
+    // Right Balcony
+    ctx.fillRect(width - width * 0.05, height * 0.3, width * 0.05, height * 0.02);
+    ctx.fillRect(width - width * 0.05, height * 0.7, width * 0.05, height * 0.02);
+}
+
+// --- Main Loop ---
+
+function init() {
+    // Create Planes
+    for (let i = 0; i < CONFIG.planeCount; i++) {
+        planes.push(new Plane(i));
+    }
+    
+    // Create Dust
+    for (let i = 0; i < CONFIG.dustCount; i++) {
+        dustParticles.push(new Dust());
+    }
+}
+
+function animate() {
+    time++;
+    ctx.clearRect(0, 0, width, height);
+
+    drawAtriumBackground();
+
+    // Sort planes by Z for proper depth rendering
+    planes.sort((a, b) => a.z - b.z);
+
+    // Update & Draw Dust
+    dustParticles.forEach(p => {
+        p.update();
+        p.draw();
+    });
+
+    // Update & Draw Planes
+    planes.forEach(plane => {
+        plane.update();
+        plane.draw();
+    });
+
+    // Vignette
+    const vignette = ctx.createRadialGradient(width/2, height/2, height/3, width/2, height/2, height);
+    vignette.addColorStop(0, 'rgba(0,0,0,0)');
+    vignette.addColorStop(1, 'rgba(0,0,0,0.6)');
+    ctx.fillStyle = vignette;
+    ctx.fillRect(0, 0, width, height);
+
+    requestAnimationFrame(animate);
+}
+
+init();
+animate();
+
+</script>
+</body>
+</html>

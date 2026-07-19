@@ -1,45 +1,525 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Aquarium Screensaver</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background-color: #000;
-        }
-        canvas {
-            display: block;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Aquarium Screensaver</title>
+<style>
+    body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background: #000;
+    }
+    canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+    }
+</style>
 </head>
 <body>
-    <canvas id="aquarium"></canvas>
-    <script>
-        const canvas = document.getElementById('aquarium');
-        const ctx = canvas.getContext('2d');
+<canvas id="aquarium"></canvas>
+<script>
+/**
+ * AQUARIUM SCREENSAVER
+ * A self-contained vanilla JS aquarium simulation.
+ */
 
-        let width, height;
-        let mouseX = -1000, mouseY = -1000; // Start off-screen
+// --- Configuration & Constants ---
+const CONFIG = {
+    targetFPS: 60,
+    fishCount: 16,
+    minFishPerSpecies: 4,
+    bubbleCount: 40,
+    plantsCount: 15,
+    hermitCrabCount: 3,
+    colors: {
+        waterDeep: '#001e36',
+        waterShallow: '#005b8f',
+        sand: '#2d2416',
+        sandLight: '#4a3b2a'
+    }
+};
 
-        const resize = () => {
-            width = canvas.width = window.innerWidth;
-            height = canvas.height = window.innerHeight;
-        };
-        window.addEventListener('resize', resize);
-        resize();
-        window.addEventListener('mousemove', e => { mouseX = e.clientX; mouseY = e.clientY; });
+// --- Utilities ---
+const Utils = {
+    rand: (min, max) => Math.random() * (max - min) + min,
+    randInt: (min, max) => Math.floor(Math.random() * (max - min + 1)) + min,
+    dist: (x1, y1, x2, y2) => Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2),
+    lerp: (a, b, t) => a + (b - a) * t,
+    clamp: (val, min, max) => Math.max(min, Math.min(max, val)),
+    hueToRGB: (h) => {
+        // Simple HSL to RGB for generation (H: 0-360)
+        h = h % 360;
+        const s = 0.7 + Math.random() * 0.3;
+        const l = 0.4 + Math.random() * 0.3;
+        return `hsl(${h}, ${s * 100}%, ${l * 100}%)`;
+    }
+};
 
-        // --- Math Helpers ---
-        const rand = (min, max) => Math.random() * (max - min) + min;
-        const dist = (x1, y1, x2, y2) => Math.hypot(x2 - x1, y2 - y1);
-        const lerp = (start, end, t) => start * (1 - t) + end * t;
+// --- Classes ---
 
-        // --- Config ---
-        const GRAVEL_HEIGHT = 60;
-        const FISH_COUNT = 
+class Vector {
+    constructor(x, y) { this.x = x; this.y = y; }
+    add(v) { this.x += v.x; this.y += v.y; }
+    sub(v) { this.x -= v.x; this.y -= v.y; }
+    mult(n) { this.x *= n; this.y *= n; }
+    mag() { return Math.sqrt(this.x ** 2 + this.y ** 2); }
+    normalize() {
+        const m = this.mag();
+        if (m !== 0) this.mult(1 / m);
+    }
+    limit(max) {
+        if (this.mag() > max) {
+            this.normalize();
+            this.mult(max);
+        }
+    }
+    copy() { return new Vector(this.x, this.y); }
+    static sub(v1, v2) { return new Vector(v1.x - v2.x, v1.y - v2.y); }
+    static dist(v1, v2) { return Math.sqrt((v1.x - v2.x) ** 2 + (v1.y - v2.y) ** 2); }
+}
+
+class Specie {
+    constructor(type, colorBase, size) {
+        this.type = type;
+        this.colorBase = colorBase;
+        this.baseSize = size;
+    }
+}
+
+class Fish {
+    constructor(canvasWidth, canvasHeight, specie) {
+        this.specie = specie;
+        this.pos = new Vector(Utils.rand(100, canvasWidth - 100), Utils.rand(50, canvasHeight - 100));
+        this.vel = new Vector(Utils.rand(-1, 1), Utils.rand(-0.5, 0.5));
+        this.acc = new Vector(0, 0);
+        
+        // Behavior
+        this.maxSpeed = 2;
+        this.maxForce = 0.05;
+        this.isDarting = false;
+        this.dartTimer = 0;
+        this.wanderStrength = 0.5;
+        
+        // Visuals
+        this.size = specie.baseSize * Utils.rand(0.8, 1.2);
+        this.flip = 1; // 1 right, -1 left
+        this.tailOffset = 0;
+        this.tailSpeed = Utils.rand(0.05, 0.15);
+        this.tailDir = 1;
+        
+        // Personality based on type
+        if (specie.type === 'shark') {
+            this.maxSpeed = 3;
+            this.maxForce = 0.02;
+            this.wanderStrength = 0.2;
+        } else if (specie.type === 'eel') {
+            this.maxSpeed = 1.5;
+            this.maxForce = 0.01;
+            this.tailSpeed = 0.3;
+        }
+    }
+
+    update(width, height, allFish, time) {
+        // Steering Logic
+        this.wander();
+        this.avoidWalls(width, height);
+        
+        // Darting Logic
+        if (this.isDarting) {
+            this.maxSpeed = 7;
+            this.maxForce = 0.5;
+            this.dartTimer--;
+            if (this.dartTimer <= 0) {
+                this.isDarting = false;
+                this.maxSpeed = (this.specie.type === 'shark') ? 3 : 2;
+                this.maxForce = (this.specie.type === 'shark') ? 0.02 : 0.05;
+            }
+        } else {
+            // Randomly decide to dart
+            if (Math.random() < 0.005) {
+                this.isDarting = true;
+                this.dartTimer = Utils.randInt(10, 30);
+            }
+        }
+
+        // Physics
+        this.vel.add(this.acc);
+        this.vel.limit(this.maxSpeed);
+        this.pos.add(this.vel);
+        this.acc.mult(0);
+
+        // Flip direction
+        if (this.vel.x < -0.1) this.flip = -1;
+        if (this.vel.x > 0.1) this.flip = 1;
+
+        // Tail animation
+        this.tailOffset += this.tailSpeed * (this.vel.mag() > 1 ? 1.5 : 0.5);
+
+        // Global startle (simulated)
+        if (Math.random() < 0.0005) this.startle();
+    }
+
+    startle() {
+        this.isDarting = true;
+        this.dartTimer = 20;
+        // Add random velocity burst
+        this.acc.add(new Vector(this.flip * Utils.rand(0.5, 1), Utils.rand(-0.5, 0.5)));
+    }
+
+    wander() {
+        // Gentle random movement
+        let wanderPoint = this.vel.copy();
+        wanderPoint.normalize();
+        wanderPoint.mult(50); // distance ahead
+        let circleRadius = this.wanderStrength * 50;
+        let theta = Utils.rand(0, Math.PI * 2);
+        let displacement = new Vector(
+            Math.cos(theta) * circleRadius,
+            Math.sin(theta) * circleRadius
+        );
+        let center = wanderPoint.add(displacement);
+        let steering = Utils.Vector.sub(center, this.pos); // simplified: just use the vector directly relative to position
+        
+        // Actually, simpler wander: just add a random vector to acc
+        let angle = Math.atan2(this.vel.y, this.vel.x) + Utils.rand(-0.5, 0.5);
+        let force = new Vector(Math.cos(angle), Math.sin(angle)).mult(0.05 * this.wanderStrength);
+        this.acc.add(force);
+    }
+
+    avoidWalls(w, h) {
+        const margin = 50;
+        const turnFactor = 0.5;
+        
+        // Check all fish for collision avoidance
+        for (let other of allFish) {
+            if (other === this) continue;
+            let d = Utils.Vector.dist(this.pos, other.pos);
+            if (d < 30) {
+                let diff = Utils.Vector.sub(this.pos, other.pos);
+                diff.normalize();
+                diff.mult(0.5);
+                this.acc.add(diff);
+            }
+        }
+
+        // Walls
+        if (this.pos.x < margin) this.acc.add(new Vector(turnFactor, 0));
+        if (this.pos.x > w - margin) this.acc.add(new Vector(-turnFactor, 0));
+        if (this.pos.y < margin) this.acc.add(new Vector(0, turnFactor));
+        if (this.pos.y > h - margin) this.acc.add(new Vector(0, -turnFactor));
+    }
+
+    draw(ctx, time) {
+        ctx.save();
+        ctx.translate(this.pos.x, this.pos.y);
+        
+        // Bobbing
+        const bob = Math.sin(time * 2 + this.pos.x) * 2;
+        ctx.translate(0, bob);
+        
+        // Rotation
+        const angle = Math.atan2(this.vel.y, this.vel.x);
+        ctx.rotate(angle);
+        ctx.scale(this.flip, 1); // Flip based on direction
+
+        // Tail Wag
+        const tailWag = Math.sin(this.tailOffset) * 0.5;
+
+        const color = this.specie.colorBase;
+
+        if (this.specie.type === 'shark') {
+            // Shark Shape
+            ctx.fillStyle = '#556';
+            ctx.beginPath();
+            ctx.moveTo(20, 0);
+            ctx.quadraticCurveTo(0, -10, -20, -5); // Back top
+            ctx.quadraticCurveTo(-30, 0, -20, 5); // Back bottom
+            ctx.lineTo(0, 0);
+            ctx.fill();
+            // Dorsal Fin
+            ctx.beginPath();
+            ctx.moveTo(0, -2);
+            ctx.lineTo(5, -12);
+            ctx.lineTo(10, -2);
+            ctx.fill();
+            // Tail
+            ctx.beginPath();
+            ctx.moveTo(-20, 0);
+            ctx.lineTo(-35, -10 + tailWag * 10);
+            ctx.lineTo(-35, 10 + tailWag * 10);
+            ctx.fill();
+            // Eye
+            ctx.fillStyle = '#fff';
+            ctx.beginPath();
+            ctx.arc(12, -2, 2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#000';
+            ctx.beginPath();
+            ctx.arc(13, -2, 1, 0, Math.PI * 2);
+            ctx.fill();
+        } 
+        else if (this.specie.type === 'eel') {
+            // Eel Shape
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 4;
+            ctx.lineCap = 'round';
+            ctx.beginPath();
+            ctx.moveTo(15, 0);
+            for (let i = 0; i < 6; i++) {
+                let x = 10 - i * 5;
+                let y = Math.sin(this.tailOffset + i * 0.5) * (5 - i);
+                ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+            // Head
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(15, 0, 3, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        else if (this.specie.type === 'round') {
+            // Round Fish (Puffer/Beta style)
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.ellipse(0, 0, this.size, this.size * 0.8, 0, 0, Math.PI * 2);
+            ctx.fill();
+            // Fins
+            ctx.beginPath();
+            ctx.moveTo(0, -this.size * 0.8);
+            ctx.quadraticCurveTo(0, -this.size * 1.5, 5, -this.size);
+            ctx.fill();
+            // Tail
+            ctx.beginPath();
+            ctx.moveTo(-this.size * 0.8, 0);
+            ctx.lineTo(-this.size * 1.8, -10 + tailWag * 10);
+            ctx.lineTo(-this.size * 1.8, 10 + tailWag * 10);
+            ctx.fill();
+            // Eye
+            ctx.fillStyle = '#fff';
+            ctx.beginPath();
+            ctx.arc(this.size * 0.5, -this.size * 0.2, 3, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#000';
+            ctx.beginPath();
+            ctx.arc(this.size * 0.6, -this.size * 0.2, 1.5, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        else {
+            // Normal Streamline Fish
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.ellipse(0, 0, this.size, this.size * 0.4, 0, 0, Math.PI * 2);
+            ctx.fill();
+            // Tail
+            ctx.beginPath();
+            ctx.moveTo(-this.size * 0.8, 0);
+            ctx.lineTo(-this.size * 1.8, -12 + tailWag * 12);
+            ctx.lineTo(-this.size * 1.8, 12 + tailWag * 12);
+            ctx.fill();
+            // Eye
+            ctx.fillStyle = '#fff';
+            ctx.beginPath();
+            ctx.arc(this.size * 0.4, -this.size * 0.1, 2, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        ctx.restore();
+    }
+}
+
+class Bubble {
+    constructor(w, h) {
+        this.reset(w, h, true);
+    }
+    
+    reset(w, h, init = false) {
+        this.x = Utils.rand(w * 0.1, w * 0.9);
+        this.y = init ? Utils.rand(h * 0.2, h) : h + 10;
+        this.size = Utils.rand(2, 6);
+        this.speed = Utils.rand(1, 3);
+        this.wobbleSpeed = Utils.rand(0.02, 0.05);
+        this.wobbleOffset = Utils.rand(0, Math.PI * 2);
+    }
+
+    update(h) {
+        this.y -= this.speed;
+        this.x += Math.sin(this.y * this.wobbleSpeed + this.wobbleOffset) * 0.5;
+        
+        if (this.y < -10) {
+            this.reset(window.innerWidth, h);
+        }
+    }
+
+    draw(ctx) {
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+        ctx.stroke();
+        
+        // Highlight
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+        ctx.beginPath();
+        ctx.arc(this.x - this.size * 0.3, this.y - this.size * 0.3, this.size * 0.2, 0, Math.PI * 2);
+        ctx.fill();
+    }
+}
+
+class Plant {
+    constructor(x, h) {
+        this.x = x;
+        this.h = h;
+        this.segments = Utils.randInt(5, 12);
+        this.segHeight = 15;
+        this.phase = Utils.rand(0, Math.PI * 2);
+        this.width = Utils.rand(5, 10);
+        this.color = `hsl(${Utils.randInt(90, 140)}, 60%, 20%)`;
+    }
+
+    draw(ctx, time) {
+        ctx.strokeStyle = this.color;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        
+        let curX = this.x;
+        let curY = this.h;
+        
+        ctx.moveTo(curX, curY);
+        
+        for (let i = 0; i < this.segments; i++) {
+            let sway = Math.sin(time * 2 + this.phase + i * 0.2) * (i * 1.5);
+            ctx.lineTo(curX + sway, curY - this.segHeight);
+            curX += sway;
+            curY -= this.segHeight;
+        }
+        ctx.stroke();
+    }
+}
+
+class HermitCrab {
+    constructor(w, h) {
+        this.x = Utils.rand(50, w - 50);
+        this.y = h - 30; // On floor
+        this.targetX = this.x;
+        this.size = 10;
+        this.moveTimer = 0;
+        this.angle = 1; // 1 or -1
+        this.shellColor = '#d4a064';
+    }
+
+    update(w) {
+        this.moveTimer--;
+        if (this.moveTimer <= 0) {
+            this.moveTimer = Utils.randInt(100, 300);
+            this.targetX = Utils.rand(50, w - 50);
+            this.angle = this.targetX > this.x ? 1 : -1;
+        }
+        
+        // Move towards target
+        if (Math.abs(this.x - this.targetX) > 2) {
+            this.x += (this.targetX - this.x) * 0.01;
+        }
+    }
+
+    draw(ctx) {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.scale(this.angle, 1);
+
+        // Legs
+        ctx.strokeStyle = '#884';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for(let i=0; i<3; i++) {
+            let legX = -5 + i * 4;
+            ctx.moveTo(legX, 0);
+            ctx.lineTo(legX - 2, -5);
+        }
+        ctx.stroke();
+
+        // Body (soft part)
+        ctx.fillStyle = '#87CEEB'; // Teal body
+        ctx.beginPath();
+        ctx.ellipse(0, -5, 6, 4, Math.PI / 4, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Shell
+        ctx.fillStyle = this.shellColor;
+        ctx.beginPath();
+        ctx.arc(0, -8, 10, Math.PI, 0); // Half circle top
+        ctx.quadraticCurveTo(5, -5, 0, -5);
+        ctx.fill();
+        // Shell spiral detail
+        ctx.strokeStyle = '#a07040';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(0, -8, 6, Math.PI, 0);
+        ctx.stroke();
+
+        // Claws
+        ctx.fillStyle = '#87CEEB';
+        ctx.beginPath();
+        ctx.arc(8, -8, 3, 0, Math.PI*2);
+        ctx.fill();
+
+        ctx.restore();
+    }
+}
+
+class LightRipples {
+    draw(ctx, w, h, time) {
+        ctx.save();
+        // Create gradient for water depth
+        const grad = ctx.createLinearGradient(0, 0, 0, h);
+        grad.addColorStop(0, '#0077be');
+        grad.addColorStop(1, '#001e36');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, w, h);
+        
+        // Caustics simulation on top
+        ctx.globalCompositeOperation = 'overlay';
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
+        for(let i=0; i<5; i++) {
+            let x = (Math.sin(time + i) * 200) + (w/2);
+            let y = (Math.cos(time * 0.5 + i) * 50) + 50;
+            ctx.beginPath();
+            ctx.ellipse(x, y, 100 + Math.sin(time*2)*20, 30, 0, 0, Math.PI*2);
+            ctx.fill();
+        }
+        ctx.restore();
+    }
+}
+
+// --- Main Engine ---
+
+class Aquarium {
+    constructor() {
+        this.canvas = document.getElementById('aquarium');
+        this.ctx = this.canvas.getContext('2d');
+        this.w = window.innerWidth;
+        this.h = window.innerHeight;
+        
+        this.resize();
+        window.addEventListener('resize', () => this.resize());
+
+        this.init();
+        this.loop = this.loop.bind(this);
+        requestAnimationFrame(this.loop);
+    }
+
+    resize() {
+        this.w = window.innerWidth;
+        this.h = window.innerHeight;
+        this.canvas.width = this.w;
+        this.canvas.height = this.h;
+        // Re-init some elements on resize to keep them on screen
+        this.plants.forEach(p => p.y = this.h);
+        this.crabs.forEach(c => c.y = this.h - 30);
+    }
+
+    init() {
+        // Create Fish

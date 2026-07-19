@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Verlet Physics Engine</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0a1a; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+canvas { display: block; border-radius: 8px; }
+#demoLabel { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); color: #fff; font-size: 18px; background: rgba(0,0,0,0.6); padding: 8px 24px; border-radius: 20px; letter-spacing: 1px; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="demoLabel">Demo 1: Falling Objects on Ramps</div>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const label = document.getElementById('demoLabel');
+const W = 800, H = 500;
+canvas.width = W; canvas.height = H;
+
+const GRAVITY = 0.4;
+const DAMPING = 0.99;
+const ITERATIONS = 8;
+const STICK_ITERS = 10;
+
+class VerletPoint {
+    constructor(x, y, pinned = false, radius = 0, mass = 1) {
+        this.x = x; this.y = y;
+        this.oldX = x; this.oldY = y;
+        this.pinned = pinned;
+        this.radius = radius;
+        this.mass = mass;
+        this.fx = 0; this.fy = 0;
+        this.color = '#aaa';
+    }
+    update() {
+        if (this.pinned) { this.x = this.oldX; this.y = this.oldY; return; }
+        const vx = (this.x - this.oldX) * DAMPING;
+        const vy = (this.y - this.oldY) * DAMPING;
+        this.oldX = this.x; this.oldY = this.y;
+        this.x += vx + this.fx * this.mass;
+        this.y += vy + this.fy * this.mass;
+        this.fx = 0; this.fy = 0;
+    }
+    constrain() {
+        const margin = 5;
+        if (this.y > H - margin && this.radius > 0) { this.y = H - margin; this.oldY = this.y + (this.y - this.oldY) * 0.5; }
+        if (this.y < margin && this.radius > 0) { this.y = margin; this.oldY = this.y + (this.y - this.oldY) * 0.5; }
+        if (this.x > W - margin && this.radius > 0) { this.x = W - margin; this.oldX = this.x + (this.x - this.oldX) * 0.5; }
+        if (this.x < margin && this.radius > 0) { this.x = margin; this.oldX = this.x + (this.x - this.oldX) * 0.5; }
+        if (this.y > H - margin && !this.radius) { this.y = H - margin; this.oldY = this.y; }
+    }
+}
+
+class Stick {
+    constructor(p1, p2, length, visible = true, width = 2, color = '#888') {
+        this.p1 = p1; this.p2 = p2;
+        this.length = length || Math.hypot(p2.x - p1.x, p2.y - p1.y);
+        this.visible = visible;
+        this.width = width;
+        this.color = color;
+    }
+    solve() {
+        const dx = this.p2.x - this.p1.x;
+        const dy = this.p2.y - this.p1.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist === 0) return;
+        const diff = (this.length - dist) / dist * 0.5;
+        const ox = dx * diff;
+        const oy = dy * diff;
+        if (!this.p1.pinned) { this.p1.x -= ox; this.p1.y -= oy; }
+        if (!this.p2.pinned) { this.p2.x += ox; this.p2.y += oy; }
+    }
+    draw() {
+        if (!this.visible) return;
+        ctx.beginPath();
+        ctx.moveTo(this.p1.x, this.p1.y);
+        ctx.lineTo(this.p2.x, this.p2.y);
+        ctx.strokeStyle = this.color;
+        ctx.lineWidth = this.width;
+        ctx.stroke();
+    }
+}
+
+const points = [];
+const sticks = [];
+let demoIndex = 0;
+let demoTimer = 0;
+let objects = [];
+
+function clearWorld() {
+    points.length = 0;
+    sticks.length = 0;
+    objects = [];
+}
+
+function addPoint(x, y, pinned = false, radius = 0, color = '#aaa') {
+    const p = new VerletPoint(x, y, pinned, radius);
+    p.color = color;
+    points.push(p);
+    return p;
+}
+
+function addStick(p1, p2, visible = true, width = 2, color = '#888') {
+    sticks.push(new Stick(p1, p2, undefined, visible, width, color));
+}
+
+function addCrossBrace(p1, p2, p3, p4, color = '#666') {
+    addStick(p1, p2, true, 3, color);
+    addStick(p2, p3, true, 3, color);
+    addStick(p3, p4, true, 3, color);
+    addStick(p4, p1, true, 3, color);
+    addStick(p1, p3, true, 1.5, color);
+    addStick(p2, p4, true, 1.5, color);
+}
+
+function addCircle(x, y, radius, vx = 0, vy = 0, color = '#e74c3c') {
+    const p = addPoint(x, y, false, radius, color);
+    p.oldX = p.x - vx;
+    p.oldY = p.y - vy;
+    objects.push(p);
+    return p;
+}
+
+// DEMO 1: Falling objects on ramps
+function setupDemo1() {
+    clearWorld();
+    const rampColor = '#2ecc71';
+    const ballColors = ['#e74c3c', '#3498db', '#f39c12', '#9b59b6', '#1abc9c', '#e67e22', '#2980b9', '#c0392b'];
+
+    // Ground
+    addStick(addPoint(0, H - 2, true), addPoint(W, H - 2, true), true, 4, '#555');
+    addStick(addPoint(0, H - 1, true), addPoint(W, H - 1, true), true, 4, '#555');
+
+    // Ramp 1: steep right-leaning
+    const r1Y = 120;
+    const r1 = addPoint(50, r1Y, true, 4, rampColor);
+    const r2 = addPoint(250, r1Y + 100, true, 4, rampColor);
+    for (let i = 0; i <= 20; i++) {
+        const t = i / 20;
+        addStick(
+            addPoint(50 + t * 200, r1Y + t * 100, i === 0 || i === 20),
+            undefined
+        );
+    }
+    // Rebuild ramp properly
+    const ramp1Points = [];
+    for (let i = 0; i <= 15; i++) {
+        const px = 80 + i * 13;
+        const py = 100 + i * 7;
+        const pp = addPoint(px, py, false, 2, rampColor);
+        if (i === 0 || i === 14) pp.pinned = true;
+        ramp1Points.push(pp);
+    }
+    for (let i = 0; i < ramp1Points.length - 1; i++) {
+        addStick(ramp1Points[i], ramp1Points[i + 1], true, 3, rampColor);
+    }
+
+    // Ramp 2: left-leaning, lower
+    const ramp2Points = [];
+    for (let i = 0; i <= 15; i++) {
+        const px = 500 + i * 13;
+        const py = 250 + i * 5;
+        const pp = addPoint(px, py, false, 2, rampColor);
+        if (i === 0 || i === 14) pp.pinned = true;
+        ramp2Points.push(pp);
+    }
+    for (let i = 0; i < ramp2Points.length - 1; i++) {
+        addStick(ramp2Points[i], ramp2Points[i + 1], true, 3, rampColor);
+    }
+
+    // Ramp 3: middle small one
+    const ramp3Points = [];
+    for (let i = 0; i <= 10; i++) {
+        const px = 350 + i * 14;
+        const py = 180 + i * 9;
+        const pp = addPoint(px, py, false, 2, rampColor);
+        if (i === 0 || i === 9) pp.pinned = true;
+        ramp3Points.push(pp);
+    }
+    for (let i = 0; i < ramp3Points.length - 1; i++) {
+        addStick(ramp3Points[i], ramp3Points[i + 1], true, 3, rampColor);
+    }
+
+    // Spawn balls staggered
+    for (let i = 0; i < 8; i++) {
+        setTimeout(() => {
+            const bx = 100 + Math.random() * 600;
+            addCircle(bx, -10 - Math.random() * 50, 8 + Math.random() * 6, 0, 0, ballColors[i % ballColors.length]);
+        }, i * 400);
+    }
+
+    label.textContent = 'Demo 1: Falling Objects on Ramps';
+}
+
+// DEMO 2: Flexible bridge
+function setupDemo2() {
+    clearWorld();
+
+    // Cliffs
+    const cliffColor = '#7f8c8d';
+    // Left cliff
+    for (let y = 50; y < H; y += 20) {
+        for (let x = 0; x < 80; x += 20) {
+            addStick(addPoint(x, y, true), addPoint(x + 20, y, true), false, 1, '#555');
+            addStick(addPoint(x, y, true), addPoint(x, y + 20, true), false, 1, '#555');
+        }
+    }
+    // Right cliff
+    for (let y = 50; y < H; y += 20) {
+        for (let x = W - 80; x < W; x += 20) {
+            addStick(addPoint(x, y, true), addPoint(x + 20, y, true), false, 1, '#555');
+            addStick(addPoint(x, y, true), addPoint(x, y + 20, true), false, 1, '#555');
+        }
+    }
+
+    // Bridge main rope
+    const bridgeStart = addPoint(80, 180, true, 5, '#f1c40f');
+    const bridgeEnd = addPoint(W - 80, 180, true, 5, '#f1c40f');
+    const segments = 30;
+    const bridgePoints = [bridgeStart];
+    for (let i = 1; i < segments; i++) {
+        const t = i / segments;
+        const px = 80 + t * (W - 160);
+        const py = 180 + Math.sin(t * Math.PI) * 20;
+        bridgePoints.push(addPoint(px, py, false, 2, '#f39c12'));
+    }
+    bridgePoints.push(bridgeEnd);
+
+    for (let i = 0; i < bridgePoints.length - 1; i++) {
+        addStick(bridgePoints[i], bridgePoints[i + 1], true, 2, '#f39c12');
+    }
+
+    // Cross supports (vertical lines for stability)
+    for (let i = 2; i < bridgePoints.length - 2; i += 3) {
+        addStick(bridgePoints[i], bridgePoints[i + 1], true, 1, '#e67e22');
+        addStick(bridgePoints[i], bridgePoints[i - 1], true, 1, '#e67e22');
+    }
+
+    // Horizontal stability
+    for (let i = 0; i < bridgePoints.length - 2; i += 2) {
+        addStick(bridgePoints[i], bridgePoints[i + 2], true, 0.5, '#d35400');
+    }
+
+    // Spawn objects onto bridge
+    const objColors = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#e67e22'];
+    for (let i = 0; i < 7; i++) {
+        setTimeout(() => {
+            const ox = 200 + Math.random() * 400;
+            addCircle(ox, 50, 7 + Math.random() * 5, (Math.random() - 0.5) * 2, 0, objColors[i % objColors.length]);
+        }, i * 600);
+    }
+
+    // Platform on bridge
+    addStick(addPoint(250, 220, true, 3, '#aaa'), addPoint(350, 220, true, 3, '#aaa'), true, 3, '#bbb');
+    addStick(addPoint(350, 220, true, 3, '#aaa'), addPoint(450, 220, true, 3, '#aaa'), true, 3, '#bbb');
+
+    label.textContent = 'Demo 2: Flexible Bridge';
+}
+
+// DEMO 3: City with meteor
+function setupDemo3() {
+    clearWorld();
+
+    // Ground
+    addStick(addPoint(0, H - 2, true), addPoint(W, H - 2, true), true, 4, '#555');
+    addStick(addPoint(0, H - 1, true), addPoint(W, H - 1, true), true, 4, '#555');
+
+    // Buildings
+    const bColors = ['#34495e', '#4a6785', '#5d7f9e', '#2c3e50', '#3d566e'];
+    const buildings = [];
+
+    function makeBuilding(x, w, h, color) {
+        const pts = [];
+        const segs = Math.max(1, Math.floor(h / 25));
+        for (let i = 0; i <= segs; i++) {
+            pts.push({
+                tl: addPoint(x + (i === 0 ? 0 : 0), H - 2 - (h / segs) * i, i === 0 || i === segs, 2, color),
+                tr: addPoint(x + w + (i === 0 ? 0 : 0), H - 2 - (h / segs) * i, i === 0 || i === segs, 2, color),
+                bl: addPoint(x + (i === 0 ? 0 : 0), H - 2 - (h / segs) * (i + 1), false, 2, color),
+                br: addPoint(x + w + (i === 0 ? 0 : 0), H - 2 - (h / segs) * (i + 1), false, 2, color),
+            });
+        }
+        for (let i = 0; i < pts.length - 1; i++) {
+            // Outer edges
+            addStick(pts[i].tl, pts[i + 1].tl, true, 2, color);
+            addStick(pts[i].tr, pts[i + 1].tr, true, 2, color);
+            // Bottom of each segment
+            addStick(pts[i].bl, pts[i].br, true, 2, color);
+            // Top of each segment
+            addStick(pts[i].tl, pts[i].tr, true, 2, color);
+            // Cross braces
+            addStick(pts[i].tl, pts[i].br, true, 0.8, color);
+            addStick(pts[i].tr, pts[i].bl, true, 0.8, color);
+        }
+        buildings.push({ x, y: H - 2 - h, w, h });
+    }
+
+    makeBuilding(30, 70, 180, bColors[0]);
+    makeBuilding(120, 50, 250, bColors[1]);
+    makeBuilding(190, 90, 150, bColors[2]);
+    makeBuilding(300, 60, 220, bColors[3]);
+    makeBuilding(380, 80, 300, bColors[4]);
+    makeBuilding(480, 55, 170, bColors[0]);
+    makeBuilding(550, 100, 200, bColors[1]);
+    makeBuilding(670, 60, 260, bColors[2]);
+    makeBuilding(740, 50, 140, bColors[3]);
+
+    // Street lamps / small objects on ground
+    for (let i = 0; i < 5; i++) {
+        const lx = 100 + i * 150;
+        addStick(addPoint(lx, H - 2, true), addPoint(lx, H - 50, true), true, 3, '#888');
+        addCircle(lx, H - 52, 5, 0, 0, '#f1c40f');
+    }
+
+    // Cars on street
+    const carPositions = [150, 350, 520, 700];
+    const carColors = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12'];
+    carPositions.forEach((cx, i) => {
+        addCircle(cx, H - 12, 8, 0, 0, carColors[i]);
+        addCircle(cx + 16, H - 12, 8, 0, 0, carColors[i]);
+        addStick(points[points.length - 2], points[points.length - 1], true, 2, carColors[i]);
+    });
+
+    // Meteor
+    const meteor = addCircle(-100, 50, 20, 3, 1.5, '#ff6b35');
+    meteor.mass = 5;
+
+    // Meteor trail particles

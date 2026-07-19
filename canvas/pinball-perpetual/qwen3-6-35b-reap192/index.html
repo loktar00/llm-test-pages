@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Neon Pinball</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; display: flex; justify-content: center; align-items: center; height: 100vh; }
+canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+let W, H, SCALE;
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    SCALE = Math.min(W / 500, H / 800);
+}
+resize();
+window.addEventListener('resize', resize);
+
+const TABLE_W = 380;
+const TABLE_H = 720;
+const TABLE_X = (W - TABLE_W * SCALE) / 2;
+const TABLE_Y = (H - TABLE_H * SCALE) / 2;
+
+function tx(x) { return TABLE_X + x * SCALE; }
+function ty(y) { return TABLE_Y + y * SCALE; }
+function ts(s) { return s * SCALE; }
+
+// Colors
+const NEON_CYAN = '#00ffff';
+const NEON_MAGENTA = '#ff00ff';
+const NEON_YELLOW = '#ffff00';
+const NEON_GREEN = '#00ff66';
+const NEON_ORANGE = '#ff6600';
+const NEON_RED = '#ff2244';
+
+// Game state
+let score = 0;
+let totalScore = 0;
+let ballActive = true;
+let launches = 0;
+
+// Ball
+let ball = { x: 0, y: 0, vx: 0, vy: 0, r: 7, trail: [] };
+
+// Particles
+let particles = [];
+let popups = [];
+
+// Bumpers
+const bumpers = [
+    { x: 140, y: 160, r: 28, color: NEON_CYAN, score: 100, flash: 0 },
+    { x: 240, y: 160, r: 28, color: NEON_MAGENTA, score: 100, flash: 0 },
+    { x: 190, y: 110, r: 28, color: NEON_YELLOW, score: 100, flash: 0 },
+    { x: 100, y: 230, r: 22, color: NEON_GREEN, score: 150, flash: 0 },
+    { x: 280, y: 230, r: 22, color: NEON_ORANGE, score: 150, flash: 0 },
+    { x: 190, y: 260, r: 22, color: NEON_RED, score: 200, flash: 0 }
+];
+
+// Slingshots
+const slingshots = [
+    { x: 90, y: 520, angle: 0.3, length: 90, color: NEON_CYAN, score: 50, flash: 0 },
+    { x: 290, y: 520, angle: -0.3, length: 90, color: NEON_MAGENTA, score: 50, flash: 0 }
+];
+
+// Flipper physics
+const FLIPPER_REST = -0.55;
+const FLIPPER_ACT = 0.55;
+const FLIPPER_SPEED = 0.22;
+const FLIPPER_LEN = 70;
+const FLIPPER_W = 12;
+
+let flippers = [
+    { x: 130, y: 660, side: 'left', angle: FLIPPER_REST, targetAngle: FLIPPER_REST, active: false },
+    { x: 250, y: 660, side: 'right', angle: FLIPPER_ACT, targetAngle: FLIPPER_ACT, active: false }
+];
+
+// Spinner
+let spinner = { x: 190, y: 380, angle: 0, rpm: 0, blades: 4, flash: 0 };
+
+// Ramps (visual + physics guides)
+const ramps = [
+    { points: [{ x: 305, y: 400 }, { x: 330, y: 340 }, { x: 320, y: 260 }, { x: 295, y: 200 }], width: 20, color: NEON_GREEN, active: false },
+    { points: [{ x: 75, y: 400 }, { x: 50, y: 340 }, { x: 60, y: 260 }, { x: 85, y: 200 }], width: 20, color: NEON_YELLOW, active: false }
+];
+
+// Drain zone
+const DRAIN_Y = 710;
+
+// AI Flipper logic
+let aiState = {
+    leftTimer: 0,
+    rightTimer: 0,
+    leftHold: 0,
+    rightHold: 0,
+    lastBallX: 0,
+    lastBallY: 0
+};
+
+function updateAI(dt) {
+    const bx = ball.x;
+    const by = ball.y;
+
+    // Left flipper AI
+    if (bx < 200 && by > 500 && ball.vy > -2) {
+        aiState.leftTimer -= dt;
+        if (aiState.leftTimer <= 0 && !flippers[0].active) {
+            flippers[0].active = true;
+            aiState.leftHold = 0.12 + Math.random() * 0.08;
+            aiState.leftTimer = 0.15 + Math.random() * 0.2;
+        }
+    } else {
+        aiState.leftTimer -= dt;
+    }
+    if (flippers[0].active) {
+        aiState.leftHold -= dt;
+        if (aiState.leftHold <= 0) {
+            flippers[0].active = false;
+        }
+    }
+
+    // Right flipper AI
+    if (bx > 180 && by > 500 && ball.vy > -2) {
+        aiState.rightTimer -= dt;
+        if (aiState.rightTimer <= 0 && !flippers[1].active) {
+            flippers[1].active = true;
+            aiState.rightHold = 0.12 + Math.random() * 0.08;
+            aiState.rightTimer = 0.15 + Math.random() * 0.2;
+        }
+    } else {
+        aiState.rightTimer -= dt;
+    }
+    if (flippers[1].active) {
+        aiState.rightHold -= dt;
+        if (aiState.rightHold <= 0) {
+            flippers[1].active = false;
+        }
+    }
+}
+
+// Ball launch
+function launchBall() {
+    ball.x = 350;
+    ball.y = 640;
+    ball.vx = (-3.5 - Math.random() * 2) * SCALE;
+    ball.vy = (-14 - Math.random() * 3) * SCALE;
+    ball.trail = [];
+    ballActive = true;
+    launches++;
+}
+
+// Physics
+const GRAVITY = 0.35;
+const RESTITUTION = 0.65;
+const FLIPPER_RESTITUTION = 0.85;
+const AIR_RESISTANCE = 0.999;
+const BUMPER_RESTITUTION = 1.05;
+const SLING_RESTITUTION = 1.15;
+
+function dist(x1, y1, x2, y2) {
+    return Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
+}
+
+function closestPointOnSeg(px, py, ax, ay, bx, by) {
+    const dx = bx - ax, dy = by - ay;
+    const len2 = dx * dx + dy * dy;
+    if (len2 === 0) return { x: ax, y: ay };
+    let t = ((px - ax) * dx + (py - ay) * dy) / len2;
+    t = Math.max(0, Math.min(1, t));
+    return { x: ax + t * dx, y: ay + t * dy };
+}
+
+function updateBall(dt) {
+    if (!ballActive) return;
+
+    // Gravity
+    ball.vy += GRAVITY * SCALE;
+
+    // Air resistance
+    ball.vx *= AIR_RESISTANCE;
+    ball.vy *= AIR_RESISTANCE;
+
+    // Speed cap
+    const spd = Math.sqrt(ball.vx ** 2 + ball.vy ** 2);
+    const maxSpd = 18 * SCALE;
+    if (spd > maxSpd) {
+        ball.vx = (ball.vx / spd) * maxSpd;
+        ball.vy = (ball.vy / spd) * maxSpd;
+    }
+
+    // Move
+    ball.x += ball.vx;
+    ball.y += ball.vy;
+
+    // Trail
+    ball.trail.push({ x: ball.x, y: ball.y });
+    if (ball.trail.length > 15) ball.trail.shift();
+
+    // Table boundaries
+    const wallLeft = 20, wallRight = 360;
+    const wallTop = 20, wallBottom = 700;
+
+    // Left wall
+    if (ball.x - ball.r < wallLeft) {
+        ball.x = wallLeft + ball.r;
+        ball.vx = Math.abs(ball.vx) * RESTITUTION;
+    }
+    // Right wall
+    if (ball.x + ball.r > wallRight) {
+        ball.x = wallRight - ball.r;
+        ball.vx = -Math.abs(ball.vx) * RESTITUTION;
+    }
+    // Top wall
+    if (ball.y - ball.r < wallTop) {
+        ball.y = wallTop + ball.r;
+        ball.vy = Math.abs(ball.vy) * RESTITUTION;
+    }
+    // Bottom wall (above drain)
+    if (ball.y + ball.r > wallBottom && ball.y < DRAIN_Y) {
+        ball.y = wallBottom - ball.r;
+        ball.vy = -Math.abs(ball.vy) * RESTITUTION;
+    }
+
+    // Guide rails (left launch lane)
+    const railX = 305;
+    if (ball.x + ball.r > railX && ball.x - ball.r < railX + 10 && ball.y > 400) {
+        if (ball.x < railX + 5) {
+            ball.x = railX + 5 + ball.r;
+            ball.vx = -Math.abs(ball.vx) * 0.5;
+        } else {
+            ball.x = railX - ball.r;
+            ball.vx = -Math.abs(ball.vx) * 0.5;
+        }
+    }
+
+    // Right wall of main play area
+    if (ball.x + ball.r > wallRight - 5 && ball.y > 100) {
+        ball.x = wallRight - 5 - ball.r;
+        ball.vx = -Math.abs(ball.vx) * RESTITUTION;
+    }
+
+    // Left wall extension (left guide)
+    if (ball.x - ball.r < 15 && ball.y > 100) {
+        ball.x = 15 + ball.r;
+        ball.vx = Math.abs(ball.vx) * RESTITUTION;
+    }
+
+    // Bumper collisions
+    for (let b of bumpers) {
+        const d = dist(ball.x, ball.y, b.x, b.y);
+        if (d < ball.r + b.r) {
+            const nx = (ball.x - b.x) / d;
+            const ny = (ball.y - b.y) / d;
+            ball.x = b.x + nx * (ball.r + b.r + 2);
+            ball.y = b.y + ny * (ball.r + b.r + 2);
+
+            const dot = ball.vx * nx + ball.vy * ny;
+            ball.vx -= 2 * dot * nx;
+            ball.vy -= 2 * dot * ny;
+            ball.vx *= BUMPER_RESTITUTION;
+            ball.vy *= BUMPER_RESTITUTION;
+
+            b.flash = 1;
+            score += b.score;
+            totalScore += b.score;
+            popups.push({ x: b.x, y: b.y, text: '+' + b.score, life: 1, color: b.color });
+            spawnParticles(b.x, b.y, b.color, 8);
+        }
+    }
+
+    // Slingshot collisions
+    for (let s of slingshots) {
+        const ax = s.x - s.length / 2 * Math.sin(s.angle);
+        const ay = s.y - s.length / 2 * Math.cos(s.angle);
+        const bx = s.x + s.length / 2 * Math.sin(s.angle);
+        const by = s.y - s.length / 2 * Math.cos(s.angle);
+
+        const cp = closestPointOnSeg(ball.x, ball.y, ax, ay, bx, by);
+        const d = dist(ball.x, ball.y, cp.x, cp.y);
+
+        if (d < ball.r + 8) {
+            const nx = (ball.x - cp.x) / d;
+            const ny = (ball.y - cp.y) / d;
+            ball.x = cp.x + nx * (ball.r + 8 + 1);
+            ball.y = cp.y + ny * (ball.r + 8 + 1);
+
+            const dot = ball.vx * nx + ball.vy * ny;
+            ball.vx -= 2 * dot * nx;
+            ball.vy -= 2 * dot * ny;
+            ball.vx *= SLING_RESTITUTION;
+            ball.vy *= SLING_RESTITUTION;
+
+            s.flash = 1;
+            score += s.score;
+            totalScore += s.score;
+            popups.push({ x: s.x, y: s.y - 20, text: '+' + s.score, life: 1, color: s.color });
+            spawnParticles(cp.x, cp.y, s.color, 6);
+        }
+    }
+
+    // Flipper collisions
+    for (let f of flippers) {
+        const angle = f.angle;
+        const cos = Math.cos(angle);
+        const sin = Math.sin(angle);
+
+        const fx = f.x + FLIPPER_LEN * cos;
+        const fy = f.y + FLIPPER_LEN * sin;
+
+        const cp = closestPointOnSeg(ball.x, ball.y, f.x, f.y, fx, fy);
+        const d = dist(ball.x, ball.y, cp.x, cp.y);
+
+        if (d < ball.r + FLIPPER_W / 2) {
+            const nx = (ball.x - cp.x) / d;
+            const ny = (ball.y - cp.y) / d;
+            ball.x = cp.x + nx * (ball.r + FLIPPER_W / 2 + 1);
+            ball.y = cp.y + ny * (ball.r + FLIPPER_W / 2 + 1);
+
+            const dot = ball.vx * nx + ball.vy * ny;
+            ball.vx -= 2 * dot * nx;
+            ball.vy -= 2 * dot * ny;
+
+            // Flipper impulse
+            const flipperTipVel = FLIPPER_SPEED * SCALE * 40;
+            if (f.active) {
+                ball.vy -= flipperTipVel * 0.8;
+                ball.vx += nx * flipperTipVel * 0.3;
+                ball.vy *= FLIPPER_RESTITUTION;
+                ball.vx *= FLIPPER_RESTITUTION;
+            } else {
+                ball.vy *= RESTITUTION * 0.8;
+                ball.vx *= RESTITUTION * 0.8;
+            }
+
+            f.active = f.active; // keep state
+        }
+    }
+
+    // Spinner collision
+    const sd = dist(ball.x, ball.y, spinner.x, spinner.y);
+    if (sd < ball.r + 15) {
+        const nx = (ball.x - spinner.x) / sd;
+        const ny = (ball.y - spinner.y) / sd;
+        ball.x = spinner.x + nx * (ball.r + 15);
+        ball.y = spinner.y + ny * (ball.r + 15);
+
+        const dot = ball.vx * nx + ball.vy * ny;
+        ball.vx -= 2 * dot * nx;
+        ball.vy -= 2 * dot * ny;
+        ball.vx *= 0.9;
+        ball.vy *= 0.9;
+
+        spinner.rpm = Math.min(15, spinner.rpm + 2);
+        score += 25;
+        totalScore += 25;
+        spinner.flash = 1;
+        popups.push({ x: spinner.x, y: spinner.y - 20, text: '+25', life: 1, color: NEON_ORANGE });
+    }
+
+    // Ramp entrance detection
+    for (let r of ramps) {
+        const last = r.points[r.points.length - 1];
+        const d = dist(ball.x, ball.y, last.x, last.y);
+        if (d < 20) {
+            // Ball enters ramp
+            r.active = true;
+            // Launch ball back up
+            ball.x = last.x;
+            ball.y = last.y;
+            ball.vx = (r === ramps[0] ? -1 : 1) * 3;
+            ball.vy = -10;
+            score += 500;
+            totalScore += 500;
+            popups.push({ x: last.x, y: last.y, text: '+500 RAMP!', life: 1, color: r.color });
+            spawnParticles(last.x, last.y, r.color, 15);
+        }
+    }
+
+    // Drain detection
+    if (ball.y > DRAIN_Y) {
+        ballActive = false;
+        setTimeout(() => {
+            launchBall();
+        }, 800);
+    }
+}
+
+function updateFlippers(dt) {
+    for (let f of flippers) {
+        const

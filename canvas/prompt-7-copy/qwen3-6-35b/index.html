@@ -43,4 +43,407 @@
                 windowLit: '#ffcc00',
                 windowDark: '#050505',
                 meteor: '#333',
-                smoke: '#
+                smoke: '#444',
+                fire: '#ff4500'
+            },
+            particleCount: 3000, // Max debris
+            meteorInterval: 4000, // ms
+            meteorSize: 60
+        };
+
+        // --- Setup Matter.js ---
+        const Engine = Matter.Engine,
+              Render = Matter.Render,
+              Runner = Matter.Runner,
+              Bodies = Matter.Bodies,
+              Composite = Matter.Composite,
+              Constraint = Matter.Constraint,
+              Events = Matter.Events,
+              Vector = Matter.Vector,
+              Body = Matter.Body;
+
+        const engine = Engine.create();
+        const world = engine.world;
+        
+        // Disable standard gravity for custom effects if needed, but we'll use default for now
+        engine.gravity.y = 1; 
+
+        // --- Canvas Setup ---
+        const canvas = document.getElementById('sim');
+        const ctx = canvas.getContext('2d');
+        let width, height;
+
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            
+            // Update ground and walls
+            Composite.clear(world, false, true); // Keep bodies, remove constraints (walls)
+            
+            // Rebuild world bounds (Ground + Walls)
+            const wallOptions = { isStatic: true, render: { visible: false } };
+            Composite.add(world, [
+                Bodies.rectangle(width / 2, height + 50, width, 200, wallOptions), // Floor
+                Bodies.rectangle(-50, height / 2, 100, height * 2, wallOptions), // Left Wall
+                Bodies.rectangle(width + 50, height / 2, 100, height * 2, wallOptions) // Right Wall
+            ]);
+            
+            // Re-add existing buildings if we want persistence, but for this demo
+            // we just need to ensure bounds exist.
+        }
+
+        window.addEventListener('resize', resize);
+
+        // --- Physics Objects Creation ---
+
+        const buildings = [];
+        const particles = []; // Stores debris particles
+        const meteors = [];
+        let smokeParticles = [];
+
+        function createBuilding(x, w, h) {
+            const rows = Math.floor(h / 10);
+            const cols = Math.floor(w / 10);
+            const buildingGroup = [];
+            
+            // Create grid of small bodies
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    const bx = x + c * 10;
+                    const by = height - (rows - r) * 10;
+                    
+                    const body = Bodies.rectangle(bx, by, 10, 10, {
+                        chamfer: { radius: 0 }, // Sharp edges
+                        friction: 0.8,
+                        restitution: 0.1, // Low bounce
+                        density: 0.005,
+                        render: {
+                            fillStyle: (r > rows - 4 && Math.random() > 0.7) 
+                                ? CONFIG.colors.windowLit 
+                                : CONFIG.colors.buildingBase
+                        }
+                    });
+                    
+                    buildingGroup.push(body);
+                }
+            }
+
+            // Apply constraints to keep building together until force is applied
+            // Horizontal constraints
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols - 1; c++) {
+                    const idx = r * cols + c;
+                    const b1 = buildingGroup[idx];
+                    const b2 = buildingGroup[idx + 1];
+                    
+                    // Stick constraint: if hit hard enough, breaks
+                    const constraint = Constraint.create({
+                        bodyA: b1,
+                        bodyB: b2,
+                        stiffness: 0.1, // Low stiffness allows breaking
+                        damping: 0.1,
+                        length: 10,
+                        render: { visible: false }
+                    });
+                    buildingGroup.push(constraint);
+                }
+            }
+
+            // Vertical constraints
+            for (let r = 0; r < rows - 1; r++) {
+                for (let c = 0; c < cols; c++) {
+                    const idx = r * cols + c;
+                    const b1 = buildingGroup[idx];
+                    const b2 = buildingGroup[idx + cols];
+                    
+                    const constraint = Constraint.create({
+                        bodyA: b1,
+                        bodyB: b2,
+                        stiffness: 0.05,
+                        damping: 0.1,
+                        length: 10,
+                        render: { visible: false }
+                    });
+                    buildingGroup.push(constraint);
+                }
+            }
+
+            Composite.add(world, buildingGroup);
+            buildings.push({ w, h, x });
+        }
+
+        function createMeteor() {
+            const size = CONFIG.meteorSize;
+            const x = Math.random() * (width - 200) + 100;
+            const y = -100;
+            
+            const meteor = Bodies.circle(x, y, size, {
+                density: 0.5,
+                restitution: 0.2,
+                friction: 0.5,
+                render: { fillStyle: CONFIG.colors.meteor }
+            });
+            
+            // Set initial velocity downwards and slightly random horizontal
+            Body.setVelocity(meteor, { x: (Math.random() - 0.5) * 10, y: 15 });
+            
+            Composite.add(world, meteor);
+            meteors.push(meteor);
+            
+            // Add trail particles
+            for(let i=0; i<5; i++) {
+                smokeParticles.push({
+                    x: x + (Math.random()-0.5)*20,
+                    y: y + (Math.random()-0.5)*20,
+                    vx: (Math.random()-0.5)*2,
+                    vy: Math.random() * 5 + 2,
+                    life: 1.0,
+                    size: Math.random() * 30 + 20
+                });
+            }
+        }
+
+        function createExplosion(x, y, count) {
+            // Create debris chunks
+            for (let i = 0; i < count; i++) {
+                const size = Math.random() * 8 + 2;
+                const body = Bodies.rectangle(x, y, size, size, {
+                    density: 0.01,
+                    friction: 0.5,
+                    restitution: 0.5
+                });
+                
+                // Random explosive velocity
+                const angle = Math.random() * Math.PI * 2;
+                const speed = Math.random() * 20 + 5;
+                
+                Body.setVelocity(body, {
+                    x: Math.cos(angle) * speed,
+                    y: Math.sin(angle) * speed - 5 // Upward bias
+                });
+                
+                Composite.add(world, body);
+                particles.push(body);
+            }
+
+            // Shockwave visual (simple expanding circle handled in render)
+            shockwaves.push({ x, y, r: 10, alpha: 1 });
+        }
+
+        // --- Custom Rendering Logic (The Verlet Visuals) ---
+        // Matter.js doesn't handle visual "breaking" well out of the box.
+        // We will override the render loop to draw the specific styles.
+
+        let shockwaves = [];
+        let lastTime = 0;
+
+        function renderLoop(time) {
+            const dt = time - lastTime;
+            lastTime = time;
+
+            // Clear canvas
+            ctx.clearRect(0, 0, width, height);
+
+            // 1. Draw Sky Gradient
+            const gradient = ctx.createLinearGradient(0, 0, 0, height);
+            gradient.addColorStop(0, CONFIG.colors.skyTop);
+            gradient.addColorStop(1, CONFIG.colors.skyBottom);
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, width, height);
+
+            // 2. Draw Smoke / Fire Trails
+            ctx.globalCompositeOperation = 'lighter';
+            for (let i = smokeParticles.length - 1; i >= 0; i--) {
+                const p = smokeParticles[i];
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life -= 0.01;
+                
+                if (p.life <= 0) {
+                    smokeParticles.splice(i, 1);
+                    continue;
+                }
+
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(200, 50, 0, ${p.life * 0.3})`;
+                ctx.fill();
+            }
+            ctx.globalCompositeOperation = 'source-over';
+
+            // 3. Draw Shockwaves
+            for (let i = shockwaves.length - 1; i >= 0; i--) {
+                const s = shockwaves[i];
+                s.r += 15;
+                s.alpha -= 0.05;
+                
+                if (s.alpha <= 0) {
+                    shockwaves.splice(i, 1);
+                    continue;
+                }
+
+                ctx.beginPath();
+                ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+                ctx.strokeStyle = `rgba(255, 200, 100, ${s.alpha})`;
+                ctx.lineWidth = 5;
+                ctx.stroke();
+            }
+
+            // 4. Draw Physics Bodies
+            // We iterate through all bodies in the world
+            const bodies = Composite.allBodies(world);
+            
+            ctx.lineWidth = 1;
+
+            bodies.forEach(body => {
+                if (body.render.visible === false) return;
+                
+                ctx.beginPath();
+                const vertices = body.vertices;
+                ctx.moveTo(vertices[0].x, vertices[0].y);
+                for (let j = 1; j < vertices.length; j += 1) {
+                    ctx.lineTo(vertices[j].x, vertices[j].y);
+                }
+                ctx.lineTo(vertices[0].x, vertices[0].y);
+                ctx.closePath();
+
+                // Draw fill
+                ctx.fillStyle = body.render.fillStyle || '#333';
+                
+                // Add glow for meteors
+                if (body.label === 'circle') {
+                    ctx.shadowBlur = 20;
+                    ctx.shadowColor = 'red';
+                } else {
+                    ctx.shadowBlur = 0;
+                }
+                
+                ctx.fill();
+                
+                // Reset shadow
+                ctx.shadowBlur = 0;
+            });
+            
+            // 5. Draw Constraints (The connections)
+            const constraints = Composite.allConstraints(world);
+            ctx.beginPath();
+            constraints.forEach(c => {
+                if (!c.bodyA || !c.bodyB) return;
+                
+                // Only draw if the constraint is under tension (broken) or we want to see the structure
+                // For simplicity in this demo, we draw them all but faintly
+                // A more advanced engine would check 'stiffness' vs force.
+                
+                const posA = c.bodyA.position;
+                const posB = c.bodyB.position;
+                
+                ctx.moveTo(posA.x, posA.y);
+                ctx.lineTo(posB.x, posB.y);
+            });
+            ctx.strokeStyle = 'rgba(50, 50, 50, 0.3)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            // 6. Manage Particles (Debris) cleanup
+            // Remove particles that fall off screen
+            for (let i = particles.length - 1; i >= 0; i--) {
+                if (particles[i].position.y > height + 100) {
+                    Composite.remove(world, particles[i]);
+                    particles.splice(i, 1);
+                }
+            }
+            
+            // Remove meteors that pass through earth
+            for (let i = meteors.length - 1; i >= 0; i--) {
+                if (meteors[i].position.y > height + 100) {
+                    Composite.remove(world, meteors[i]);
+                    meteors.splice(i, 1);
+                }
+            }
+
+            requestAnimationFrame(renderLoop);
+        }
+
+        // --- Initialization ---
+        
+        function initCity() {
+            const buildingWidth = 120;
+            const gap = 20;
+            const bCount = Math.floor((width - 100) / (buildingWidth + gap));
+            const startX = (width - (bCount * (buildingWidth + gap))) / 2;
+
+            for (let i = 0; i < bCount; i++) {
+                const h = Math.random() * (height * 0.4) + (height * 0.2);
+                createBuilding(startX + i * (buildingWidth + gap), buildingWidth, h);
+            }
+        }
+
+        // --- Main Execution ---
+        
+        resize();
+        initCity();
+
+        // Start the runner (physics loop)
+        const runner = Runner.create();
+        Runner.run(runner, engine);
+
+        // Start the custom render loop
+        requestAnimationFrame(renderLoop);
+
+        // Meteor Spawner
+        setInterval(createMeteor, CONFIG.meteorInterval);
+
+        // Collision Handling to create effects
+        Events.on(engine, 'collisionStart', function(event) {
+            const pairs = event.pairs;
+
+            for (let i = 0; i < pairs.length; i++) {
+                const pair = pairs[i];
+                const bodyA = pair.bodyA;
+                const bodyB = pair.bodyB;
+
+                // Check for high speed impact involving a meteor
+                const isMeteorA = bodyA.label === 'circle';
+                const isMeteorB = bodyB.label === 'circle';
+                
+                if (isMeteorA || isMeteorB) {
+                    const meteor = isMeteorA ? bodyA : bodyB;
+                    // Don't explode if hitting ground (handled by falling cleanup)
+                    // But we can create smoke when hitting ground
+                    if (meteor.position.y > height - 100) {
+                        // Create smoke on ground hit
+                        for(let k=0; k<10; k++) {
+                             smokeParticles.push({
+                                x: meteor.position.x + (Math.random()-0.5)*40,
+                                y: height - 10,
+                                vx: (Math.random()-0.5)*5,
+                                vy: -Math.random() * 2,
+                                life: 2.0,
+                                size: Math.random() * 50 + 30
+                            });
+                        }
+                    }
+                }
+                
+                // Check for building block collisions to create debris
+                // If a moving block hits another block hard
+                const speedA = Vector.magnitude(bodyA.velocity);
+                const speedB = Vector.magnitude(bodyB.velocity);
+                
+                // Only create debris if it's a heavy hit and involves a block
+                if (!isMeteorA && !isMeteorB && (speedA > 10 || speedB > 10)) {
+                    // Chance to spawn debris
+                    if (Math.random() > 0.7) {
+                        const impactX = pair.collision.supports[0].x;
+                        const impactY = pair.collision.supports[0].y;
+                        createExplosion(impactX, impactY, 2);
+                    }
+                }
+            }
+        });
+
+    </script>
+</body>
+</html>

@@ -15,33 +15,298 @@
         }
         canvas {
             display: block;
-        }
-        /* Add a subtle vignette via CSS to enhance the feeling of depth */
-        .vignette {
-            position: absolute;
-            top: 0;
-            left: 0;
             width: 100%;
             height: 100%;
-            box-shadow: inset 0 0 150px rgba(0,0,0,0.9);
-            pointer-events: none;
-            z-index: 10;
         }
     </style>
 </head>
 <body>
-    <div class="vignette"></div>
-    <canvas id="canvas"></canvas>
+    <canvas id="tunnelCanvas"></canvas>
     <script>
         /**
-         * HIGH SPEED TUNNEL SCREENSAVER
-         * 
-         * Uses a 2.5D projection technique.
-         * Instead of a complex 3D engine, we define the tunnel geometry in 
-         * an abstract coordinate space. We project these points onto the 
-         * 2D screen using a perspective formula (focal_length / z).
-         * 
-         * This creates a highly performant, demoscene-style effect.
+         * Fast Tunnel Screensaver
+         * Uses a custom pseudo-3D perspective projection algorithm.
+         * No libraries. Pure Canvas API.
          */
 
-        const canvas = document.getElementById('canvas');
+        const canvas = document.getElementById('tunnelCanvas');
+        const ctx = canvas.getContext('2d', { alpha: false });
+
+        // Configuration
+        const config = {
+            tunnelLength: 200,      // Number of rings in the tunnel
+            ringBaseSize: 3000,     // Size of the tunnel at distance 0
+            fov: 800,               // Field of view factor
+            colors: [
+                '#00ffff', // Cyan
+                '#ff00ff', // Magenta
+                '#0000ff', // Blue
+                '#ff5500', // Orange
+                '#ffffff'  // White
+            ],
+            baseSpeed: 20,
+            maxSpeed: 50,
+            minSpeed: 10
+        };
+
+        let width, height, cx, cy;
+        let time = 0;
+        let speed = config.baseSpeed;
+        let rings = [];
+
+        // Resize Handler
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            cx = width / 2;
+            cy = height / 2;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // Utility Functions
+        const random = (min, max) => Math.random() * (max - min) + min;
+        const randomColor = () => config.colors[Math.floor(Math.random() * config.colors.length)];
+
+        // Ring Class
+        class Ring {
+            constructor(z) {
+                this.reset(z);
+            }
+
+            reset(z) {
+                // Z represents distance from camera. 0 is at camera, >0 is forward.
+                this.z = z || config.tunnelLength; 
+                
+                // Randomize geometry slightly to make it look like a tunnel and not a cylinder
+                this.radius = config.ringBaseSize + random(-200, 200);
+                
+                // Randomize hole shape (circle vs square vs polygon)
+                // 0 = circle, 1 = square, 2 = octagon, 3 = hexagon
+                this.shape = Math.floor(random(0, 4)); 
+                
+                // Color
+                this.color = randomColor();
+                
+                // Thickness of the ring line
+                this.strokeWidth = random(1, 4);
+                
+                // Twisted angle offset for 3D effect (optional, mostly used via camera sway)
+                this.angle = 0;
+            }
+
+            update() {
+                // Move ring towards camera
+                this.z -= speed;
+
+                // Reset if it passes the camera
+                if (this.z <= 1) {
+                    this.reset(config.tunnelLength);
+                }
+            }
+
+            draw() {
+                // Perspective Projection
+                // scale = focalLength / (focalLength + z)
+                // As z increases, scale approaches 0 (vanishing point)
+                const scale = config.fov / (config.fov + this.z);
+                
+                // Calculate position on screen based on camera sway
+                // We add a sinusoidal offset to cx/cy to simulate camera drift
+                const swayX = Math.sin(time * 0.5) * 100;
+                const swayY = Math.cos(time * 0.3) * 50;
+                
+                // Add a "warp" effect where the center moves slightly based on time
+                const centerOffsetX = Math.sin(time * 0.2) * 500;
+                const centerOffsetY = Math.cos(time * 0.3) * 500;
+
+                const projectedRadius = this.radius * scale;
+                const drawX = cx + centerOffsetX * scale + swayX;
+                const drawY = cy + centerOffsetY * scale + swayY;
+
+                // If ring is too small or off-screen, skip drawing (optimization)
+                if (projectedRadius < 1) return;
+
+                ctx.beginPath();
+                
+                // Draw specific shapes
+                if (this.shape === 0) {
+                    // Circle
+                    ctx.arc(drawX, drawY, projectedRadius, 0, Math.PI * 2);
+                } else if (this.shape === 1) {
+                    // Square
+                    const s = projectedRadius * 1.2;
+                    ctx.rect(drawX - s/2, drawY - s/2, s, s);
+                } else if (this.shape === 2) {
+                    // Octagon
+                    const sides = 8;
+                    const step = Math.PI * 2 / sides;
+                    for (let i = 0; i < sides; i++) {
+                        const x = drawX + Math.cos(i * step) * projectedRadius;
+                        const y = drawY + Math.sin(i * step) * projectedRadius;
+                        if (i === 0) ctx.moveTo(x, y);
+                        else ctx.lineTo(x, y);
+                    }
+                    ctx.closePath();
+                } else {
+                    // Hexagon
+                    const sides = 6;
+                    const step = Math.PI * 2 / sides;
+                    for (let i = 0; i < sides; i++) {
+                        const x = drawX + Math.cos(i * step) * projectedRadius;
+                        const y = drawY + Math.sin(i * step) * projectedRadius;
+                        if (i === 0) ctx.moveTo(x, y);
+                        else ctx.lineTo(x, y);
+                    }
+                    ctx.closePath();
+                }
+
+                ctx.lineWidth = this.strokeWidth;
+                ctx.strokeStyle = this.color;
+                ctx.stroke();
+                
+                // Add a slight glow effect for closer rings
+                if (this.z < 200) {
+                    ctx.shadowBlur = 20;
+                    ctx.shadowColor = this.color;
+                    ctx.stroke();
+                    ctx.shadowBlur = 0;
+                }
+            }
+        }
+
+        // Particle System for "Starfield" effect inside the tunnel
+        class Particle {
+            constructor() {
+                this.reset();
+            }
+
+            reset() {
+                // Spread particles wide
+                this.x = (Math.random() - 0.5) * 4000;
+                this.y = (Math.random() - 0.5) * 4000;
+                this.z = config.tunnelLength;
+                this.size = random(0.5, 2);
+            }
+
+            update() {
+                this.z -= speed;
+                if (this.z <= 1) {
+                    this.reset();
+                }
+            }
+
+            draw() {
+                const scale = config.fov / (config.fov + this.z);
+                const swayX = Math.sin(time * 0.5) * 100;
+                const swayY = Math.cos(time * 0.3) * 50;
+                const centerOffsetX = Math.sin(time * 0.2) * 500;
+                const centerOffsetY = Math.cos(time * 0.3) * 500;
+
+                const px = cx + (this.x * scale) + centerOffsetX * scale + swayX;
+                const py = cy + (this.y * scale) + centerOffsetY * scale + swayY;
+
+                // Only draw if on screen
+                if (px < 0 || px > width || py < 0 || py > height) return;
+
+                ctx.fillStyle = "rgba(255, 255, 255, 0.6)";
+                ctx.beginPath();
+                ctx.arc(px, py, this.size * scale, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        // Initialize Objects
+        const initRings = () => {
+            rings = [];
+            // Fill the tunnel with rings
+            for (let i = 0; i < config.tunnelLength; i++) {
+                // Distribute evenly, but add some randomness to Z so it's not a perfect cylinder
+                let z = (config.tunnelLength / config.tunnelLength) * i;
+                z = Math.floor(z); // Integer steps for cleaner rendering logic
+                rings.push(new Ring(z));
+            }
+        };
+
+        const particles = [];
+        for(let i=0; i<100; i++) particles.push(new Particle());
+
+        initRings();
+
+        // Animation Loop
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // 1. Update Speed
+            // Create a smooth speed fluctuation using Sine waves
+            // Low frequency wave for general "breathing" speed
+            // High frequency wave for "turbo" bursts
+            const speedMod = Math.sin(time * 0.02) * 5 + Math.sin(time * 0.15) * 10;
+            speed = config.baseSpeed + speedMod;
+            // Clamp speed
+            if (speed < config.minSpeed) speed = config.minSpeed;
+            if (speed > config.maxSpeed) speed = config.maxSpeed;
+
+            // 2. Clear Screen
+            // Use a slight fade effect for motion blur trails
+            // Instead of clearing completely, draw a semi-transparent black rect
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.85)'; 
+            ctx.fillRect(0, 0, width, height);
+
+            // 3. Draw Background "Outside" View (Optional Atmosphere)
+            // Since we use semi-transparent clearing, this creates natural trails.
+            // To make it look like a starfield background in the center hole:
+            if (Math.random() > 0.95) {
+                ctx.fillStyle = `rgba(255, 255, 255, ${Math.random() * 0.05})`;
+                ctx.beginPath();
+                ctx.arc(cx, cy, 200 * Math.random(), 0, Math.PI*2);
+                ctx.fill();
+            }
+
+            // 4. Update and Draw Particles (Stars/Dust)
+            // We draw them behind the tunnel rings
+            particles.forEach(p => {
+                p.update();
+                p.draw();
+            });
+
+            // 5. Update and Draw Tunnel Rings
+            // Sort rings by Z (Painter's Algorithm)
+            // We want to draw furthest rings first.
+            rings.sort((a, b) => b.z - a.z);
+
+            rings.forEach(ring => {
+                ring.update();
+                ring.draw();
+            });
+
+            // 6. Vignette Effect (Darken edges)
+            // Creates a sense of looking through a scope or windshield
+            const gradient = ctx.createRadialGradient(cx, cy, height * 0.2, cx, cy, height * 1.2);
+            gradient.addColorStop(0, 'rgba(0,0,0,0)');
+            gradient.addColorStop(1, 'rgba(0,0,0,0.6)');
+            
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, width, height);
+
+            // 7. Center Brightness Pulse
+            // Occasionally flash the center to emphasize speed
+            if (Math.random() > 0.98) {
+                const pulseGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, 100);
+                pulseGrad.addColorStop(0, 'rgba(255, 255, 255, 0.3)');
+                pulseGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+                ctx.fillStyle = pulseGrad;
+                ctx.fillRect(0, 0, width, height);
+            }
+
+            time++;
+        }
+
+        // Start
+        animate();
+
+    </script>
+</body>
+</html>

@@ -21,30 +21,340 @@
 <body>
     <canvas id="sim"></canvas>
     <script>
-        // --- Configuration ---
-        const SCALE = 4; // Visual scaling
-        const DAMPING = 0.985; // Energy loss per step
-        const WALL_REFLECTION = 1.0; // Perfect reflection
-        const NUM_SOURCES = 5;
-        
-        // --- Setup Canvas ---
         const canvas = document.getElementById('sim');
-        const ctx = canvas.getContext('2d', { alpha: false });
-        
+        const ctx = canvas.getContext('2d');
+
+        // Simulation Resolution Scale (Lower = faster, up to 4x)
+        const SCALE = 2;
         let width, height;
         let cols, rows;
-        let buffer1, buffer2; // Float32Arrays for wave data
-        let imgData; // For rendering
-        let pixels; // Uint8ClampedArray for rendering
+        
+        // Physics Constants
+        const WAVE_SPEED = 2.0;
+        const DAMPING = 0.985;
+        const BOUNDARY_CONDITION = 1; // 0 = Absorbing (bad), 1 = Reflective (good)
+        
+        // Grid Arrays (using Float32 for precision and speed)
+        let currentGrid;
+        let previousGrid;
+        let imageData;
+        let pixels; // Uint32Array for direct pixel manipulation
 
-        // --- Source Objects ---
-        class Source {
-            constructor() {
-                this.reset();
+        // Source Configuration
+        const SOURCES = [
+            { x: 0.2, y: 0.2, freq: 0.15, amp: 20, phase: 0, speed: 0.002, freqVar: 0.02 },
+            { x: 0.8, y: 0.2, freq: 0.18, amp: 20, phase: 1, speed: 0.0015, freqVar: 0.03 },
+            { x: 0.5, y: 0.8, freq: 0.12, amp: 25, phase: 2, speed: 0.001, freqVar: 0.01 }
+        ];
+
+        // Barriers (Slits)
+        // 0 = Water, 1 = Wall
+        const barrierMap = [];
+
+        function init() {
+            resize();
+            window.addEventListener('resize', resize);
+            
+            // Initialize Grids
+            cols = Math.floor(width / SCALE);
+            rows = Math.floor(height / SCALE);
+            
+            currentGrid = new Float32Array(cols * rows);
+            previousGrid = new Float32Array(cols * rows);
+            
+            // Precompute Barriers
+            generateBarriers();
+            
+            imageData = ctx.createImageData(cols, rows);
+            pixels = new Uint32Array(imageData.data.buffer);
+            
+            // Create a linear gradient for the "Deep Water" look
+            createGradient();
+            
+            loop();
+        }
+
+        function createGradient() {
+            // We will map grid values to colors. 
+            // Since we use Uint32 (little endian ABGR usually), we compute colors per pixel in the loop
+            // or use a lookup table for performance. Given the speed of JS, lookup table is safer.
+            // But calculating in loop is faster for modern engines due to JIT.
+        }
+
+        function generateBarriers() {
+            // Create two barriers with slits
+            const barrierY = Math.floor(rows * 0.4);
+            const barrierWidth = Math.floor(rows * 0.05);
+            
+            // Barrier 1 (Left)
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    barrierMap[x + y * cols] = 0;
+                }
             }
 
-            reset() {
-                this.x = Math.random() * width;
-                this.y = Math.random() * height;
-                this.vx = (Math.random() - 0.5) * 0.5;
-                this.vy = (Math.random() -
+            const slit1Start = Math.floor(rows * 0.2);
+            const slit1Width = Math.floor(rows * 0.15);
+            const slit2Start = Math.floor(rows * 0.6);
+            const slit2Width = Math.floor(rows * 0.15);
+
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    // Check if this column is in the barrier zone
+                    if (x >= cols * 0.35 && x <= cols * 0.35 + barrierWidth) {
+                        // Is it inside a slit?
+                        if ((y >= slit1Start && y < slit1Start + slit1Width) ||
+                            (y >= slit2Start && y < slit2Start + slit2Width)) {
+                            barrierMap[x + y * cols] = 0; // Water
+                        } else {
+                            barrierMap[x + y * cols] = 1; // Wall
+                        }
+                    }
+                }
+            }
+        }
+
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            // We don't re-init grid on resize to avoid flickering, just let it go out of bounds
+            // or implement a full reset if desired.
+        }
+
+        function updatePhysics(time) {
+            // 1. Update Sources
+            SOURCES.forEach(src => {
+                src.x += src.speed;
+                if (src.x < 0.1 || src.x > 0.9) src.speed *= -1;
+                
+                src.y += (Math.sin(time * 0.5 + src.x) * 0.0005); // Drifting Y
+
+                src.freq += (Math.random() - 0.5) * src.freqVar * 0.01;
+                src.freq = Math.max(0.05, Math.min(0.3, src.freq)); // Clamp freq
+
+                src.phase += src.freq;
+            });
+
+            // 2. Inject Sources
+            SOURCES.forEach(src => {
+                const cx = Math.floor(src.x * cols);
+                const cy = Math.floor(src.y * rows);
+                const radius = 4; // Source size in grid pixels
+                const val = Math.sin(src.phase) * src.amp;
+
+                // Circular injection
+                for (let dy = -radius; dy <= radius; dy++) {
+                    for (let dx = -radius; dx <= radius; dx++) {
+                        if (dx*dx + dy*dy <= radius*radius) {
+                            const idx = (cx + dx) + (cy + dy) * cols;
+                            if (idx >= 0 && idx < currentGrid.length) {
+                                currentGrid[idx] += val * (1 - Math.sqrt(dx*dx+dy*dy)/radius);
+                            }
+                        }
+                    }
+                }
+            });
+
+            // 3. Wave Equation Step
+            // newGrid[i] = 2*current[i] - previous[i] + factor * (neighborSum - 4*current[i])
+            // We do this in-place for performance if careful, or swap buffers.
+            // Swapping buffers is safer and easy.
+            
+            // Pre-calculate constant factor
+            const c = WAVE_SPEED * WAVE_SPEED;
+            const dt = 0.5; // Time step factor
+
+            // Optimization: Use 1D array index
+            for (let y = 1; y < rows - 1; y++) {
+                for (let x = 1; x < cols - 1; x++) {
+                    const idx = x + y * cols;
+                    
+                    // Wall check
+                    if (barrierMap[idx] === 1) {
+                        currentGrid[idx] = 0; // Energy dies in wall
+                        continue;
+                    }
+
+                    // Laplacian (neighbors)
+                    const top = currentGrid[idx - cols];
+                    const bottom = currentGrid[idx + cols];
+                    const left = currentGrid[idx - 1];
+                    const right = currentGrid[idx + 1];
+
+                    // Damped wave equation
+                    // u_new = 2*u - u_old + c * (laplacian)
+                    // We apply damping here
+                    const laplacian = top + bottom + left + right;
+                    const term = (c * (laplacian - 4 * currentGrid[idx]));
+                    
+                    previousGrid[idx] = currentGrid[idx]; // Shift buffer (simulating 2 steps back in time)
+                    
+                    // Update current based on previous (which was the old current)
+                    // Actually, standard leapfrog:
+                    // V_new = V_old + Accel * dt
+                    // Here we approximate: val = 2*curr - prev + damp*term
+                    currentGrid[idx] = (2 * currentGrid[idx] - previousGrid[idx] + (0.5 * term)) * DAMPING;
+                }
+            }
+        }
+
+        function render() {
+            // Iterate and paint
+            // Optimization: Loop unrolling and direct access
+            for (let i = 0; i < currentGrid.length; i++) {
+                const val = currentGrid[i];
+                
+                // Normalize roughly
+                const intensity = Math.abs(val);
+                
+                // Determine color based on amplitude
+                // Blue is 0,0,255. White is 255,255,255.
+                // We want "Deep Water" (dark blue) to "Surface" (white/light blue)
+                
+                if (val < 0) {
+                    // Trough / trough - darker blue
+                    const r = 0;
+                    const g = Math.floor(intensity * 5); 
+                    const b = Math.floor(20 + intensity * 10);
+                    // ABGR format (Little Endian) -> A=FF, B, G, R
+                    pixels[i] = (255 << 24) | (b << 16) | (g << 8) | r;
+                } else {
+                    // Crests - lighter blue to white
+                    const r = Math.floor(intensity * 8);
+                    const g = Math.floor(50 + intensity * 8);
+                    const b = Math.floor(100 + intensity * 12);
+                    
+                    // Sparkle effect at crests
+                    let finalR = r, finalG = g, finalB = b;
+                    
+                    if (val > 15 && Math.random() > 0.995) {
+                        // Specular highlight
+                        finalR = 255;
+                        finalG = 255;
+                        finalB = 255;
+                    }
+                    
+                    // Clamp
+                    finalR = Math.min(255, finalR);
+                    finalG = Math.min(255, finalG);
+                    finalB = Math.min(255, finalB);
+
+                    pixels[i] = (255 << 24) | (finalB << 16) | (finalG << 8) | finalR;
+                }
+            }
+            
+            // Draw to offscreen buffer scaled up
+            ctx.putImageData(imageData, 0, 0);
+            
+            // Scale up to screen size with smoothing
+            ctx.save();
+            ctx.scale(width / cols, height / rows);
+            ctx.imageSmoothingEnabled = true;
+            ctx.drawImage(canvas, 0, 0); // Draw itself
+            ctx.restore();
+            
+            // Actually, simpler approach for single canvas:
+            // Draw to temp canvas then scale? Or just drawImageData then scale?
+            // The canvas is (w,h). We drew (cols,rows).
+            // We need to clear and draw scaled.
+            
+            // Reset context to full screen
+            ctx.save();
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.clearRect(0, 0, width, height);
+            
+            // Draw the small grid image scaled to full screen
+            ctx.drawImage(canvas, 0, 0, width, height);
+            
+            // We can't draw a canvas onto itself easily while resizing.
+            // Solution: PutImageData onto a temp canvas or use the existing canvas 
+            // but resize the canvas element, or just draw the image data then scale the canvas transform?
+            
+            // Correct way for this setup:
+            // 1. Canvas is full size.
+            // 2. PutImageData draws to 0,0 with size cols,rows.
+            // 3. ctx.scale(...) draws that content scaled.
+            // 4. ctx.restore() resets.
+            // BUT, this leaves the scaled content on the canvas.
+            // Next frame we clearRect.
+            
+            // Let's fix the draw logic:
+            // We need to draw the buffer to the top left, then stretch it.
+            // Since canvas is full size, putting 500x500 image at 0,0 leaves rest black?
+            // No, putImageData draws to top-left.
+            
+            // Better approach: Use a second small canvas or just draw the image data scaled.
+        }
+        
+        // Let's redo render for efficiency
+        const offscreenCanvas = document.createElement('canvas');
+        const offCtx = offscreenCanvas.getContext('2d');
+        
+        // We will resize the actual canvas, but keep the data buffer logic.
+        // Actually, let's just draw the pixels to the main canvas at 0,0 
+        // and then draw the main canvas to itself scaled up.
+        
+        function loop() {
+            // Re-calc grid dimensions if window changed significantly? 
+            // For simplicity, assume fixed resolution for grid during run.
+            
+            updatePhysics(performance.now() / 1000);
+            
+            // Render loop optimization:
+            // We iterate the 1D array and set pixels directly.
+            // Then we draw the small image scaled.
+            
+            // To avoid flicker, we draw to offscreen, then blit to screen.
+            offscreenCanvas.width = cols;
+            offscreenCanvas.height = rows;
+            
+            const id = offCtx.createImageData(cols, rows);
+            // Use a temporary view to write pixels
+            const data = new Uint32Array(id.data.buffer);
+            
+            for (let i = 0; i < currentGrid.length; i++) {
+                const val = currentGrid[i];
+                const intensity = val; // Can be negative
+                
+                if (intensity < 0) {
+                    // Troughs (Dark Blue)
+                    // Map -15..0 to dark blue
+                    const b = Math.floor(30 + Math.abs(intensity) * 5);
+                    data[i] = (255 << 24) | (b << 16) | (b << 8) | 0;
+                } else {
+                    // Crests (Light Blue to White)
+                    // Map 0..30 to light blue/white
+                    const c = Math.min(255, Math.floor(intensity * 10));
+                    const r = Math.min(255, Math.floor(intensity * 15)); // Add red for white mix
+                    const g = Math.min(255, Math.floor(intensity * 12));
+                    const b = Math.min(255, Math.floor(intensity * 15) + 50);
+                    
+                    // Sparkle
+                    if (intensity > 12 && Math.random() > 0.99) {
+                        data[i] = (255 << 24) | (255 << 16) | (255 << 8) | 255;
+                    } else {
+                        data[i] = (255 << 24) | (b << 16) | (g << 8) | r;
+                    }
+                }
+            }
+            
+            offCtx.putImageData(id, 0, 0);
+            
+            // Draw to main canvas scaled
+            ctx.save();
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.clearRect(0, 0, width, height);
+            ctx.drawImage(offscreenCanvas, 0, 0, width, height);
+            ctx.restore();
+            
+            requestAnimationFrame(loop);
+        }
+
+        // Start
+        init();
+
+    </script>
+</body>
+</html>

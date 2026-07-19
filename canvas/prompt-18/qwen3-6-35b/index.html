@@ -48,4 +48,459 @@
             margin-bottom: 5px;
             position: relative;
         }
-       
+        .bar-fill {
+            height: 100%;
+            background: #44aa44;
+            width: 100%;
+            transition: width 0.1s;
+        }
+        .health-low { background: #aa4444; }
+        .health-med { background: #aaaa44; }
+        #controls-help {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.6);
+            padding: 10px;
+            border: 1px solid #666;
+            font-size: 14px;
+            pointer-events: auto;
+        }
+        .key {
+            display: inline-block;
+            background: #444;
+            padding: 2px 6px;
+            border-radius: 4px;
+            margin: 0 2px;
+            border-bottom: 2px solid #222;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div id="controls-help">
+            <div style="color: #ff9900; margin-bottom:5px;">WASTELAND DERBY</div>
+            <div><span class="key">W</span><span class="key">A</span><span class="key">S</span><span class="key">D</span> Drive</div>
+            <div><span class="key">MOUSE</span> Aim</div>
+            <div><span class="key">L-CLICK</span> / <span class="key">SPACE</span> Fire</div>
+        </div>
+        <div class="hud-top">
+            <div id="score-display">DIST: 0 km</div>
+            <div id="kill-display">KILLS: 0</div>
+        </div>
+        <div class="hud-bottom">
+            <div>
+                <div class="bar-container">
+                    <div id="hp-bar" class="bar-fill"></div>
+                </div>
+                <div id="weapon-display" style="text-shadow: 2px 2px 0 #000;">WEAPON: ASSAULT RIFLE</div>
+            </div>
+        </div>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+<script>
+/**
+ * WASTELAND DERBY - AUTO COMBAT RACING
+ * 
+ * Architecture:
+ * 1. Constants & Config
+ * 2. Setup & Canvas Management
+ * 3. Input Handling
+ * 4. World & Persistent Damage Systems
+ * 5. Utilities (Physics, Math)
+ * 6. Game Entities (Car, Projectile, Pickup, Particle)
+ * 7. AI Logic
+ * 8. Main Loop (Update, Draw)
+ */
+
+// --- 1. CONFIGURATION ---
+const CONFIG = {
+    WORLD_WIDTH: 4000,
+    WORLD_HEIGHT: 4000,
+    PLAYER_SPEED: 600,
+    PLAYER_ACCEL: 150,
+    PLAYER_FRICTION: 0.96,
+    AI_COUNT: 10,
+    RESPAWN_DELAY: 4000, // ms
+    COLORS: {
+        ground: '#b8a089',
+        grid: '#a89079',
+        obstacle: '#443322',
+        player: '#4488ff',
+        ai: ['#d44', '#4a4', '#da4', '#4dd', '#d4d', '#888'],
+        pickup: '#00ff00'
+    },
+    WEAPONS: {
+        RIFLE: { name: 'ASSAULT RIFLE', damage: 8, fireRate: 8, speed: 800, spread: 0.05, count: 1, color: '#ffffaa', type: 'bullet' },
+        MACHINE_GUN: { name: 'MINIGUN', damage: 5, fireRate: 4, speed: 900, spread: 0.15, count: 3, color: '#ffaa00', type: 'bullet' },
+        ROCKET: { name: 'ROCKET LAUNCHER', damage: 60, fireRate: 40, speed: 400, spread: 0.02, count: 1, color: '#ff4400', type: 'rocket', explosionRadius: 60 },
+        SHOTGUN: { name: 'SHOTGUN', damage: 6, fireRate: 25, speed: 700, spread: 0.2, count: 5, color: '#ffffff', type: 'bullet' }
+    }
+};
+
+// --- 2. SETUP & CANVAS ---
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// Persistent Damage Canvas (The Ground)
+const groundCanvas = document.createElement('canvas');
+groundCanvas.width = CONFIG.WORLD_WIDTH;
+groundCanvas.height = CONFIG.WORLD_HEIGHT;
+const groundCtx = groundCanvas.getContext('2d');
+
+// --- 3. INPUT HANDLING ---
+const keys = {};
+const mouse = { x: 0, y: 0, down: false };
+
+window.addEventListener('keydown', e => keys[e.code] = true);
+window.addEventListener('keyup', e => keys[e.code] = false);
+window.addEventListener('mousemove', e => {
+    mouse.x = e.clientX;
+    mouse.y = e.clientY;
+});
+window.addEventListener('mousedown', () => mouse.down = true);
+window.addEventListener('mouseup', () => mouse.down = false);
+
+// --- 4. WORLD GENERATION & PERSISTENT DAMAGE ---
+const obstacles = [];
+const decorations = []; // Visual only
+const pickups = [];
+
+function initWorld() {
+    // 1. Draw Base Ground
+    groundCtx.fillStyle = CONFIG.COLORS.ground;
+    groundCtx.fillRect(0, 0, CONFIG.WORLD_WIDTH, CONFIG.WORLD_HEIGHT);
+
+    // Noise/Texture
+    for(let i=0; i<50000; i++) {
+        groundCtx.fillStyle = Math.random() > 0.5 ? '#a89079' : '#c0aa95';
+        const x = Math.random() * CONFIG.WORLD_WIDTH;
+        const y = Math.random() * CONFIG.WORLD_HEIGHT;
+        groundCtx.fillRect(x, y, 2, 2);
+    }
+
+    // Grid lines (road markings)
+    groundCtx.strokeStyle = '#8a7a65';
+    groundCtx.lineWidth = 10;
+    groundCtx.beginPath();
+    for(let x=0; x<CONFIG.WORLD_WIDTH; x+=200) {
+        groundCtx.moveTo(x, 0); groundCtx.lineTo(x, CONFIG.WORLD_HEIGHT);
+    }
+    for(let y=0; y<CONFIG.WORLD_HEIGHT; y+=200) {
+        groundCtx.moveTo(0, y); groundCtx.lineTo(CONFIG.WORLD_WIDTH, y);
+    }
+    groundCtx.stroke();
+
+    // 2. Generate Obstacles (Concrete barriers, wrecks)
+    for(let i=0; i<30; i++) {
+        const type = Math.random() > 0.5 ? 'rect' : 'circle';
+        const w = 100 + Math.random() * 200;
+        const h = 50 + Math.random() * 100;
+        const x = 400 + Math.random() * (CONFIG.WORLD_WIDTH - 800);
+        const y = 400 + Math.random() * (CONFIG.WORLD_HEIGHT - 800);
+        
+        obstacles.push({
+            x, y, w, h, type,
+            health: 500
+        });
+    }
+
+    // 3. Generate Decorations (Rocks, debris)
+    for(let i=0; i<200; i++) {
+        decorations.push({
+            x: Math.random() * CONFIG.WORLD_WIDTH,
+            y: Math.random() * CONFIG.WORLD_HEIGHT,
+            size: 5 + Math.random() * 20,
+            type: Math.random() > 0.8 ? 'rock' : 'debris'
+        });
+    }
+
+    // 4. Initial Pickups
+    spawnPickups(10);
+}
+
+function spawnPickups(count) {
+    for(let i=0; i<count; i++) {
+        const types = Object.keys(CONFIG.WEAPONS);
+        const wType = types[Math.floor(Math.random() * types.length)];
+        pickups.push({
+            x: 200 + Math.random() * (CONFIG.WORLD_WIDTH - 400),
+            y: 200 + Math.random() * (CONFIG.WORLD_HEIGHT - 400),
+            type: wType,
+            life: 600 // frames
+        });
+    }
+}
+
+// --- 5. UTILITIES ---
+function dist(x1, y1, x2, y2) { return Math.hypot(x2-x1, y2-y1); }
+function clamp(val, min, max) { return Math.max(min, Math.min(max, val)); }
+function rand(min, max) { return Math.random() * (max - min) + min; }
+function getSafeSpawn() {
+    let x, y, safe;
+    let attempts = 0;
+    do {
+        x = 400 + Math.random() * (CONFIG.WORLD_WIDTH - 800);
+        y = 400 + Math.random() * (CONFIG.WORLD_HEIGHT - 800);
+        safe = true;
+        // Check obstacles
+        for(let obs of obstacles) {
+            if (x > obs.x - 50 && x < obs.x + obs.w + 50 && y > obs.y - 50 && y < obs.y + obs.h + 50) safe = false;
+        }
+        attempts++;
+    } while(!safe && attempts < 50);
+    return {x, y};
+}
+
+// --- 6. ENTITIES ---
+
+// Particle System for Effects
+const particles = [];
+class Particle {
+    constructor(x, y, color, speed, size, life) {
+        this.x = x; this.y = y;
+        this.color = color;
+        this.angle = Math.random() * Math.PI * 2;
+        this.speed = Math.random() * speed;
+        this.vx = Math.cos(this.angle) * this.speed;
+        this.vy = Math.sin(this.angle) * this.speed;
+        this.life = life;
+        this.maxLife = life;
+        this.size = size;
+        this.decay = 0.95;
+    }
+    update(dt) {
+        this.x += this.vx * dt;
+        this.y += this.vy * dt;
+        this.vx *= this.decay;
+        this.vy *= this.decay;
+        this.life -= dt;
+    }
+    draw(ctx) {
+        ctx.globalAlpha = this.life / this.maxLife;
+        ctx.fillStyle = this.color;
+        ctx.fillRect(this.x, this.y, this.size, this.size);
+        ctx.globalAlpha = 1.0;
+    }
+}
+
+function spawnExplosion(x, y, size, color) {
+    for(let i=0; i<size; i++) {
+        particles.push(new Particle(x, y, color, 200, rand(2, 5), rand(0.5, 1.5)));
+    }
+    // Screen shake handled in main loop
+}
+
+function stampDamage(x, y, radius, type) {
+    // Type: 'scorch', 'tire', 'crater'
+    groundCtx.save();
+    groundCtx.beginPath();
+    groundCtx.arc(x, y, radius, 0, Math.PI*2);
+    if(type === 'scorch') {
+        groundCtx.fillStyle = 'rgba(30, 20, 10, 0.4)';
+        groundCtx.fill();
+    } else if (type === 'crater') {
+        groundCtx.fillStyle = 'rgba(20, 15, 5, 0.6)';
+        groundCtx.fill();
+        groundCtx.strokeStyle = 'rgba(0,0,0,0.2)';
+        groundCtx.lineWidth = 2;
+        groundCtx.stroke();
+    } else if (type === 'tire') {
+        groundCtx.moveTo(x - radius, y);
+        groundCtx.lineTo(x + radius, y);
+        groundCtx.lineWidth = 4;
+        groundCtx.strokeStyle = 'rgba(40, 30, 20, 0.3)';
+        groundCtx.stroke();
+    }
+    groundCtx.restore();
+}
+
+class Projectile {
+    constructor(owner, x, y, angle, weaponType) {
+        this.owner = owner;
+        this.x = x; this.y = y;
+        this.vx = Math.cos(angle) * weaponType.speed;
+        this.vy = Math.sin(angle) * weaponType.speed;
+        this.weapon = weaponType;
+        this.life = 100; // frames
+        this.active = true;
+    }
+    update(dt) {
+        this.x += this.vx * dt;
+        this.y += this.vy * dt;
+        this.life -= dt;
+
+        // World bounds
+        if(this.x < 0 || this.x > CONFIG.WORLD_WIDTH || this.y < 0 || this.y > CONFIG.WORLD_HEIGHT) this.active = false;
+        
+        // Obstacle collision
+        for(let obs of obstacles) {
+            if (this.x > obs.x && this.x < obs.x + obs.w && this.y > obs.y && this.y < obs.y + obs.h) {
+                this.active = false;
+                if(this.weapon.type === 'rocket') {
+                    this.explode();
+                } else {
+                    particles.push(new Particle(this.x, this.y, '#fff', 50, 2, 0.2));
+                    stampDamage(this.x, this.y, 3, 'scorch');
+                }
+            }
+        }
+
+        if(this.life <= 0) this.active = false;
+    }
+    explode() {
+        this.active = false;
+        spawnExplosion(this.x, this.y, 20, '#ff5500');
+        stampDamage(this.x, this.y, this.weapon.explosionRadius, 'crater');
+        
+        // Area Damage
+        entities.forEach(e => {
+            if(e === this.owner) return;
+            const d = dist(this.x, this.y, e.x, e.y);
+            if(d < this.weapon.explosionRadius) {
+                const dmg = this.weapon.damage * (1 - d/this.weapon.explosionRadius);
+                e.takeDamage(dmg);
+                // Knockback
+                const angle = Math.atan2(e.y - this.y, e.x - this.x);
+                e.vx += Math.cos(angle) * 500;
+                e.vy += Math.sin(angle) * 500;
+            }
+        });
+    }
+    draw(ctx) {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(Math.atan2(this.vy, this.vx));
+        ctx.fillStyle = this.weapon.color;
+        if(this.weapon.type === 'rocket') {
+            ctx.fillRect(-10, -3, 20, 6);
+        } else {
+            ctx.fillRect(-4, -1, 8, 2);
+        }
+        ctx.restore();
+    }
+}
+
+class Car {
+    constructor(isPlayer, startX, startY, color) {
+        this.isPlayer = isPlayer;
+        this.x = startX;
+        this.y = startY;
+        this.vx = 0;
+        this.vy = 0;
+        this.angle = -Math.PI/2;
+        this.color = color;
+        this.width = 40;
+        this.height = 22;
+        
+        this.hp = 100;
+        this.maxHp = 100;
+        this.dead = false;
+        this.respawnTimer = 0;
+        
+        this.weapon = CONFIG.WEAPONS.RIFLE;
+        this.fireCooldown = 0;
+        
+        this.stuckTimer = 0;
+        this.lastPos = {x: startX, y: startY};
+    }
+
+    takeDamage(amount) {
+        if(this.dead) return;
+        this.hp -= amount;
+        if(this.isPlayer) updateUI();
+        
+        // Visual feedback
+        spawnExplosion(this.x, this.y, 5, '#fff');
+
+        if(this.hp <= 0) {
+            this.die();
+        }
+    }
+
+    die() {
+        this.dead = true;
+        this.hp = 0;
+        spawnExplosion(this.x, this.y, 50, '#ff4400');
+        spawnExplosion(this.x, this.y, 30, '#555');
+        stampDamage(this.x, this.y, 40, 'crater');
+        stampDamage(this.x, this.y, 20, 'scorch');
+        
+        if(this.isPlayer) {
+            this.respawnTimer = CONFIG.RESPAWN_DELAY;
+            updateUI(); // Show dead state
+        } else {
+            // AI Respawn Logic
+            setTimeout(() => {
+                this.respawn();
+            }, CONFIG.RESPAWN_DELAY);
+        }
+    }
+
+    respawn() {
+        const spawn = getSafeSpawn();
+        this.x = spawn.x;
+        this.y = spawn.y;
+        this.hp = this.maxHp;
+        this.dead = false;
+        this.vx = 0; this.vy = 0;
+        this.weapon = CONFIG.WEAPONS.RIFLE;
+        if(this.isPlayer) updateUI();
+    }
+
+    update(dt) {
+        if(this.dead) return;
+
+        // Cooldowns
+        if(this.fireCooldown > 0) this.fireCooldown -= dt;
+
+        // Physics
+        this.x += this.vx * dt;
+        this.y += this.vy * dt;
+
+        // Friction
+        this.vx *= CONFIG.PLAYER_FRICTION;
+        this.vy *= CONFIG.PLAYER_FRICTION;
+
+        // Wall Collisions
+        const margin = 20;
+        if(this.x < margin) { this.x = margin; this.vx *= -0.5; this.takeDamage(2); }
+        if(this.x > CONFIG.WORLD_WIDTH - margin) { this.x = CONFIG.WORLD_WIDTH - margin; this.vx *= -0.5; this.takeDamage(2); }
+        if(this.y < margin) { this.y = margin; this.vy *= -0.5; this.takeDamage(2); }
+        if(this.y > CONFIG.WORLD_HEIGHT - margin) { this.y = CONFIG.WORLD_HEIGHT - margin; this.vy *= -0.5; this.takeDamage(2); }
+
+        // Obstacle Collisions
+        for(let obs of obstacles) {
+            if (this.x > obs.x - this.width && this.x < obs.x + obs.w + this.width &&
+                this.y > obs.y - this.height && this.y < obs.y + obs.h + this.height) {
+                
+                // Simple resolution: push back
+                const cx = obs.x + obs.w/2;
+                const cy = obs.y + obs.h/2;
+                const dx = this.x - cx;
+                const dy = this.y - cy;
+                const distToObs = Math.hypot(dx, dy);
+                
+                // Normalize push
+                const pushX = dx / distToObs;
+                const pushY = dy / distToObs;
+                
+                // Hard crash?
+                const impact = Math.hypot(this.vx, this.vy);
+                if(impact > 100) {
+                    this.takeDamage(impact * 0.1);
+                    spawnExplosion(this.x, this.y, 5, '#aaa');
+                }
+
+                this.x += pushX * 5;

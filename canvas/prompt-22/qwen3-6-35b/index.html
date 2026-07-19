@@ -50,4 +50,533 @@ const CONFIG = {
     leftX: 100,
     rightX: 700,
     groundY: 450,
-    maxSoldiers:
+    maxSoldiers: 50,
+    maxArrows: 100,
+    maxParticles: 200,
+    arrowSpeed: 15,
+    soldierSpeed: 1.5,
+    damageScale: 1.0
+};
+
+// --- UTILS ---
+const dist = (p1, p2) => Math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2);
+const lerp = (a, b, t) => a + (b - a) * t;
+const rand = (min, max) => Math.random() * (max - min) + min;
+
+// --- VERLET PHYSICS ENGINE ---
+
+class Point {
+    constructor(x, y, mass = 1, pinned = false) {
+        this.x = x;
+        this.y = y;
+        this.oldx = x;
+        this.oldy = y;
+        this.mass = mass;
+        this.pinned = pinned;
+        this.radius = 2;
+    }
+
+    update() {
+        if (this.pinned) return;
+        
+        const vx = (this.x - this.oldx) * CONFIG.friction;
+        const vy = (this.y - this.oldy) * CONFIG.friction;
+
+        this.oldx = this.x;
+        this.oldy = this.y;
+
+        this.x += vx;
+        this.y += vy;
+        this.y += CONFIG.gravity * this.mass;
+    }
+}
+
+class Stick {
+    constructor(p1, p2, length = null, stiffness = 1, visible = true, width = 1) {
+        this.p1 = p1;
+        this.p2 = p2;
+        this.length = length || dist(p1, p2);
+        this.stiffness = stiffness;
+        this.visible = visible;
+        this.width = width;
+        this.color = '#aaa';
+        this.alive = true;
+    }
+
+    resolve() {
+        if (!this.alive) return;
+        const dx = this.p2.x - this.p1.x;
+        const dy = this.p2.y - this.p1.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        const diff = (this.length - distance) / distance * this.stiffness;
+        
+        const offsetX = dx * diff * 0.5;
+        const offsetY = dy * diff * 0.5;
+
+        if (!this.p1.pinned) {
+            this.p1.x -= offsetX;
+            this.p1.y -= offsetY;
+        }
+        if (!this.p2.pinned) {
+            this.p2.x += offsetX;
+            this.p2.y += offsetY;
+        }
+    }
+}
+
+class Particle {
+    constructor(x, y, color, life = 1.0) {
+        this.x = x;
+        this.y = y;
+        const vx = rand(-2, 2);
+        const vy = rand(-2, 2);
+        this.oldx = x - vx;
+        this.oldy = y - vy;
+        this.life = life;
+        this.maxLife = life;
+        this.color = color;
+        this.size = rand(1, 3);
+    }
+    
+    update() {
+        this.updateVerlet();
+        this.life -= 0.02;
+    }
+
+    updateVerlet() {
+        this.oldx = this.x;
+        this.oldy = this.y;
+        this.x += (this.x - this.oldx);
+        this.y += (this.y - this.oldy) + 0.1; // Gravity
+    }
+}
+
+// --- SIMULATION STATE ---
+
+const canvas = document.getElementById('simCanvas');
+const ctx = canvas.getContext('2d');
+
+let points = [];
+let sticks = [];
+let soldiers = [];
+let arrows = [];
+let particles = [];
+let bridges = [];
+
+let cameraShake = 0;
+
+// --- SETUP ENVIRONMENT ---
+
+function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    // Reset scale based on width to make it responsive-ish
+    CONFIG.bridgeWidth = canvas.width * 0.5;
+    CONFIG.leftX = canvas.width * 0.15;
+    CONFIG.rightX = canvas.width * 0.85;
+    CONFIG.groundY = canvas.height * 0.75;
+    CONFIG.bridgeY = canvas.height * 0.45;
+}
+window.addEventListener('resize', () => {
+    resize();
+    init();
+});
+
+function createBridge(x1, y1, x2, y2, segments) {
+    const pts = [];
+    for (let i = 0; i <= segments; i++) {
+        const t = i / segments;
+        const x = lerp(x1, x2, t);
+        const y = lerp(y1, y2, t);
+        // Pin ends, but let middle float
+        const pinned = (i === 0 || i === segments); 
+        const p = new Point(x, y, 1, pinned);
+        pts.push(p);
+        points.push(p);
+    }
+
+    const bridge = { points: pts, sticks: [], anchors: [pts[0], pts[pts.length-1]] };
+
+    // Main structural rope
+    for (let i = 0; i < pts.length - 1; i++) {
+        const s = new Stick(pts[i], pts[i+1], null, 1, false);
+        sticks.push(s);
+        bridge.sticks.push(s);
+    }
+
+    // Planks (visual only, connecting to a second row of points for "floor")
+    // To make it a solid walkable surface, we add a second row of points below
+    const plankPts = [];
+    for (let i = 0; i <= segments; i++) {
+        const t = i / segments;
+        const x = lerp(x1, x2, t);
+        const y = lerp(y1, y2, t);
+        const p = new Point(x, y + 20, 1, false); // Offset down
+        points.push(p);
+        plankPts.push(p);
+    }
+    bridge.plankPoints = plankPts;
+
+    // Connect planks to rope
+    for (let i = 0; i < pts.length; i++) {
+        const s = new Stick(pts[i], plankPts[i], null, 1, true, 4);
+        sticks.push(s);
+        bridge.sticks.push(s);
+    }
+    
+    // Connect planks to each other to form a board
+    for (let i = 0; i < plankPts.length - 1; i++) {
+        const s = new Stick(plankPts[i], plankPts[i+1], null, 0.8, true, 2);
+        sticks.push(s);
+        bridge.sticks.push(s);
+    }
+
+    // Vertical supports to the "ground" (cliff edges)
+    // Just for visual wobble connection
+    const leftAnchor = new Point(CONFIG.leftX, CONFIG.groundY, 1, true);
+    const rightAnchor = new Point(CONFIG.rightX, CONFIG.groundY, 1, true);
+    points.push(leftAnchor, rightAnchor);
+    
+    // Support ropes
+    const s1 = new Stick(pts[1], leftAnchor, null, 0.5, true, 1);
+    const s2 = new Stick(pts[pts.length-2], rightAnchor, null, 0.5, true, 1);
+    sticks.push(s1, s2);
+
+    bridges.push(bridge);
+    return bridge;
+}
+
+function createSoldier(x, y, side, type) {
+    // Verlet Body for Soldier
+    // Head, Body, L_Foot, R_Foot
+    const head = new Point(x, y - 20, 1, false);
+    const body = new Point(x, y - 10, 2, false);
+    const lFoot = new Point(x - 5, y, 1, false);
+    const rFoot = new Point(x + 5, y, 1, false);
+
+    const pts = [head, body, lFoot, rFoot];
+    points.push(...pts);
+
+    // Constraints
+    const constraints = [
+        new Stick(head, body, 20, 0.5, false), // Neck
+        new Stick(body, lFoot, 20, 0.5, false), // Leg L
+        new Stick(body, rFoot, 20, 0.5, false), // Leg R
+        new Stick(lFoot, rFoot, 10, 0.8, false), // Base
+        new Stick(head, lFoot, 30, 0.1, false), // Body stretch prevention
+        new Stick(head, rFoot, 30, 0.1, false)  // Body stretch prevention
+    ];
+    sticks.push(...constraints);
+
+    const soldier = {
+        type: type, // 'melee' or 'archer'
+        side: side, // 'left' or 'right'
+        state: 'walk', // walk, attack, idle, dead
+        health: 100,
+        maxHealth: 100,
+        cooldown: 0,
+        points: pts,
+        constraints: constraints,
+        color: side === 'left' ? '#4a90e2' : '#e24a4a',
+        shield: type === 'melee',
+        target: null
+    };
+
+    soldiers.push(soldier);
+    return soldier;
+}
+
+function createArrow(x, y, vx, vy) {
+    const p = new Point(x, y, 0.5, false);
+    p.oldx = x - vx;
+    p.oldy = y - vy;
+    points.push(p);
+    
+    // Arrow tail
+    const pt = new Point(x, y, 0.5, false);
+    pt.oldx = x - vx * 0.9; // Slight trail
+    pt.oldy = y - vy * 0.9;
+    points.push(pt);
+
+    const stick = new Stick(p, pt, 5, 0.1, true, 2);
+    sticks.push(stick);
+
+    arrows.push({
+        head: p,
+        tail: pt,
+        stick: stick,
+        active: true
+    });
+}
+
+// --- INITIALIZATION ---
+
+function init() {
+    points = [];
+    sticks = [];
+    soldiers = [];
+    arrows = [];
+    particles = [];
+    bridges = [];
+
+    // Create Bridge
+    createBridge(CONFIG.leftX, CONFIG.bridgeY, CONFIG.rightX, CONFIG.bridgeY, CONFIG.bridgeSegments);
+
+    // Initial Troops
+    for(let i=0; i<8; i++) {
+        createSoldier(CONFIG.leftX - 50, CONFIG.groundY - 10 + i*5, 'left', 'melee');
+        createSoldier(CONFIG.rightX + 50, CONFIG.groundY - 10 + i*5, 'right', 'melee');
+    }
+    for(let i=0; i<4; i++) {
+        createSoldier(CONFIG.leftX - 150, CONFIG.groundY - 10, 'left', 'archer');
+        createSoldier(CONFIG.rightX + 150, CONFIG.groundY - 10, 'right', 'archer');
+    }
+}
+
+// --- LOGIC HELPERS ---
+
+function getClosestPoint(x, y, maxDist = 50) {
+    let closest = null;
+    let minD = maxDist;
+    for (let p of points) {
+        const d = dist(p, {x, y});
+        if (d < minD) {
+            minD = d;
+            closest = p;
+        }
+    }
+    return closest;
+}
+
+function spawnParticles(x, y, color, count = 5) {
+    for(let i=0; i<count; i++) {
+        if (particles.length < CONFIG.maxParticles) {
+            particles.push(new Particle(x, y, color));
+        }
+    }
+}
+
+// --- MAIN LOOP ---
+
+function update() {
+    // 1. Verlet Update Points
+    for (let p of points) {
+        p.update();
+    }
+
+    // 2. Solve Constraints (Multiple Iterations for stability)
+    for (let k = 0; k < CONFIG.iterations; k++) {
+        for (let s of sticks) {
+            s.resolve();
+        }
+        
+        // Ground Collision (Simple)
+        for (let p of points) {
+            if (p.y > CONFIG.groundY && !p.pinned) {
+                p.y = CONFIG.groundY;
+                // Friction on ground
+                const dx = p.x - p.oldx;
+                p.oldx = p.x - dx * 0.8;
+            }
+        }
+    }
+
+    // 3. Soldier AI & Physics
+    updateSoldiers();
+
+    // 4. Arrow Physics
+    updateArrows();
+
+    // 5. Particles
+    for (let i = particles.length - 1; i >= 0; i--) {
+        particles[i].update();
+        if (particles[i].life <= 0) particles.splice(i, 1);
+    }
+
+    // 6. Camera Shake Decay
+    if (cameraShake > 0) cameraShake *= 0.9;
+    if (cameraShake < 0.5) cameraShake = 0;
+
+    // 7. Respawn Logic
+    checkRespawn();
+
+    // 8. Bridge Interaction (Weight)
+    applyBridgeWeight();
+}
+
+function applyBridgeWeight() {
+    // Soldiers push down on bridge points near their feet
+    for (let s of soldiers) {
+        if (s.health <= 0) continue;
+        for (let footPt of [s.points[2], s.points[3]]) { // Feet
+            const closest = getClosestPoint(footPt.x, footPt.y, 30);
+            if (closest && !closest.pinned) {
+                // Push down slightly if standing on bridge
+                closest.y += 0.1; 
+            }
+        }
+    }
+}
+
+function updateSoldiers() {
+    for (let s of soldiers) {
+        if (s.health <= 0) {
+            // Dead behavior: fall over
+            // Already handled by physics (no force applied to stand up)
+            continue;
+        }
+
+        // Cooldown management
+        if (s.cooldown > 0) s.cooldown--;
+
+        // State Machine
+        if (s.type === 'archer') {
+            updateArcher(s);
+        } else {
+            updateMelee(s);
+        }
+
+        // Apply forces from constraints to soldiers?
+        // Actually, soldiers ARE the constraints.
+        
+        // Simple separation (collision with other soldiers)
+        for (let other of soldiers) {
+            if (s === other) continue;
+            // Check body points
+            for (let p of s.points) {
+                const dx = p.x - other.points[1].x;
+                const dy = p.y - other.points[1].y;
+                const d = Math.sqrt(dx*dx + dy*dy);
+                if (d < 15) {
+                    // Push apart
+                    const force = (15 - d) * 0.05;
+                    const nx = dx / d;
+                    const ny = dy / d;
+                    p.x += nx * force;
+                    p.y += ny * force;
+                    
+                    // If fighting, push harder
+                    if (s.state === 'attack' || other.state === 'attack') {
+                        p.x += nx * 1; 
+                        p.y += ny * 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
+function updateMelee(s) {
+    // Find target
+    let target = null;
+    let minDist = 100; // Aggro range
+
+    for (let other of soldiers) {
+        if (other.side !== s.side && other.health > 0) {
+            const d = dist(s.points[1], other.points[1]);
+            if (d < minDist) {
+                minDist = d;
+                target = other;
+            }
+        }
+    }
+
+    // Movement
+    const direction = s.side === 'left' ? 1 : -1;
+    const body = s.points[1];
+    const lFoot = s.points[2];
+    const rFoot = s.points[3];
+
+    if (target) {
+        // Engaged
+        s.state = 'attack';
+        
+        // Face target
+        const faceDir = target.points[1].x > body.x ? 1 : -1;
+        // Rotate body points roughly towards target
+        // This is a simplified rotation logic
+        // Ideally we use inverse kinematics, but for Verlet body shaping:
+        
+        if (s.cooldown <= 0) {
+            // Attack!
+            // Sword Swing
+            const swingForce = 5;
+            target.points[1].x += faceDir * swingForce; // Push enemy
+            target.points[1].y -= swingForce; // Upward
+            
+            // Recoil
+            body.x -= faceDir * 2;
+            
+            // Damage
+            target.health -= 10;
+            spawnParticles(target.points[1].x, target.points[1].y, '#ff0000', 3);
+            cameraShake = 2;
+
+            s.cooldown = 60; // 1 sec at 60fps
+        }
+        
+        // Idle fight shuffle
+        const moveX = (target.points[1].x - body.x) * 0.05;
+        lFoot.x += moveX;
+        rFoot.x += moveX;
+        
+    } else {
+        // Patrol / Advance
+        s.state = 'walk';
+        const targetX = s.side === 'left' ? CONFIG.rightX - 100 : CONFIG.leftX + 100;
+        const dx = targetX - body.x;
+        
+        if (Math.abs(dx) > 10) {
+            // Walk animation
+            const speed = CONFIG.soldierSpeed * (dx > 0 ? 1 : -1);
+            
+            // Step logic
+            const step = Math.sin(Date.now() / 100) > 0;
+            if (step) {
+                lFoot.x += speed;
+            } else {
+                rFoot.x += speed;
+            }
+        }
+    }
+}
+
+function updateArcher(s) {
+    // Stay back
+    const targetX = s.side === 'left' ? CONFIG.leftX - 50 : CONFIG.rightX + 50;
+    
+    // Heal up slightly if dead? No, they stay dead until respawn.
+    if (s.health <= 0) return;
+
+    // Move to position
+    const body = s.points[1];
+    const dx = targetX - body.x;
+    if (Math.abs(dx) > 5) {
+        body.x += dx * 0.02;
+        // Keep feet on ground
+        s.points[2].x += dx * 0.02;
+        s.points[3].x += dx * 0.02;
+    }
+
+    // Shoot
+    if (s.cooldown <= 0) {
+        // Find random enemy
+        const enemies = soldiers.filter(e => e.side !== s.side && e.health > 0);
+        if (enemies.length > 0) {
+            const target = enemies[Math.floor(Math.random() * enemies.length)];
+            // Aim roughly at target
+            const tX = target.points[1].x;
+            const tY = target.points[1].y;
+            
+            const head = s.points[0];
+            
+            // Calculate angle
+            const angle = Math.atan2(tY - head.y, tX - head.x);
+            const vx = Math.cos(angle) * CONFIG.arrowSpeed;
+            const vy = Math.sin(angle) * CONFIG.arrowSpeed;
+            
+            createArrow(head.x, head.y, vx, vy);
+            s.cooldown = 120; // 2 seconds
+        }
+    }
+}

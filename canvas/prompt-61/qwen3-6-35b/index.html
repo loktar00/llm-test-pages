@@ -56,4 +56,338 @@
             // --- Noise Functions ---
             // Simplex 3D-ish noise for organic movement
             
-            vec3 mod2
+            vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+            vec2 mod289(vec2 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+            vec3 permute(vec3 x) { return mod289(((x*34.0)+1.0)*x); }
+
+            float snoise(vec3 v) { 
+                const vec2  C = vec2(1.0/6.0, 1.0/3.0) ;
+                const vec4  D = vec4(0.0, 0.5, 1.0, 2.0);
+
+                // First corner
+                vec3 i  = floor(v + dot(v, C.yyy) );
+                vec3 x0 = v - i + dot(i, C.xxx) ;
+
+                // Other corners
+                vec3 g = step(x0.yzx, x0.xyz);
+                vec3 l = 1.0 - g;
+                vec3 i1 = min( g.xyz, l.zxy );
+                vec3 i2 = max( g.xyz, l.zxy );
+
+                //  x0 = x0 - 0.0 + 0.0 * C 
+                vec3 x1 = x0 - i1 + 1.0 * C.xxx;
+                vec3 x2 = x0 - i2 + 2.0 * C.xxx;
+                vec3 x3 = x0 - 1.0 + 3.0 * C.xxx;
+
+                // Permutations
+                i = mod289(i); 
+                vec4 p = permute( permute( permute( 
+                            i.z + vec4(0.0, i1.z, i2.z, 1.0 ))
+                          + i.y + vec4(0.0, i1.y, i2.y, 1.0 )) 
+                          + i.x + vec4(0.0, i1.x, i2.x, 1.0 ));
+
+                // Gradients: 7x7 points over a square, mapped onto an octahedron.
+                // The ring size 17*17 = 289 is close to a multiple of 49 (49*6 = 294)
+                float n_ = 0.142857142857; // 1.0/7.0
+                vec3  ns = n_ * D.wyz - D.xzx;
+
+                vec4 j = p - 49.0 * floor(p * ns.z * ns.z);  //  mod(p,7*7)
+
+                vec4 x_ = floor(j * ns.z);
+                vec4 y_ = floor(j - 7.0 * x_ );    // mod(j,N)
+
+                vec4 x = x_ *ns.x + ns.yyyy;
+                vec4 y = y_ *ns.x + ns.yyyy;
+                vec4 h = 1.0 - abs(x) - abs(y);
+
+                vec4 b0 = vec4( x.xy, y.xy );
+                vec4 b1 = vec4( x.zw, y.zw );
+
+                vec4 s0 = floor(b0)*2.0 + 1.0;
+                vec4 s1 = floor(b1)*2.0 + 1.0;
+                vec4 sh = -step(h, vec4(0.0));
+
+                vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy ;
+                vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww ;
+
+                vec3 p0 = vec3(a0.xy,h.x);
+                vec3 p1 = vec3(a0.zw,h.y);
+                vec3 p2 = vec3(a1.xy,h.z);
+                vec3 p3 = vec3(a1.zw,h.w);
+
+                //Normalise gradients
+                vec4 norm = 1.79284291400159 - 0.85373472095314 * 
+                            vec4(dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3));
+                p0 *= norm.x;
+                p1 *= norm.y;
+                p2 *= norm.z;
+                p3 *= norm.w;
+
+                // Mix final noise value
+                vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+                m = m * m;
+                return 42.0 * dot( m*m, vec4( dot(p0,x0), dot(p1,x1), 
+                                            dot(p2,x2), dot(p3,x3) ) );
+            }
+
+            // 2D Fractal Brownian Motion for cave walls
+            float fbm(vec2 p) {
+                float f = 0.0;
+                float w = 0.5;
+                for (int i = 0; i < 5; i++) {
+                    f += w * snoise(vec3(p, u_time * 0.05));
+                    p *= 2.0;
+                    w *= 0.5;
+                }
+                return f;
+            }
+
+            // Mushroom Drawing Functions
+            
+            // Draw a rounded cap
+            float drawMushroomCap(vec2 uv, vec2 center, float radius, float stemWidth) {
+                vec2 p = uv - center;
+                p.y -= stemWidth * 0.5; // Adjust center slightly up
+                
+                // Ellipse
+                float d = length(vec2(p.x / radius, p.y / (radius * 0.5)));
+                return smoothstep(1.0, 0.9, d);
+            }
+
+            // Draw a stem
+            float drawMushroomStem(vec2 uv, vec2 center, float height, float width) {
+                vec2 p = uv - center;
+                // Round rect for stem
+                vec2 q = vec2(abs(p.x) - width, p.y);
+                return smoothstep(1.0, 0.9, length(vec2(max(q.x, 0.0), abs(q.y) - height + width))); // Very rough stem approx
+            }
+
+            // Simplified stem
+            float stem(vec2 uv, vec2 base, float h, float w) {
+                vec2 p = uv - base;
+                return 1.0 - smoothstep(w, w + 0.01, length(vec2(p.x, max(p.y - h, 0.0))));
+            }
+
+            // Gills function (under the cap)
+            float gills(vec2 uv, vec2 center, float radius) {
+                vec2 p = uv - center;
+                p.y -= radius * 0.45; // Move under cap
+                float d = length(vec2(p.x, p.y));
+                // Concentric rings
+                float f = sin(d * 60.0) * 0.5 + 0.5;
+                return smoothstep(0.6, 0.8, f) * step(d, radius * 0.9);
+            }
+
+            // Vine hanging
+            float vine(vec2 uv, vec2 origin, float length) {
+                vec2 p = uv - origin;
+                float d = length(p);
+                // Sine wave thickness variation
+                float wave = sin(p.y * 10.0 - u_time) * 0.02;
+                float thickness = 0.015 + wave;
+                return smoothstep(thickness, thickness - 0.005, d);
+            }
+
+            void main() {
+                vec2 uv = gl_FragCoord.xy / u_resolution.xy;
+                // Aspect ratio correction
+                uv.x *= u_resolution.x / u_resolution.y;
+                
+                vec2 p = uv;
+                
+                // Dark background
+                vec3 color = vec3(0.01, 0.01, 0.02);
+                
+                // 1. Cave Walls (FBM)
+                float caveNoise = fbm(p * 1.5 + vec2(0.5));
+                float wall = smoothstep(0.1, -0.2, caveNoise);
+                
+                // Wall color - dark grey/blue
+                vec3 wallColor = vec3(0.05, 0.06, 0.08) + vec3(caveNoise * 0.05);
+                color = mix(color, wallColor, wall);
+                
+                // Add mist/fog to walls
+                float fog = smoothstep(0.0, 0.5, caveNoise * 0.5 + 0.5);
+                color += vec3(0.0, 0.1, 0.15) * fog * wall;
+
+                // 2. Vines
+                vec2 vineOrigins[3];
+                vineOrigins[0] = vec2(0.5, 1.2);
+                vineOrigins[1] = vec2(1.2, 1.1);
+                vineOrigins[2] = vec2(-0.2, 1.0);
+                
+                for(int i=0; i<3; i++) {
+                    float v = vine(p, vineOrigins[i], 0.5);
+                    color = mix(color, vec3(0.02, 0.05, 0.04), v);
+                }
+
+                // 3. Mushrooms
+                // Define some positions and sizes
+                struct Mushroom {
+                    vec2 stemBase;
+                    float stemHeight;
+                    float capRadius;
+                    vec3 glowColor;
+                    float phase;
+                };
+                
+                Mushroom mushrooms[5];
+                
+                mushrooms[0] = Mushroom(vec2(0.2, -0.1), 0.15, 0.12, vec3(0.0, 1.0, 0.8), 0.0);
+                mushrooms[1] = Mushroom(vec2(0.8, -0.2), 0.25, 0.15, vec3(0.4, 0.0, 1.0), 2.0);
+                mushrooms[2] = Mushroom(vec2(0.5, -0.4), 0.1, 0.08, vec3(0.0, 0.8, 0.5), 1.5);
+                mushrooms[3] = Mushroom(vec2(1.1, -0.1), 0.18, 0.13, vec3(0.2, 0.6, 1.0), 3.5);
+                mushrooms[4] = Mushroom(vec2(-0.1, -0.3), 0.22, 0.16, vec3(1.0, 0.2, 0.8), 0.8);
+
+                for(int i=0; i<5; i++) {
+                    Mushroom m = mushrooms[i];
+                    vec2 center = m.stemBase;
+                    float capY = center.y + m.stemHeight;
+                    vec2 capCenter = vec2(center.x, capY);
+                    
+                    // Draw Stem
+                    float s = stem(p, center, m.stemHeight, m.capRadius * 0.3);
+                    
+                    // Draw Cap (Ellipse)
+                    float c = drawMushroomCap(p, capCenter, m.capRadius, m.capRadius * 0.3);
+                    
+                    // Draw Gills (Under cap)
+                    float g = gills(p, capCenter, m.capRadius);
+                    
+                    // Combine shapes
+                    float mushroomShape = max(s, c);
+                    float gillsShape = max(s, g);
+                    
+                    // Glow calculation
+                    // Pulse effect
+                    float pulse = sin(u_time * 1.5 + m.phase) * 0.3 + 0.7;
+                    
+                    // Distance from center for glow falloff
+                    float dist = length(p - capCenter);
+                    float glow = 0.0;
+                    
+                    // Cap glow
+                    float capGlow = smoothstep(m.capRadius * 2.0, 0.0, dist) * pulse;
+                    
+                    // Gills glow (intense)
+                    float gillGlow = smoothstep(m.capRadius * 3.0, 0.0, dist) * g * pulse * 2.0;
+                    
+                    vec3 finalMushColor = vec3(0.02); // Stem color
+                    finalMushColor += m.glowColor * gillGlow;
+                    finalMushColor += m.glowColor * capGlow * 0.5;
+                    
+                    // Add to scene
+                    color = mix(color, finalMushColor, mushroomShape * 0.8 + gillsShape * 0.5);
+                }
+
+                // 4. Floating Spores / Particles
+                // Using noise to move them
+                for(float i=0.0; i<10.0; i++) {
+                    float id = i * 0.712;
+                    // Base position
+                    vec2 pos = vec2(id * 0.3, id * 0.1);
+                    
+                    // Add noise-based movement
+                    float n = snoise(vec3(pos * 2.0, u_time * 0.2));
+                    vec2 movement = vec2(n, snoise(vec3(pos.y * 2.0, pos.x, u_time * 0.3))) * 0.2;
+                    
+                    vec2 sporePos = uv + movement;
+                    
+                    // Draw spore
+                    float d = length(p - sporePos);
+                    float sporeAlpha = smoothstep(0.02, 0.0, d);
+                    
+                    // Twinkle
+                    float twinkle = sin(u_time * 2.0 + id * 10.0) * 0.5 + 0.5;
+                    
+                    vec3 sporeColor = vec3(0.5, 1.0, 0.8) * twinkle;
+                    color += sporeColor * sporeAlpha * 0.6;
+                }
+
+                // 5. Atmosphere / Fog overlay
+                // Simple vignette
+                vec2 screenUV = gl_FragCoord.xy / u_resolution.xy;
+                float vignette = 1.0 - length(screenUV - 0.5) * 1.4;
+                vignette = smoothstep(0.0, 1.0, vignette);
+                
+                // Global mist
+                float mist = fbm(p * 2.0 + u_time * 0.1);
+                mist = smoothstep(0.0, 0.5, mist);
+                
+                color *= vignette;
+                color += vec3(0.0, 0.05, 0.1) * mist * 0.2;
+
+                // Gamma correction
+                color = pow(color, vec3(0.8));
+
+                gl_FragColor = vec4(color, 1.0);
+            }
+        `;
+
+        // --- Setup WebGL ---
+
+        function createShader(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error('Shader compile error:', gl.getShaderInfoLog(shader));
+                gl.deleteShader(shader);
+                return null;
+            }
+            return shader;
+        }
+
+        const vertShader = createShader(gl, gl.VERTEX_SHADER, vertSrc);
+        const fragShader = createShader(gl, gl.FRAGMENT_SHADER, fragSrc);
+
+        const program = gl.createProgram();
+        gl.attachShader(program, vertShader);
+        gl.attachShader(program, fragShader);
+        gl.linkProgram(program);
+
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            console.error('Program link error:', gl.getProgramInfoLog(program));
+        }
+
+        // Create a full-screen quad
+        const positions = new Float32Array([
+            -1, -1,
+             1, -1,
+            -1,  1,
+             1,  1,
+        ]);
+
+        const buffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+
+        const positionLocation = gl.getAttribLocation(program, 'position');
+        gl.enableVertexAttribArray(positionLocation);
+        gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+
+        // Uniform locations
+        const timeLocation = gl.getUniformLocation(program, 'u_time');
+        const resolutionLocation = gl.getUniformLocation(program, 'u_resolution');
+        const mouseLocation = gl.getUniformLocation(program, 'u_mouse');
+
+        // Render Loop
+        function render(time) {
+            time *= 0.001; // Convert to seconds
+
+            gl.useProgram(program);
+
+            gl.uniform1f(timeLocation, time);
+            gl.uniform2f(resolutionLocation, canvas.width, canvas.height);
+            gl.uniform2f(mouseLocation, 0, 0); // No mouse interaction
+
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+            requestAnimationFrame(render);
+        }
+
+        requestAnimationFrame(render);
+
+    </script>
+</body>
+</html>

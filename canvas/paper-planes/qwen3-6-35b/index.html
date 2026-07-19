@@ -46,4 +46,360 @@
         // --- Setup & Resize ---
         function resize() {
             width = window.innerWidth;
-            height = window
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            thermalCenter.x = width / 2;
+            thermalCenter.y = height / 2;
+            initDust();
+            initPlanes();
+        }
+
+        window.addEventListener('resize', resize);
+
+        // --- Classes ---
+
+        class DustMote {
+            constructor() {
+                this.reset();
+                this.y = Math.random() * height; // Start anywhere
+            }
+
+            reset() {
+                this.x = Math.random() * width;
+                this.y = height + Math.random() * 100;
+                this.size = Math.random() * 1.5 + 0.5;
+                this.speed = Math.random() * 0.5 + 0.2;
+                this.wobbleSpeed = Math.random() * 0.02 + 0.005;
+                this.wobbleOffset = Math.random() * Math.PI * 2;
+                this.alpha = Math.random() * 0.3 + 0.1;
+            }
+
+            update() {
+                this.y -= this.speed;
+                this.x += Math.sin(time * this.wobbleSpeed + this.wobbleOffset) * 0.3;
+
+                // Thermal influence
+                const dx = this.x - thermalCenter.x;
+                const dy = this.y - thermalCenter.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                
+                if (dist < CONFIG.thermalRadius * 1.5) {
+                    this.x -= dx * 0.0005; // Suck towards center
+                    this.y -= 0.2; // Extra lift
+                }
+
+                if (this.y < -10) this.reset();
+            }
+
+            draw() {
+                // Only draw if in light shafts (center)
+                const dx = this.x - thermalCenter.x;
+                if (Math.abs(dx) < width / 2.5) {
+                    ctx.fillStyle = `rgba(255, 255, 240, ${this.alpha})`;
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+        }
+
+        class Plane {
+            constructor(isRelaunch = false, startY = 0) {
+                this.reset(isRelaunch, startY);
+            }
+
+            reset(isRelaunch = false, startY = 0) {
+                // Position: Pick a balcony edge (Left or Right)
+                this.bank = Math.random() > 0.5 ? -1 : 1; // -1 Left, 1 Right
+                this.x = this.bank === -1 ? 0 : width;
+                this.y = startY || height * 0.2 + Math.random() * height * 0.2;
+                
+                // Velocity: Initial forward throw
+                const speed = Math.random() * 2 + 2;
+                this.vx = -speed * this.bank;
+                this.vy = Math.random() * 1 + 0.5; // Slight dip on launch
+                
+                this.angle = 0;
+                this.bankAngle = 0;
+                this.scale = 0.6 + Math.random() * 0.4;
+                this.color = CONFIG.colors[Math.floor(Math.random() * CONFIG.colors.length)];
+                
+                // State machine
+                this.state = 'GLIDING'; // GLIDING, BANKING, FOLDING, RETURNING
+                this.stateTimer = 0;
+                this.foldFlash = 0;
+                
+                // Aerodynamic properties
+                this.lift = 0;
+            }
+
+            update() {
+                if (this.state === 'FOLDING' || this.state === 'RETURNING') {
+                    this.handleEndState();
+                    return;
+                }
+
+                // --- Physics ---
+                
+                // Gravity
+                this.vy += CONFIG.gravity * 0.1;
+
+                // Lift (based on speed)
+                const speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+                this.lift = speed * CONFIG.liftCoeff;
+                this.vy -= this.lift;
+
+                // Drag
+                this.vx *= (1 - CONFIG.dragCoeff);
+                this.vy *= (1 - CONFIG.dragCoeff);
+
+                // Thermal Column (Center)
+                const dx = this.x - thermalCenter.x;
+                const dy = this.y - thermalCenter.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                
+                // Simple thermal logic
+                if (dist < CONFIG.thermalRadius * 2) {
+                    const heat = Math.max(0, 1 - dist / (CONFIG.thermalRadius * 2));
+                    this.vy -= CONFIG.thermalStrength * heat * 0.1;
+                    
+                    // Gentle swirl
+                    this.vx += (dx / dist) * 0.05; 
+                }
+
+                // Movement
+                this.x += this.vx;
+                this.y += this.vy;
+
+                // --- Controls & Banking ---
+
+                // Target angle based on velocity
+                const targetAngle = Math.atan2(this.vy, this.vx);
+                this.angle = this.angle * 0.9 + targetAngle * 0.1;
+
+                // Banking logic
+                // If thermal, bank gently. If gliding, bank based on x position relative to thermal.
+                let turnInput = 0;
+                if (dist < CONFIG.thermalRadius * 1.5) {
+                    turnInput = dx * 0.001; // Bank towards center
+                } else {
+                    turnInput = (this.x - thermalCenter.x) * 0.0005; // Drift back to center
+                }
+
+                this.bankAngle += turnInput;
+                this.bankAngle *= 0.95; // Damping
+                this.bankAngle = Math.max(-0.5, Math.min(0.5, this.bankAngle)); // Clamp
+
+                // --- End Condition ---
+                // If plane hits floor or goes off screen completely
+                if (this.y > height - 50) {
+                    this.startLanding();
+                } else if (this.x < -100 || this.x > width + 100) {
+                    // If it flies off screen, it just loops
+                    this.reset(false, Math.random() * height);
+                }
+            }
+
+            handleEndState() {
+                this.stateTimer++;
+                
+                if (this.state === 'FOLDING') {
+                    this.foldFlash = 1.0;
+                    if (this.stateTimer > 30) {
+                        this.state = 'RETURNING';
+                        this.stateTimer = 0;
+                        // Calculate vector back to balcony
+                        const tx = this.bank === -1 ? 0 : width;
+                        const ty = this.y;
+                        const angle = Math.atan2(ty - this.y, tx - this.x);
+                        this.vx = Math.cos(angle) * -5; // Fast back
+                        this.vy = Math.sin(angle) * -5;
+                    }
+                } else if (this.state === 'RETURNING') {
+                    this.x += this.vx;
+                    this.y += this.vy;
+                    // Simple bounce logic for returning
+                    if (this.x < 0 || this.x > width) {
+                        this.reset(false, this.y);
+                    }
+                }
+            }
+
+            startLanding() {
+                this.state = 'FOLDING';
+                this.stateTimer = 0;
+                this.foldFlash = 0;
+                // Stop movement, drop to floor visually
+                this.vx = 0;
+                this.vy = 0;
+                this.y = height - 20;
+            }
+
+            draw() {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                
+                // Shadow
+                if (this.state === 'GLIDING') {
+                    const shadowScale = Math.max(0, 1 - (height - this.y) / height);
+                    ctx.save();
+                    ctx.translate(10, 40); // Offset shadow
+                    ctx.rotate(this.angle);
+                    ctx.scale(this.scale * (1 + shadowScale), this.scale * (1 + shadowScale) * 0.5);
+                    ctx.fillStyle = `rgba(0,0,0,${0.1 * shadowScale})`;
+                    this.drawShape();
+                    ctx.restore();
+                }
+
+                // Plane
+                ctx.rotate(this.bankAngle); // Visual banking roll
+                ctx.rotate(this.angle); // Heading
+                
+                const scale = this.state === 'FOLDING' ? (1 - this.stateTimer/30) : this.scale;
+                ctx.scale(scale, scale);
+
+                // Flash effect on fold
+                if (this.state === 'FOLDING') {
+                    ctx.shadowColor = 'white';
+                    ctx.shadowBlur = 20 * Math.sin(this.stateTimer);
+                }
+
+                ctx.fillStyle = this.color;
+                ctx.strokeStyle = '#888';
+                ctx.lineWidth = 1;
+                this.drawShape();
+
+                ctx.restore();
+            }
+
+            drawShape() {
+                ctx.beginPath();
+                // Simple dart shape
+                ctx.moveTo(20, 0);
+                ctx.lineTo(-15, 10);
+                ctx.lineTo(-10, 0);
+                ctx.lineTo(-15, -10);
+                ctx.closePath();
+                ctx.fill();
+                ctx.stroke();
+                
+                // Fold line
+                ctx.beginPath();
+                ctx.moveTo(20, 0);
+                ctx.lineTo(-10, 0);
+                ctx.strokeStyle = 'rgba(0,0,0,0.1)';
+                ctx.stroke();
+            }
+        }
+
+        // --- Initialization ---
+
+        function initPlanes() {
+            planes = [];
+            for (let i = 0; i < CONFIG.planeCount; i++) {
+                planes.push(new Plane());
+            }
+        }
+
+        function initDust() {
+            dustMotes = [];
+            for (let i = 0; i < 150; i++) {
+                dustMotes.push(new DustMote());
+            }
+        }
+
+        // --- Drawing Functions ---
+
+        function drawBackground() {
+            // Sky / Atrium Wall Gradient
+            const grad = ctx.createLinearGradient(0, 0, 0, height);
+            grad.addColorStop(0, '#87CEEB'); // Sky blue top
+            grad.addColorStop(0.4, '#F0F8FF'); // Alice blue
+            grad.addColorStop(1, '#D3D3D3'); // Light gray floor
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, width, height);
+
+            // Draw Light Shafts (God rays)
+            ctx.save();
+            ctx.globalCompositeOperation = 'screen';
+            const rayGrad = ctx.createRadialGradient(
+                thermalCenter.x, 0, 10,
+                thermalCenter.x, height / 2, height
+            );
+            rayGrad.addColorStop(0, 'rgba(255, 255, 200, 0.4)');
+            rayGrad.addColorStop(0.5, 'rgba(255, 255, 255, 0.1)');
+            rayGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+            
+            ctx.fillStyle = rayGrad;
+            ctx.beginPath();
+            ctx.moveTo(thermalCenter.x - 50, 0);
+            ctx.lineTo(thermalCenter.x + 50, 0);
+            ctx.lineTo(width, height);
+            ctx.lineTo(0, height);
+            ctx.fill();
+            ctx.restore();
+
+            // Draw Window Grid (Simple)
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+            ctx.lineWidth = 2;
+            const winW = width / CONFIG.windowCols;
+            const winH = height / CONFIG.windowRows;
+            
+            for(let i=1; i<CONFIG.windowCols; i++) {
+                ctx.beginPath();
+                ctx.moveTo(i * winW, 0);
+                ctx.lineTo(i * winW, height);
+                ctx.stroke();
+            }
+            for(let i=1; i<CONFIG.windowRows; i++) {
+                ctx.beginPath();
+                ctx.moveTo(0, i * winH);
+                ctx.lineTo(width, i * winH);
+                ctx.stroke();
+            }
+
+            // Draw Floor
+            const floorY = height - 20;
+            const floorGrad = ctx.createLinearGradient(0, floorY, 0, height);
+            floorGrad.addColorStop(0, '#8B4513'); // Wood
+            floorGrad.addColorStop(1, '#5D4037');
+            ctx.fillStyle = floorGrad;
+            ctx.fillRect(0, floorY, width, 20);
+            
+            // Balcony Edges
+            ctx.fillStyle = '#FFF';
+            ctx.fillRect(0, 0, 10, height); // Left rail
+            ctx.fillRect(width - 10, 0, 10, height); // Right rail
+        }
+
+        function animate() {
+            time++;
+            ctx.clearRect(0, 0, width, height);
+
+            drawBackground();
+
+            // Update and Draw Dust
+            dustMotes.forEach(d => {
+                d.update();
+                d.draw();
+            });
+
+            // Update and Draw Planes
+            // Sort by Y for simple depth (optional, but nice)
+            planes.sort((a, b) => a.y - b.y);
+            planes.forEach(p => {
+                p.update();
+                p.draw();
+            });
+
+            requestAnimationFrame(animate);
+        }
+
+        // --- Start ---
+        resize();
+        animate();
+
+    </script>
+</body>
+</html>

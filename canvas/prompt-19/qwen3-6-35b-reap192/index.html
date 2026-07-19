@@ -3,44 +3,574 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Medieval Battle Screensaver</title>
+    <title>Medieval Screensaver Battle</title>
     <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background-color: #1a1a1a;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-        }
-        canvas {
-            display: block;
-        }
-        #ui-layer {
-            position: absolute;
-            top: 10px;
-            left: 10px;
-            color: rgba(255, 255, 255, 0.7);
-            pointer-events: none;
-            text-shadow: 1px 1px 2px black;
-        }
+        body { margin: 0; overflow: hidden; background: #222; }
+        canvas { display: block; }
     </style>
 </head>
 <body>
-    <div id="ui-layer">
-        <h1 style="margin:0; font-size: 1.5rem; letter-spacing: 2px;">BATTLEFIELD</h1>
-        <p style="margin:0; font-size: 0.8rem;">Endless Simulation</p>
-    </div>
-    <canvas id="gameCanvas"></canvas>
-
+<canvas id="gameCanvas"></canvas>
 <script>
-/**
- * SECTION 1: SETUP & CONFIGURATION
- */
+/* =========================================
+   1. CONFIGURATION & SETUP
+   ========================================= */
 const canvas = document.getElementById('gameCanvas');
-const ctx = canvas.getContext('2d');
+const ctx = canvas.getContext('2d', { alpha: false });
 
-// Large world dimensions
-const WORLD_WIDTH = 4000;
-const WORLD_HEIGHT = 2
+// World Config
+const WORLD_W = 4000;
+const WORLD_H = 3000;
+const FPS = 60;
+
+// Entity Config
+const TEAM_RED = 0;
+const TEAM_BLUE = 1;
+const UNIT_TYPES = {
+    INFANTRY: 'infantry',
+    ARCHER: 'archer',
+    CAVALRY: 'cavalry'
+};
+
+// Game State
+let lastTime = 0;
+let camera = {
+    x: 0, y: 0, zoom: 0.8, targetZoom: 0.8,
+    focusX: 0, focusY: 0,
+    mode: 'BATTLEFIELD', // 'BATTLEFIELD', 'FOCUS', 'NONE'
+    focusTarget: null,
+    focusTimer: 0
+};
+
+// Persistent Battle Damage Canvas
+const damageCanvas = document.createElement('canvas');
+damageCanvas.width = WORLD_W;
+damageCanvas.height = WORLD_H;
+const damageCtx = damageCanvas.getContext('2d');
+
+// Entities
+let squads = [];
+let particles = [];
+let obstacles = [];
+let objectives = [];
+let terrainFeatures = []; // Trees, rocks (visual only)
+
+/* =========================================
+   2. UTILITIES
+   ========================================= */
+const rand = (min, max) => Math.random() * (max - min) + min;
+const randInt = (min, max) => Math.floor(rand(min, max));
+const dist = (x1, y1, x2, y2) => Math.hypot(x2 - x1, y2 - y1);
+const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
+
+function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+/* =========================================
+   3. WORLD GENERATION
+   ========================================= */
+function initWorld() {
+    // 1. Generate Terrain (Trees, Puddles - Visuals)
+    for(let i=0; i<300; i++) {
+        terrainFeatures.push({
+            x: rand(0, WORLD_W),
+            y: rand(0, WORLD_H),
+            r: rand(10, 30),
+            type: Math.random() > 0.5 ? 'tree' : 'rock'
+        });
+    }
+
+    // 2. Generate Obstacles (Walls, Wagons)
+    for(let i=0; i<20; i++) {
+        obstacles.push({
+            x: rand(200, WORLD_W-200),
+            y: rand(200, WORLD_H-200),
+            w: rand(40, 150),
+            h: rand(20, 60),
+            angle: rand(0, Math.PI*2),
+            type: Math.random() > 0.7 ? 'wall' : 'wagon'
+        });
+    }
+
+    // 3. Objectives
+    const objectiveTypes = ['banner', 'tent', 'supply'];
+    for(let i=0; i<5; i++) {
+        objectives.push({
+            x: rand(500, WORLD_W-500),
+            y: rand(500, WORLD_H-500),
+            radius: 80,
+            type: objectiveTypes[i % objectiveTypes.length],
+            team: Math.random() > 0.5 ? TEAM_RED : TEAM_BLUE,
+            active: true,
+            timer: 0,
+            captureProgress: 0
+        });
+    }
+}
+
+/* =========================================
+   4. ENTITIES: SQUADS & UNITS
+   ========================================= */
+class Squad {
+    constructor(x, y, team, type, count) {
+        this.id = Math.random().toString(36).substr(2, 9);
+        this.x = x;
+        this.y = y;
+        this.team = team;
+        this.type = type;
+        this.count = count;
+        this.maxCount = count;
+        this.state = 'PATROL'; // PATROL, COMBAT, MOVE, REINFORCE
+        
+        // Movement
+        this.targetX = rand(0, WORLD_W);
+        this.targetY = rand(0, WORLD_H);
+        this.speed = type === UNIT_TYPES.CAVALRY ? 2.5 : (type === UNIT_TYPES.ARCHER ? 1.2 : 1.8);
+        
+        // Combat
+        this.range = type === UNIT_TYPES.ARCHER ? 250 : (type === UNIT_TYPES.CAVALRY ? 45 : 35);
+        this.damage = type === UNIT_TYPES.CAVALRY ? 20 : (type === UNIT_TYPES.ARCHER ? 5 : 10);
+        this.cooldown = 0;
+        this.maxCooldown = type === UNIT_TYPES.ARCHER ? 60 : 30;
+        
+        // Visuals
+        this.cohesion = rand(10, 30); // Distance between units
+        this.facing = rand(0, Math.PI*2);
+        this.dead = false;
+    }
+
+    update() {
+        if (this.dead) return;
+
+        // 1. AI & Target Selection
+        let target = this.findNearestEnemy();
+        
+        // Priority: Objectives if low morale or random chance
+        let objective = null;
+        if (this.count < this.maxCount * 0.8 && Math.random() < 0.01) {
+             objective = this.findNearestObjective();
+        }
+
+        let desiredX = this.targetX;
+        let desiredY = this.targetY;
+        let moveSpeed = this.speed;
+
+        if (target) {
+            this.state = 'COMBAT';
+            const d = dist(this.x, this.y, target.x, target.y);
+            
+            if (d < this.range) {
+                // Stop and fight
+                desiredX = this.x;
+                desiredY = this.y;
+                moveSpeed = 0;
+            } else {
+                // Move closer
+                desiredX = target.x;
+                desiredY = target.y;
+            }
+        } else if (objective) {
+            this.state = 'MOVE';
+            desiredX = objective.x;
+            desiredY = objective.y;
+        } else {
+            // Patrol logic
+            if (dist(this.x, this.y, this.targetX, this.targetY) < 50) {
+                this.targetX = rand(100, WORLD_W-100);
+                this.targetY = rand(100, WORLD_H-100);
+                this.state = 'PATROL';
+            }
+        }
+
+        // Movement Logic (Steering)
+        const dx = desiredX - this.x;
+        const dy = desiredY - this.y;
+        const angle = Math.atan2(dy, dx);
+        this.facing = angle;
+
+        // Avoid obstacles/walls
+        let avoidX = 0; let avoidY = 0;
+        obstacles.forEach(obs => {
+            const d = dist(this.x, this.y, obs.x, obs.y);
+            if (d < 100) {
+                const pushAngle = Math.atan2(this.y - obs.y, this.x - obs.x);
+                avoidX += Math.cos(pushAngle) * (100-d);
+                avoidY += Math.sin(pushAngle) * (100-d);
+            }
+        });
+
+        // Separation (don't pile up)
+        let sepX = 0; let sepY = 0;
+        let neighbors = 0;
+        squads.forEach(s => {
+            if (s !== this && !s.dead) {
+                const d = dist(this.x, this.y, s.x, s.y);
+                if (d < 60) {
+                    const angle = Math.atan2(this.y - s.y, this.x - s.x);
+                    sepX += Math.cos(angle);
+                    sepY += Math.sin(angle);
+                    neighbors++;
+                }
+            }
+        });
+        if (neighbors > 0) {
+            sepX /= neighbors;
+            sepY /= neighbors;
+        }
+
+        // Apply forces
+        this.x += (Math.cos(angle) * moveSpeed) + (avoidX * 0.1) + (sepX * 0.5);
+        this.y += (Math.sin(angle) * moveSpeed) + (avoidY * 0.1) + (sepY * 0.5);
+
+        // World Bounds
+        this.x = clamp(this.x, 0, WORLD_W);
+        this.y = clamp(this.y, 0, WORLD_H);
+
+        // Combat Cooldown
+        if (this.cooldown > 0) this.cooldown--;
+
+        // Regeneration
+        if (this.count < this.maxCount) {
+            this.count += 0.05; // Slowly fill back up
+        }
+    }
+
+    findNearestEnemy() {
+        let nearest = null;
+        let minD = Infinity;
+        for (let s of squads) {
+            if (s.team !== this.team && !s.dead) {
+                const d = dist(this.x, this.y, s.x, s.y);
+                if (d < minD) {
+                    minD = d;
+                    nearest = s;
+                }
+            }
+        }
+        return nearest;
+    }
+
+    findNearestObjective() {
+        let nearest = null;
+        let minD = Infinity;
+        for (let obj of objectives) {
+            const d = dist(this.x, this.y, obj.x, obj.y);
+            if (d < minD) {
+                minD = d;
+                nearest = obj;
+            }
+        }
+        return nearest;
+    }
+
+    attack(target) {
+        if (this.cooldown <= 0) {
+            this.cooldown = this.maxCooldown;
+            
+            // Visual Effect
+            createHitEffect(target.x, target.y, this.team);
+
+            if (this.type === UNIT_TYPES.ARCHER) {
+                createProjectile(this.x, this.y, target.x, target.y);
+            }
+            
+            // Damage logic
+            if (Math.random() > 0.7) { // Hit chance
+                target.count -= (this.damage * 0.1);
+                if (target.count <= 0) {
+                    target.dead = true;
+                    createDeathEffect(target.x, target.y, target.team);
+                }
+            }
+        }
+    }
+
+    draw() {
+        if (this.dead) return;
+        
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.facing);
+
+        // Draw Units as a cluster
+        const count = Math.ceil(this.count * 2); // Scale visual size
+        const color = this.team === TEAM_RED ? '#d33' : '#33d';
+        const border = this.team === TEAM_RED ? '#800' : '#008';
+
+        ctx.fillStyle = color;
+        ctx.strokeStyle = border;
+        ctx.lineWidth = 1;
+
+        for (let i = 0; i < count; i++) {
+            const ox = (Math.random() - 0.5) * this.cohesion;
+            const oy = (Math.random() - 0.5) * this.cohesion;
+            
+            // Simple shapes based on type
+            ctx.beginPath();
+            if (this.type === UNIT_TYPES.CAVALRY) {
+                ctx.moveTo(ox + 8, oy); ctx.lineTo(ox - 4, oy - 4); ctx.lineTo(ox - 4, oy + 4);
+            } else if (this.type === UNIT_TYPES.ARCHER) {
+                ctx.arc(ox, oy, 3, 0, Math.PI*2);
+            } else {
+                ctx.rect(ox - 3, oy - 3, 6, 6);
+            }
+            ctx.fill();
+            ctx.stroke();
+        }
+        ctx.restore();
+    }
+}
+
+/* =========================================
+   5. EFFECTS & PROJECTILES
+   ========================================= */
+class Particle {
+    constructor(x, y, color, speed, life, size) {
+        this.x = x;
+        this.y = y;
+        this.vx = (Math.random() - 0.5) * speed;
+        this.vy = (Math.random() - 0.5) * speed;
+        this.color = color;
+        this.life = life;
+        this.maxLife = life;
+        this.size = size;
+    }
+    update() {
+        this.x += this.vx;
+        this.y += this.vy;
+        this.life--;
+        this.size *= 0.95;
+    }
+    draw() {
+        ctx.globalAlpha = this.life / this.maxLife;
+        ctx.fillStyle = this.color;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.size, 0, Math.PI*2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+    }
+}
+
+class Projectile {
+    constructor(x, y, tx, ty, team) {
+        this.x = x;
+        this.y = y;
+        this.tx = tx;
+        this.ty = ty;
+        this.team = team;
+        this.speed = 8;
+        this.angle = Math.atan2(ty - y, tx - x);
+        this.distTotal = dist(x, y, tx, ty);
+        this.distTraveled = 0;
+    }
+    update() {
+        const step = this.speed;
+        this.x += Math.cos(this.angle) * step;
+        this.y += Math.sin(this.angle) * step;
+        this.distTraveled += step;
+
+        if (this.distTraveled >= this.distTotal) {
+            return false; // Remove
+        }
+        return true; // Keep
+    }
+    draw() {
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(this.x, this.y);
+        ctx.lineTo(this.x - Math.cos(this.angle)*10, this.y - Math.sin(this.angle)*10);
+        ctx.stroke();
+    }
+}
+
+function createHitEffect(x, y, team) {
+    // Blood
+    for(let i=0; i<5; i++) {
+        particles.push(new Particle(x, y, '#800', 3, 20, 3));
+    }
+    // Dust
+    for(let i=0; i<3; i++) {
+        particles.push(new Particle(x, y, '#aa8855', 2, 15, 4));
+    }
+}
+
+function createDeathEffect(x, y, team) {
+    // Blood pool (Permanent on damage canvas)
+    damageCtx.fillStyle = team === TEAM_RED ? '#500' : '#005';
+    damageCtx.beginPath();
+    damageCtx.arc(x, y, 15, 0, Math.PI*2);
+    damageCtx.fill();
+    damageCtx.fillStyle = '#331111'; // Shadow
+    damageCtx.beginPath();
+    damageCtx.arc(x, y, 10, 0, Math.PI*2);
+    damageCtx.fill();
+
+    // Body
+    damageCtx.fillStyle = '#444';
+    damageCtx.beginPath();
+    damageCtx.ellipse(x, y, 12, 6, Math.random()*Math.PI, 0, Math.PI*2);
+    damageCtx.fill();
+
+    // Debris
+    for(let i=0; i<10; i++) {
+        particles.push(new Particle(x, y, '#666', 5, 60, 2));
+    }
+}
+
+function createProjectile(x, y, tx, ty) {
+    projectiles.push(new Projectile(x, y, tx, ty));
+}
+
+let projectiles = [];
+
+/* =========================================
+   6. CAMERA LOGIC
+   ========================================= */
+function updateCamera() {
+    // Find center of most intense action (simplified: center of all active units)
+    let cx = 0, cy = 0, count = 0;
+    squads.forEach(s => {
+        if(!s.dead) {
+            cx += s.x;
+            cy += s.y;
+            count++;
+        }
+    });
+    if (count > 0) {
+        camera.focusX = cx / count;
+        camera.focusY = cy / count;
+    }
+
+    // Focus Logic: If a squad is getting annihilated, zoom in
+    let focusTarget = null;
+    let minHealthRatio = 1;
+
+    squads.forEach(s => {
+        if (s.maxCount > 0) {
+            const ratio = s.count / s.maxCount;
+            if (ratio < minHealthRatio) {
+                minHealthRatio = ratio;
+                focusTarget = s;
+            }
+        }
+    });
+
+    if (minHealthRatio < 0.3) {
+        camera.mode = 'FOCUS';
+        camera.focusTarget = focusTarget;
+    } else {
+        camera.mode = 'BATTLEFIELD';
+        camera.focusTarget = null;
+    }
+
+    let targetX, targetY;
+
+    if (camera.mode === 'FOCUS') {
+        targetX = camera.focusTarget.x;
+        targetY = camera.focusTarget.y;
+        camera.targetZoom = 1.8;
+    } else {
+        targetX = camera.focusX;
+        targetY = camera.focusY;
+        camera.targetZoom = 0.8;
+    }
+
+    // Smooth Move
+    camera.x += (targetX - camera.x) * 0.05;
+    camera.y += (targetY - camera.y) * 0.05;
+    camera.zoom += (camera.targetZoom - camera.zoom) * 0.05;
+}
+
+/* =========================================
+   7. GAME LOOP & RENDERING
+   ========================================= */
+function spawnSquad() {
+    const side = Math.random() > 0.5 ? TEAM_RED : TEAM_BLUE;
+    const types = [UNIT_TYPES.INFANTRY, UNIT_TYPES.ARCHER, UNIT_TYPES.CAVALRY];
+    const type = types[randInt(0, types.length)];
+    const count = randInt(5, 15);
+    
+    let x, y;
+    if (side === TEAM_RED) {
+        x = 100; y = rand(100, WORLD_H-100);
+    } else {
+        x = WORLD_W - 100; y = rand(100, WORLD_H-100);
+    }
+    
+    squads.push(new Squad(x, y, side, type, count));
+}
+
+function init() {
+    initWorld();
+    // Initial Armies
+    for(let i=0; i<10; i++) spawnSquad();
+}
+
+function update() {
+    // Spawner
+    if (squads.length < 20 && Math.random() < 0.1) {
+        spawnSquad();
+    }
+
+    // Update Squads
+    // Iterate backwards to handle death
+    for(let i=squads.length-1; i>=0; i--) {
+        const s = squads[i];
+        s.update();
+        // Combat check
+        if (s.state === 'COMBAT') {
+            const enemy = s.findNearestEnemy();
+            if (enemy) s.attack(enemy);
+        }
+        
+        // Remove dead squads that are fully dead
+        if (s.count <= 0 && s.dead) {
+            // Squads are flagged dead when count is 0, they stay in array until respawn logic or cleanup
+            // Actually, let's just remove them from array to save perf
+            squads.splice(i, 1); 
+        }
+    }
+
+    // Update Particles
+    for(let i=particles.length-1; i>=0; i--) {
+        particles[i].update();
+        if (particles[i].life <= 0) particles.splice(i, 1);
+    }
+
+    // Update Projectiles
+    for(let i=projectiles.length-1; i>=0; i--) {
+        const p = projectiles[i];
+        if (!p.update()) {
+            // Impact dust on ground
+            damageCtx.fillStyle = '#666';
+            damageCtx.beginPath();
+            damageCtx.arc(p.x, p.y, 2, 0, Math.PI*2);
+            damageCtx.fill();
+            projectiles.splice(i, 1);
+        }
+    }
+
+    updateCamera();
+}
+
+function draw() {
+    // 1. Clear Screen
+    ctx.fillStyle = '#1a1a1a';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // 2. Apply Camera
+    ctx.save();
+    ctx.translate(canvas.width/2, canvas.height/2);
+    ctx.scale(camera.zoom, camera.zoom);
+    ctx.translate(-camera.x, -camera.y);
+
+    // 3. Draw World Base (Grass)
+    // We only draw the background rectangle once, but to keep it clean we clear screen and draw rect
+    // In a real engine we'd layer this. Here we just rely on the damage canvas mostly, 
+    // but let's draw a base grass color.
+    ctx.fillStyle = '#3a4a

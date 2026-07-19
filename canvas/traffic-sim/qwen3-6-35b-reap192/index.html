@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Intersection Sim</title>
     <style>
-        body { margin: 0; overflow: hidden; background: #050510; }
+        body { margin: 0; overflow: hidden; background: #1a1a1a; font-family: sans-serif; }
         canvas { display: block; }
     </style>
 </head>
@@ -13,28 +13,434 @@
 <canvas id="sim"></canvas>
 <script>
 /**
- * CONFIGURATION
+ * Vector Math Helper
  */
-const FPS = 60;
-const DT = 1 / FPS;
-const CAR_LEN = 20;
-const CAR_WID = 10;
-const SAFE_DIST = 8; // Distance to keep from car ahead
-const ACCEL = 150;
-const BRAKE = 300;
-const MAX_SPEED = 140;
-const LANE_W = 14;
-const STOP_LINE_GAP = 40; // Distance from center line to stop line
-const CROSSWALK_W = 8;
-const INTERSECT_SIZE = 100;
+const Vec = {
+    add: (v1, v2) => ({ x: v1.x + v2.x, y: v1.y + v2.y }),
+    sub: (v1, v2) => ({ x: v1.x - v2.x, y: v1.y - v2.y }),
+    mag: (v) => Math.sqrt(v.x * v.x + v.y * v.y),
+    norm: (v) => {
+        const m = Math.sqrt(v.x * v.x + v.y * v.y);
+        return m === 0 ? { x: 0, y: 0 } : { x: v.x / m, y: v.y / m };
+    },
+    dist: (v1, v2) => Math.sqrt((v1.x - v2.x) ** 2 + (v1.y - v2.y) ** 2),
+    rotate: (v, angle) => ({
+        x: v.x * Math.cos(angle) - v.y * Math.sin(angle),
+        y: v.x * Math.sin(angle) + v.y * Math.cos(angle)
+    }),
+    lerp: (v1, v2, t) => ({ x: v1.x + (v2.x - v1.x) * t, y: v1.y + (v2.y - v1.y) * t })
+};
 
-// Colors
-const C_ROAD = '#1a1a1a';
-const C_LINE = '#555';
-const C_CROSS = '#eee';
-const C_CAR_BODY = ['#d32f2f', '#1976d2', '#388e3c', '#fbc02d', '#795548', '#ffffff', '#424242'];
-const C_HEADLIGHT = 'rgba(255, 255, 200, 0.6)';
+/**
+ * Constants & Config
+ */
+const CANVAS = document.getElementById('sim');
+const CTX = CANVAS.getContext('2d');
+const LANE_WIDTH = 40;
+const ROAD_WIDTH = LANE_WIDTH * 4; // 2 lanes each way + left turn
+const INTERSECTION_SIZE = ROAD_WIDTH;
+const CAR_LENGTH = 24;
+const CAR_WIDTH = 14;
+const CAR_SEP_MIN = 40; // Minimum gap between cars
+const CAR_SEP_MAX = 180; // Random gap target
+const MAX_SPEED = 3.5;
+const ACCEL = 0.08;
+const BRAKE = 0.2;
+const LIGHT_CYCLE = 600; // Frames for green
+const YELLOW_DURATION = 120;
+const RED_DURATION = 150;
 
-// Lights
-const GREEN = 0;
-const YELLOW = 1
+let width, height, cx, cy;
+
+function resize() {
+    width = CANVAS.width = window.innerWidth;
+    height = CANVAS.height = window.innerHeight;
+    cx = width / 2;
+    cy = height / 2;
+}
+window.addEventListener('resize', resize);
+resize();
+
+/**
+ * Game State
+ */
+const state = {
+    time: 0,
+    lights: {
+        NS: { state: 'GREEN', timer: 0 }, // NS = North-South
+        EW: { state: 'RED', timer: 0 }    // EW = East-West
+    },
+    cars: [],
+    pedestrians: [],
+    bus: null,
+    spawnTimers: { cars: 0, ped: 0, bus: 0 }
+};
+
+// Directions: 0=North(Down), 1=East(Left), 2=South(Up), 3=West(Right)
+const DIRS = [
+    { x: 0, y: 1, angle: Math.PI / 2 },   // N (moving down visual, but coordinate system Y+ is down)
+    { x: -1, y: 0, angle: Math.PI },      // W (moving left)
+    { x: 0, y: -1, angle: -Math.PI / 2 }, // S (moving up)
+    { x: 1, y: 0, angle: 0 }              // E (moving right)
+];
+// Map visual directions to logic index
+// Top (North side) -> Moving South (Index 2 logic, index 0 visual logic in code below)
+// Let's standardise:
+// Dir 0: South (Moving Down) - Enters from Top
+// Dir 1: West (Moving Left) - Enters from Right
+// Dir 2: North (Moving Up) - Enters from Bottom
+// Dir 3: East (Moving Right) - Enters from Left
+
+const LANE_OFFSETS = {
+    0: -LANE_WIDTH / 2, // Right lane (Southbound)
+    1: LANE_WIDTH / 2,  // Right lane (Westbound)
+    2: LANE_WIDTH / 2,  // Right lane (Northbound)
+    3: -LANE_WIDTH / 2  // Right lane (Eastbound)
+};
+
+const LEFT_TURN_LANES = {
+    0: -LANE_WIDTH * 1.5, // Left lane (Southbound)
+    1: -LANE_WIDTH * 1.5, // Left lane (Westbound)
+    2: LANE_WIDTH * 1.5,  // Left lane (Northbound)
+    3: LANE_WIDTH * 1.5   // Left lane (Eastbound)
+};
+
+/**
+ * Classes
+ */
+class Car {
+    constructor(direction, isBus = false) {
+        this.direction = direction; // 0, 1, 2, 3
+        this.isBus = isBus;
+        this.length = isBus ? 60 : CAR_LENGTH;
+        this.width = isBus ? 20 : CAR_WIDTH;
+        this.maxSpeed = isBus ? 2.5 : MAX_SPEED;
+        this.speed = 0;
+        this.yield = false; // Yield to pedestrians
+        this.turning = false;
+        this.turnProgress = 0;
+        
+        // Determine starting position
+        // Spawn far away
+        const spawnDist = Math.max(width, height) / 2 + 100;
+        
+        if (direction === 0) { this.x = cx; this.y = cy - spawnDist; } // Coming from North
+        if (direction === 1) { this.x = cx + spawnDist; this.y = cy; } // Coming from East
+        if (direction === 2) { this.x = cx; this.y = cy + spawnDist; } // Coming from South
+        if (direction === 3) { this.x = cx - spawnDist; this.y = cy; } // Coming from West
+
+        // Lane offset
+        const isLeftTurn = Math.random() < 0.3; // 30% chance to turn left
+        
+        if (isLeftTurn && this.canTurnLeft()) {
+            this.laneOffset = LEFT_TURN_LANES[direction];
+            this.turning = true;
+        } else {
+            this.laneOffset = LANE_OFFSETS[direction];
+        }
+        
+        this.color = isBus ? '#f1c40f' : `hsl(${Math.random()*360}, 60%, 50%)`;
+    }
+
+    canTurnLeft() {
+        // Cannot turn left from left turn lane if there's a car in it? simplified logic: yes if clear
+        // We'll let physics handle collision
+        return true;
+    }
+
+    update(trafficLightState) {
+        let stopDist = INTERSECTION_SIZE / 2 + 20;
+        let stop = false;
+
+        // 1. Traffic Light Logic
+        const light = this.getLightState(trafficLightState);
+        
+        // Stop line distance
+        if (this.direction === 0 && this.y < cy - stopDist) stop = (light === 'RED');
+        if (this.direction === 1 && this.x > cx + stopDist) stop = (light === 'RED');
+        if (this.direction === 2 && this.y > cy + stopDist) stop = (light === 'RED');
+        if (this.direction === 3 && this.x < cx - stopDist) stop = (light === 'RED');
+        
+        // Late Yellow (Simulation of human reaction)
+        if (light === 'YELLOW' && Math.random() < 0.05) stop = false; // Some people speed up
+
+        // 2. Interaction with other cars (Queueing)
+        let minGap = this.length + CAR_SEP_MIN;
+        let closestCar = null;
+        let closestDist = Infinity;
+
+        for (let other of state.cars) {
+            if (other === this) continue;
+            
+            // Only care about cars in same direction or intersection conflict
+            if (other.direction !== this.direction) {
+                // Intersection Conflict: If I'm going straight and they are turning left across my path
+                if (this.turning && !other.turning) {
+                    if (this.getLightState(trafficLightState) !== 'RED') {
+                        const d = Vec.dist(this, other);
+                        if (d < 60 && d < closestDist) {
+                            closestDist = d;
+                            closestCar = other;
+                            minGap = 30; // Must yield
+                            this.yield = true;
+                        }
+                    }
+                }
+            } else {
+                // Same direction car ahead
+                let ahead = false;
+                if (this.direction === 0 && other.y > this.y) ahead = true;
+                if (this.direction === 1 && other.x < this.x) ahead = true;
+                if (this.direction === 2 && other.y < this.y) ahead = true;
+                if (this.direction === 3 && other.x > this.x) ahead = true;
+
+                if (ahead) {
+                    let d;
+                    if (this.direction === 0) d = other.y - this.y - this.length/2 - other.length/2;
+                    if (this.direction === 1) d = this.x - other.x - this.length/2 - other.length/2;
+                    if (this.direction === 2) d = this.y - other.y - this.length/2 - other.length/2;
+                    if (this.direction === 3) d = other.x - this.x - this.length/2 - other.length/2;
+
+                    if (d < closestDist) {
+                        closestDist = d;
+                        closestCar = other;
+                        minGap = this.length + CAR_SEP_MIN;
+                        this.yield = false;
+                    }
+                }
+            }
+        }
+
+        // 3. Pedestrian Interaction (Crosswalk)
+        // If turning left or going straight, check crosswalks
+        const crosswalks = [
+            { x: cx, y: cy - INTERSECTION_SIZE/2 - 20, angle: 0, dir: 0 }, // Left Crosswalk (N/S traffic)
+            { x: cx, y: cy + INTERSECTION_SIZE/2 + 20, angle: 0, dir: 2 },
+            { x: cx - INTERSECTION_SIZE/2 - 20, y: cy, angle: Math.PI/2, dir: 3 },
+            { x: cx + INTERSECTION_SIZE/2 + 20, y: cy, angle: Math.PI/2, dir: 1 }
+        ];
+
+        for (let ped of state.pedestrians) {
+            // If ped is walking in my path
+            if (ped.direction === this.direction || ped.direction === (this.direction + 2) % 4) {
+                 // Check overlap zones
+                 let d = Vec.dist(this, ped);
+                 if (d < 30) {
+                     stop = true;
+                     this.yield = true;
+                 }
+            }
+        }
+
+        // 4. Physics
+        if (stop || this.yield) {
+            this.speed -= BRAKE;
+            if (this.speed < 0) this.speed = 0;
+        } else {
+            this.speed += ACCEL;
+            if (this.speed > this.maxSpeed) this.speed = this.maxSpeed;
+        }
+
+        // 5. Movement
+        if (this.turning) {
+            // Simple turning logic: enter turn radius
+            // Stop line for turn
+            let stopX = cx, stopY = cy;
+            if (this.direction === 0) stopX = cx + this.laneOffset;
+            if (this.direction === 1) stopY = cy - this.laneOffset;
+            if (this.direction === 2) stopX = cx - this.laneOffset;
+            if (this.direction === 3) stopY = cy + this.laneOffset;
+
+            // Distance to stop line
+            let distToLine = Vec.dist(this, {x: stopX, y: stopY});
+            
+            if (distToLine > 20) {
+                 // Move towards center-ish then arc
+                 // Simplified: Move towards center intersection
+                 const target = { x: cx, y: cy };
+                 const dir = Vec.norm(Vec.sub(target, this));
+                 this.x += dir.x * this.speed;
+                 this.y += dir.y * this.speed;
+                 
+                 // Visual rotation
+                 this.angle = Math.atan2(dir.y, dir.x);
+            } else {
+                // Execute turn arc
+                // Arc center depends on direction
+                let arcCx = cx, arcCy = cy;
+                let startAngle = 0;
+                let endAngle = 0;
+                
+                // Logic to rotate around center of intersection
+                const cxOffset = this.laneOffset;
+                
+                if (this.direction === 0) { // N to W
+                    startAngle = Math.PI * 0.5;
+                    endAngle = Math.PI;
+                    // Rotate point
+                    const p = Vec.rotate(Vec.sub(this, {x:cx, y:cy}), Math.PI/4); // Turn 45 deg approx
+                    this.angle += 0.05; // Turn rate
+                    this.x = cx + p.x;
+                    this.y = cy + p.y;
+                } else if (this.direction === 1) { // W to S
+                    this.angle += 0.05;
+                    this.x = cx + (this.x - cx) * Math.cos(0.05) - (this.y - cy) * Math.sin(0.05);
+                    this.y = cy + (this.x - cx) * Math.sin(0.05) + (this.y - cy) * Math.cos(0.05);
+                } else if (this.direction === 2) { // S to E
+                    this.angle += 0.05;
+                    this.x = cx + (this.x - cx) * Math.cos(-0.05) - (this.y - cy) * Math.sin(-0.05);
+                    this.y = cy + (this.x - cx) * Math.sin(-0.05) + (this.y - cy) * Math.cos(-0.05);
+                } else if (this.direction === 3) { // E to N
+                    this.angle += 0.05;
+                    this.x = cx + (this.x - cx) * Math.cos(-0.05) - (this.y - cy) * Math.sin(-0.05);
+                    this.y = cy + (this.x - cx) * Math.sin(-0.05) + (this.y - cy) * Math.cos(-0.05);
+                }
+            }
+            
+            // Remove car if off screen (simplified by distance from center)
+            if (Vec.dist(this, {x:cx, y:cy}) > 600) {
+                return true; // Signal to remove
+            }
+
+        } else {
+            // Straight movement
+            this.angle = DIRS[this.direction].angle;
+            this.x += DIRS[this.direction].x * this.speed;
+            this.y += DIRS[this.direction].y * this.speed;
+        }
+
+        // Remove if way off screen
+        if (Math.abs(this.x - cx) > 1000 || Math.abs(this.y - cy) > 1000) {
+            return true;
+        }
+        return false;
+    }
+
+    getLightState(lights) {
+        if (this.direction === 0 || this.direction === 2) {
+            return lights.NS.state;
+        } else {
+            return lights.EW.state;
+        }
+    }
+
+    draw() {
+        CTX.save();
+        CTX.translate(this.x, this.y);
+        CTX.rotate(this.angle);
+
+        // Body
+        CTX.fillStyle = this.color;
+        CTX.fillRect(-this.length/2, -this.width/2, this.length, this.width);
+        
+        // Roof (for depth)
+        CTX.fillStyle = 'rgba(0,0,0,0.2)';
+        CTX.fillRect(-this.length/2 + 4, -this.width/2 + 2, this.length - 8, this.width - 4);
+
+        // Headlights
+        CTX.fillStyle = '#ffffcc';
+        CTX.shadowColor = '#ffffcc';
+        CTX.shadowBlur = 10;
+        CTX.fillRect(this.length/2 - 2, -this.width/2 + 1, 2, 4);
+        CTX.fillRect(this.length/2 - 2, this.width/2 - 5, 2, 4);
+        CTX.shadowBlur = 0;
+
+        // Brake lights
+        CTX.fillStyle = this.speed < 0.1 ? '#ff3333' : '#880000';
+        CTX.fillRect(-this.length/2, -this.width/2 + 1, 2, 4);
+        CTX.fillRect(-this.length/2, this.width/2 - 5, 2, 4);
+
+        // Bus markings
+        if (this.isBus) {
+            CTX.fillStyle = '#333';
+            CTX.fillRect(-this.length/2 + 5, -this.width/2 + 2, 10, this.width - 4); // Windows
+        }
+
+        CTX.restore();
+    }
+}
+
+class Pedestrian {
+    constructor(direction) {
+        this.direction = direction; // 0=N, 1=E, 2=S, 3=W
+        this.speed = 0.5 + Math.random() * 0.2;
+        this.state = 'WAITING'; // WAITING, WALKING
+        
+        // Spawn at curb
+        if (direction === 0) { // Walking North (Up), on Left side of road (East side)
+            this.x = cx + INTERSECTION_SIZE/2 + 5;
+            this.y = cy + 50; 
+            this.targetY = cy - 50;
+        } else if (direction === 1) { // Walking East (Right), Top side
+            this.x = cx - 50;
+            this.y = cy - INTERSECTION_SIZE/2 - 5;
+            this.targetX = cx + 50;
+        } else if (direction === 2) { // Walking South (Down), Left side
+            this.x = cx - INTERSECTION_SIZE/2 - 5;
+            this.y = cy - 50;
+            this.targetY = cy + 50;
+        } else if (direction === 3) { // Walking West (Left), Bottom side
+            this.x = cx + 50;
+            this.y = cy + INTERSECTION_SIZE/2 + 5;
+            this.targetX = cx - 50;
+        }
+    }
+
+    update(lightState) {
+        const light = (this.direction === 0 || this.direction === 2) ? lightState.NS : lightState.EW;
+        
+        // Can walk if light is Green (for cars) -> Wait... Pedestrians walk on Car RED?
+        // Logic: If cars have Green, Pedestrians must wait.
+        if (light === 'GREEN') {
+            this.state = 'WAITING';
+        } else if (light === 'YELLOW' || light === 'RED') {
+            // Random delay before stepping off curb
+            if (this.state === 'WAITING' && Math.random() < 0.1) {
+                this.state = 'WALKING';
+            }
+        }
+
+        if (this.state === 'WALKING') {
+            if (this.direction === 0) this.y -= this.speed;
+            if (this.direction === 1) this.x += this.speed;
+            if (this.direction === 2) this.y += this.speed;
+            if (this.direction === 3) this.x -= this.speed;
+
+            // Check arrival
+            let done = false;
+            if (this.direction === 0 && this.y < this.targetY) done = true;
+            if (this.direction === 1 && this.x > this.targetX) done = true;
+            if (this.direction === 2 && this.y > this.targetY) done = true;
+            if (this.direction === 3 && this.x < this.targetX) done = true;
+
+            if (done) this.state = 'DONE';
+        }
+
+        return this.state === 'DONE';
+    }
+
+    draw() {
+        CTX.fillStyle = '#eee';
+        CTX.beginPath();
+        CTX.arc(this.x, this.y, 4, 0, Math.PI*2);
+        CTX.fill();
+    }
+}
+
+/**
+ * Main Logic
+ */
+function updateLights() {
+    const ns = state.lights.NS;
+    const ew = state.lights.EW;
+
+    // Simple State Machine
+    // NS Green -> NS Yellow -> NS Red -> EW Green -> EW Yellow -> EW Red
+    
+    // Helper to switch
+    const switchNS = (newState) => {
+        ns.state = newState;
+        ns.timer = (newState === 'GREEN') ? LIGHT_CYCLE : (newState === 'YELLOW' ? YELLOW_DURATION : RED_DURATION);
+    };
+    const switchEW = (newState) => {
+        ew.state

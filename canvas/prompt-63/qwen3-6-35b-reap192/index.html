@@ -2,37 +2,427 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>SkiFree Clone</title>
+<title>SkiFree Simulation</title>
 <style>
-    body { margin: 0; overflow: hidden; background: #000; font-family: monospace; }
-    canvas { display: block; background: #fff; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; margin: 0 auto; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <script>
-const canvas = document.getElementById('c');
-const ctx = canvas.getContext('2d');
-let W, H;
+var canvas = document.getElementById('c');
+var ctx = canvas.getContext('2d');
 
-function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
-window.addEventListener('resize', resize);
+function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+}
 resize();
+window.addEventListener('resize', resize);
 
-// --- Constants ---
-const TYPES = {
-    TREE: 0, ROCK: 1, FLAG: 2, BUMP: 3, RAMP: 4, ANIMAL: 5, SKIER: 6, YETI: 7, UFO: 8, ALIEN: 9
-};
-const COLORS = {
-    TREE: '#14532c', TREE_LIGHT: '#2ecc71', ROCK: '#7f8c8d', FLAG: '#e74c3c',
-    BUMP: '#dcdde1', RAMP: '#3498db', SKIER_RED: '#c0392b', SKIER_SKIN: '#f1c40f',
-    YETI: '#ecf0f1', UFO: '#9b59b6', ALIEN: '#27ae60'
-};
+var W = canvas.width, H = canvas.height;
+var CX = W / 2, CY = H / 2;
 
-// --- State ---
-let frame = 0;
-let speed = 4;
-let score = 0;
-let objects = [];
-let trails = [];
-let
+// Game state
+var speed = 3;
+var skierX = CX;
+var skierY = CY;
+var skierDir = 0; // -1 left, 0 straight, 1 right
+var trail = [];
+var objects = [];
+var particles = [];
+var crashed = false;
+var crashTimer = 0;
+var crashX = 0, crashY = 0;
+var runNumber = 0;
+var yeti = null;
+var yetiTimer = 0;
+var yetiState = 'sleeping'; // sleeping, chasing, waving, fleeing
+var yetiX = 0, yetiY = 0;
+var ufo = null;
+var alien = null;
+let alienTimer = 0;
+let ufoTimer = 0;
+let yetiSpawnTimer = 0;
+let objectSpawnTimer = 0;
+let otherSkierSpawnTimer = 0;
+let snowflakes = [];
+let bumpTimer = 0;
+let jumpState = null; // null or {y, vy, duration}
+let hillSeed = Math.random() * 10000;
+let distance = 0;
+let msgText = '';
+let msgTimer = 0;
+let hillWidth = 2000;
+let hillCenter = 0;
+
+function setMsg(t, d) { msgText = t; msgTimer = d || 180; }
+
+// Snowflakes for atmosphere
+for (var i = 0; i < 60; i++) {
+    snowflakes.push({ x: Math.random() * W, y: Math.random() * H, s: Math.random() * 2 + 1, sp: Math.random() * 1 + 0.5 });
+}
+
+function hillOffset() {
+    return hillCenter;
+}
+
+function genHillEdge(side) {
+    // side: -1 left, 1 right
+    var x = hillCenter + side * hillWidth / 2;
+    x += Math.sin(hillOffset() * 0.003 + side) * 80;
+    x += Math.sin(hillOffset() * 0.007 + side * 2) * 40;
+    return x;
+}
+
+function isOnHill(x, worldY) {
+    var wx = x - hillCenter;
+    var edgeL = genHillEdge(-1);
+    var edgeR = genHillEdge(1);
+    return wx > edgeL && wx < edgeR;
+}
+
+function worldToScreen(worldX, worldY) {
+    return { x: worldX, y: worldY - hillOffset() };
+}
+
+function screenToWorld(sx, sy) {
+    return { x: sx, y: sy + hillOffset() };
+}
+
+// Object types
+function spawnTree(worldY) {
+    var edgeL = genHillEdge(-1) + 40;
+    var edgeR = genHillEdge(1) - 40;
+    var x = edgeL + Math.random() * (edgeR - edgeL);
+    objects.push({ type: 'tree', x: x, y: worldY, size: 12 + Math.random() * 10 });
+}
+
+function spawnRock(worldY) {
+    var edgeL = genHillEdge(-1) + 40;
+    var edgeR = genHillEdge(1) - 40;
+    var x = edgeL + Math.random() * (edgeR - edgeL);
+    objects.push({ type: 'rock', x: x, y: worldY, size: 8 + Math.random() * 8 });
+}
+
+function spawnFlag(worldY) {
+    var edgeL = genHillEdge(-1) + 60;
+    var edgeR = genHillEdge(1) - 60;
+    var x = edgeL + Math.random() * (edgeR - edgeL);
+    objects.push({ type: 'flag', x: x, y: worldY, color: ['#f00','#0f0','#00f','#ff0','#f0f'][Math.floor(Math.random()*5)] });
+}
+
+function spawnBump(worldY) {
+    var edgeL = genHillEdge(-1) + 50;
+    var edgeR = genHillEdge(1) - 50;
+    var x = edgeL + Math.random() * (edgeR - edgeL);
+    objects.push({ type: 'bump', x: x, y: worldY, size: 10 });
+}
+
+function spawnRamp(worldY) {
+    var edgeL = genHillEdge(-1) + 50;
+    var edgeR = genHillEdge(1) - 50;
+    var x = edgeL + Math.random() * (edgeR - edgeL);
+    objects.push({ type: 'ramp', x: x, y: worldY, size: 16 });
+}
+
+function spawnAnimal(worldY) {
+    var edgeL = genHillEdge(-1) + 50;
+    var edgeR = genHillEdge(1) - 50;
+    var x = edgeL + Math.random() * (edgeR - edgeL);
+    var types = ['rabbit', 'deer', 'chicken'];
+    objects.push({ type: 'animal', x: x, y: worldY, animalType: types[Math.floor(Math.random()*3)], moveX: (Math.random()-0.5)*0.5 });
+}
+
+function spawnOtherSkier(worldY) {
+    var edgeL = genHillEdge(-1) + 40;
+    var edgeR = genHillEdge(1) - 40;
+    var x = edgeL + Math.random() * (edgeR - edgeL);
+    objects.push({ type: 'skier', x: x, y: worldY, dir: Math.random() > 0.5 ? 0.3 : -0.3, color: ['#e00','#0a0','#00e','#fa0','#fff'][Math.floor(Math.random()*5)], speed: 0.5 + Math.random() });
+}
+
+function initObjects() {
+    objects = [];
+    for (var i = 0; i < 120; i++) {
+        var y = hillOffset() - 800 - Math.random() * 1500;
+        var r = Math.random();
+        if (r < 0.35) spawnTree(y);
+        else if (r < 0.45) spawnRock(y);
+        else if (r < 0.55) spawnFlag(y);
+        else if (r < 0.65) spawnBump(y);
+        else if (r < 0.72) spawnRamp(y);
+        else if (r < 0.78) spawnAnimal(y);
+    }
+}
+
+function initRun() {
+    runNumber++;
+    hillOffset;
+    hillCenter = 0;
+    skierX = CX;
+    skierY = CY;
+    skierDir = 0;
+    trail = [];
+    crashed = false;
+    crashTimer = 0;
+    jumpState = null;
+    yeti = null;
+    yetiState = 'sleeping';
+    yetiTimer = 0;
+    ufo = null;
+    alien = null;
+    alienTimer = 0;
+    ufoTimer = 0;
+    yetiSpawnTimer = 0;
+    objectSpawnTimer = 0;
+    otherSkierSpawnTimer = 0;
+    bumpTimer = 0;
+    distance = 0;
+    hillSeed = Math.random() * 10000;
+    setMsg('Welcome to SkiFree! Run ' + runNumber, 180);
+    initObjects();
+}
+
+function dist(a, b) {
+    return Math.sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y));
+}
+
+function spawnObjectAhead() {
+    var aheadY = hillOffset() - 1200 - Math.random() * 300;
+    var r = Math.random();
+    if (r < 0.3) spawnTree(aheadY);
+    else if (r < 0.4) spawnRock(aheadY);
+    else if (r < 0.48) spawnFlag(aheadY);
+    else if (r < 0.56) spawnBump(aheadY);
+    else if (r < 0.62) spawnRamp(aheadY);
+    else if (r < 0.68) spawnAnimal(aheadY);
+}
+
+function spawnOtherSkierAhead() {
+    var aheadY = hillOffset() - 800 - Math.random() * 400;
+    var edgeL = genHillEdge(-1) + 40;
+    var edgeR = genHillEdge(1) - 40;
+    objects.push({ type: 'skier', x: edgeL + Math.random() * (edgeR - edgeL), y: aheadY, dir: (Math.random() - 0.5) * 0.6, color: ['#e00','#0a0','#00e','#fa0','#fff'][Math.floor(Math.random()*5)], speed: 0.5 + Math.random() * 0.5 });
+}
+
+function spawnYeti() {
+    yeti = { x: skierX + (Math.random() > 0.5 ? 60 : -60), y: skierY + 50, state: 'chasing', timer: 0, armAngle: 0 };
+    yetiState = 'chasing';
+    setMsg('A yeti is chasing you!', 150);
+}
+
+function spawnUFO() {
+    ufo = { x: -100, y: CY - 150, dir: 1, timer: 0, beamActive: false };
+    ufoTimer = 600;
+}
+
+function spawnAlien() {
+    alien = { x: Math.random() > 0.5 ? -50 : W + 50, y: CY + (Math.random()-0.5)*200, dir: Math.random() > 0.5 ? 1 : -1, timer: 0, wave: 0 };
+    alienTimer = 400;
+}
+
+function crash() {
+    crashed = true;
+    crashTimer = 60;
+    crashX = skierX;
+    crashY = skierY;
+    // particles
+    for (var i = 0; i < 20; i++) {
+        particles.push({
+            x: skierX, y: skierY,
+            vx: (Math.random()-0.5)*4,
+            vy: (Math.random()-0.5)*4,
+            life: 30 + Math.random()*20,
+            size: 2 + Math.random()*3
+        });
+    }
+}
+
+function resetRun() {
+    crashed = false;
+    jumpState = null;
+    initRun();
+}
+
+// Update
+function update() {
+    if (crashed) {
+        crashTimer--;
+        // update particles
+        for (var i = particles.length - 1; i >= 0; i--) {
+            particles[i].x += particles[i].vx;
+            particles[i].y += particles[i].vy;
+            particles[i].life--;
+            if (particles[i].life <= 0) particles.splice(i, 1);
+        }
+        if (crashTimer <= 0) resetRun();
+        return;
+    }
+
+    // Scroll hill
+    var spd = speed + (jumpState ? 1.5 : 0);
+    hillOffset += spd;
+    distance += spd;
+
+    // Update snowflakes
+    for (var i = 0; i < snowflakes.length; i++) {
+        snowflakes[i].y += snowflakes[i].sp + spd * 0.3;
+        snowflakes[i].x += Math.sin(snowflakes[i].y * 0.01) * 0.3;
+        if (snowflakes[i].y > H + 10) {
+            snowflakes[i].y = -10;
+            snowflakes[i].x = Math.random() * W;
+        }
+    }
+
+    // Skier AI
+    if (!jumpState) {
+        // Look ahead for obstacles
+        var lookAhead = 300;
+        var closestObstacle = null;
+        var closestDist = 9999;
+        for (var i = 0; i < objects.length; i++) {
+            var obj = objects[i];
+            var sy = obj.y - hillOffset();
+            if (sy > -100 && sy < lookAhead) {
+                var d = Math.abs(obj.x - skierX);
+                if (d < closestDist && d < 80) {
+                    closestDist = d;
+                    closestObstacle = obj;
+                }
+            }
+        }
+
+        if (closestObstacle) {
+            var dx = closestObstacle.x - skierX;
+            if (Math.abs(dx) < 70) {
+                skierDir = dx > 0 ? 1 : -1;
+            }
+            if (Math.abs(dx) > 100) {
+                skierDir = 0;
+            }
+        } else {
+            // Gentle random wandering
+            if (Math.random() < 0.02) {
+                skierDir = (Math.random() - 0.5) * 1.5;
+            }
+        }
+
+        // Keep on hill
+        var wx = skierX;
+        var edgeL = genHillEdge(-1);
+        var edgeR = genHillEdge(1);
+        if (wx < edgeL + 30) { skierDir = 0.8; }
+        if (wx > edgeR - 30) { skierDir = -0.8; }
+    }
+
+    skierX += skierDir * 1.5;
+
+    // Trail
+    if (Math.random() < 0.6) {
+        trail.push({ x: skierX + (Math.random()-0.5)*6, y: skierY, alpha: 1 });
+    }
+    if (trail.length > 200) trail.shift();
+    for (var i = trail.length - 1; i >= 0; i--) {
+        trail[i].alpha -= 0.003;
+        if (trail[i].alpha <= 0) trail.splice(i, 1);
+    }
+
+    // Spawn objects ahead
+    objectSpawnTimer++;
+    if (objectSpawnTimer > 15) {
+        objectSpawnTimer = 0;
+        var aheadY = hillOffset() + H + 100;
+        spawnObjectAhead();
+    }
+
+    otherSkierSpawnTimer++;
+    if (otherSkierSpawnTimer > 300) {
+        otherSkierSpawnTimer = 0;
+        if (objects.filter(o => o.type === 'skier').length < 8) {
+            spawnOtherSkierAhead();
+        }
+    }
+
+    // Yeti logic
+    yetiSpawnTimer++;
+    if (!yeti && yetiSpawnTimer > 600 + Math.random() * 400) {
+        yetiSpawnTimer = 0;
+        spawnYeti();
+    }
+
+    if (yeti) {
+        yeti.timer++;
+        if (yeti.state === 'chasing') {
+            var ddx = skierX - yeti.x;
+            var ddy = skierY - yeti.y;
+            var d = Math.sqrt(ddx*ddx + ddy*ddy);
+            if (d > 50) {
+                yeti.x += (ddx / d) * 2.2;
+                yeti.y += (ddy / d) * 2.2;
+            }
+            if (d < 80 && yeti.timer > 120) {
+                yeti.state = 'waving';
+                yeti.timer = 0;
+            }
+        } else if (yeti.state === 'waving') {
+            yeti.armAngle = Math.sin(yeti.timer * 0.2) * 0.8;
+            if (yeti.timer > 90) {
+                yeti.state = 'fleeing';
+                yeti.timer = 0;
+            }
+        } else if (yeti.state === 'fleeing') {
+            yeti.x += (Math.random()-0.5)*3;
+            yeti.y += 3;
+            yeti.armAngle = Math.sin(yeti.timer * 0.1) * 1.2;
+            if (yeti.y > skierY + 200) {
+                yeti = null;
+                yetiState = 'sleeping';
+                yetiSpawnTimer = 0;
+            }
+        }
+
+        // UFO interaction
+        if (ufo && yeti) {
+            var ud = dist(ufo, yeti);
+            if (ud < 150 && !ufo.beamActive) {
+                ufo.beamActive = true;
+                yeti.state = 'fleeing';
+                setMsg('UFO! The yeti is beamed up!', 120);
+            }
+            if (ufo.beamActive && ufo.timer > 100) {
+                yeti = null;
+                ufo.beamActive = false;
+            }
+        }
+    }
+
+    // UFO logic
+    ufoTimer--;
+    if (ufoTimer <= 0 && !ufo && Math.random() < 0.001) {
+        spawnUFO();
+    }
+    if (ufo) {
+        ufo.timer++;
+        ufo.x += 3 * ufo.dir;
+        if (ufo.timer > 100 && ufo.timer < 200) {
+            ufo.beamActive = true;
+        }
+        if (ufo.x > W + 150) {
+            ufo = null;
+            ufo.beamActive = false;
+            ufoTimer = 300 + Math.random() * 600;
+        }
+    }
+
+    // Alien logic
+    alienTimer--;
+    if (!alien && alienTimer <= 0 && Math.random() < 0.002) {
+        spawnAlien();
+    }
+    if (alien) {
+        alien.timer++;
+        alien.x += alien.dir * 0.5;
+        alien.wave = Math.sin(alien.timer * 0.1) * 0.5;
+        if (alien.timer > 300

@@ -44,4 +44,460 @@
             top: 50px;
             width: 500px;
             height: 700px;
-           
+            background: #f0f0e0; /* Old paper color */
+            box-shadow: 0 0 10px rgba(0,0,0,0.2);
+            z-index: 1;
+            overflow: hidden;
+            transform: translateY(50px);
+        }
+
+        /* The ink layer (drawn on) */
+        #ink-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 2;
+            pointer-events: none;
+        }
+
+        /* The Carriage (holds the paper) */
+        #carriage {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 5;
+            display: flex;
+            justify-content: center;
+            align-items: flex-end;
+        }
+
+        /* The Platen (roller) */
+        #platen {
+            position: absolute;
+            top: 20px;
+            width: 540px;
+            height: 40px;
+            background: linear-gradient(to bottom, #111, #333, #111);
+            border-radius: 20px;
+            z-index: 6;
+            box-shadow: 0 5px 10px rgba(0,0,0,0.5);
+        }
+
+        /* The Type Bar (moves up and down) */
+        #type-bar {
+            position: absolute;
+            bottom: -50px; /* Hidden mostly */
+            width: 150px;
+            height: 100px;
+            z-index: 7;
+            transform-origin: bottom center;
+            transition: transform 0.05s ease-in;
+            pointer-events: none;
+        }
+        
+        #type-bar.striking {
+            animation: strike 0.1s ease-in-out;
+        }
+
+        @keyframes strike {
+            0% { transform: translateY(0) rotate(0deg); }
+            50% { transform: translateY(-180px) rotate(-2deg); }
+            100% { transform: translateY(0) rotate(0deg); }
+        }
+
+        /* Lamp Lighting Overlay */
+        #lamp-light {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: radial-gradient(circle at 50% 20%, rgba(255, 230, 150, 0.15) 0%, transparent 60%);
+            pointer-events: none;
+            z-index: 20;
+            mix-blend-mode: overlay;
+        }
+
+        /* The Bell */
+        #bell {
+            position: absolute;
+            top: 100px;
+            right: 100px;
+            width: 30px;
+            height: 30px;
+            background: #d4af37;
+            border-radius: 50%;
+            box-shadow: 0 0 5px rgba(0,0,0,0.5);
+            z-index: 15;
+            transition: background 0.1s, box-shadow 0.1s;
+        }
+        
+        #bell.ringing {
+            background: #ffaa00;
+            box-shadow: 0 0 20px #ffaa00, 0 0 40px #ffaa00;
+        }
+
+        /* Keys Base (Visual only) */
+        #keyboard-base {
+            position: absolute;
+            bottom: 0;
+            width: 100%;
+            height: 200px;
+            background: linear-gradient(to bottom, #222, #000);
+            border-radius: 0 0 20px 20px;
+            z-index: 11;
+            box-shadow: inset 0 10px 20px rgba(255,255,255,0.05);
+        }
+
+    </style>
+</head>
+<body>
+
+<div id="stage">
+    <div id="lamp-light"></div>
+    
+    <div id="typewriter">
+        <div id="paper-stack">
+            <canvas id="ink-layer" width="500" height="700"></canvas>
+        </div>
+
+        <div id="carriage">
+            <div id="platen"></div>
+        </div>
+
+        <!-- The type bar that hits the paper -->
+        <div id="type-bar"></div>
+
+        <div id="bell"></div>
+        <div id="keyboard-base"></div>
+    </div>
+</div>
+
+<script>
+    /**
+     * Word Lists for Haiku Generation
+     */
+    const words = {
+        nouns: ["moon", "wind", "rain", "leaf", "stone", "river", "cloud", "snow", "mist", "cricket", "shadow", "bamboo", "river", "lake", "pine", "petal", "star", "dawn", "dusk", "frog", "pond", "spring", "summer", "autumn", "winter", "bird", "branch", "root", "moss", "water"],
+        verbs: ["falls", "sleeps", "flows", "glows", "breaks", "sings", "drifts", "waits", "wakes", "falls", "rises", "changes", "falls", "grows", "fades", "remains", "moves", "stands", "weeps", "bloom"],
+        adjectives: ["old", "cold", "deep", "still", "silent", "blue", "gray", "green", "wet", "dry", "dark", "light", "heavy", "soft", "hard", "ancient", "new", "lonely", "bright", "dim"],
+        connectors: ["and", "but", "the", "a", "in", "on", "under", "above", "with", "without"]
+    };
+
+    /**
+     * Configuration
+     */
+    const canvas = document.getElementById('ink-layer');
+    const ctx = canvas.getContext('2d');
+    const carriage = document.getElementById('carriage');
+    const typeBar = document.getElementById('type-bar');
+    const bell = document.getElementById('bell');
+    
+    // Typing metrics
+    const lineHeight = 45;
+    const charWidth = 14; // Average monospace width
+    const margin = 40;
+    const maxLines = 13; // Lines per page
+    
+    // State
+    let state = {
+        x: margin,
+        y: margin,
+        carriageOffset: 0, // For return animation
+        lineIndex: 0,
+        currentLine: "",
+        buffer: [], // Characters to be typed
+        isRetyping: false,
+        isScrolling: false,
+        isTearing: false
+    };
+
+    /**
+     * Haiku Logic
+     */
+    function getRandomWord(arr) {
+        return arr[Math.floor(Math.random() * arr.length)];
+    }
+
+    function generateHaikuLine() {
+        // Simple 5-7-5 syllable simulation
+        const structures = [
+            [2, 3], [2, 3], [1, 4], // 5
+            [3, 4], [2, 5], [4, 3], // 7
+            [2, 3], [3, 2], [1, 4]  // 5
+        ];
+        
+        // Pick a random combo for 5
+        const s5 = structures[Math.floor(Math.random() * 3)];
+        const line5 = `${getRandomWord(words.adjectives)} ${getRandomWord(words.nouns)} ${getRandomWord(words.verbs)}`;
+        
+        // Pick a random combo for 7
+        const s7 = structures[3 + Math.floor(Math.random() * 3)];
+        const line7 = `${getRandomWord(words.adjectives)} ${getRandomWord(words.nouns)} ${getRandomWord(words.verbs)} ${getRandomWord(words.nouns)}`;
+        
+        // Pick a random combo for 5
+        const s5b = structures[6 + Math.floor(Math.random() * 3)];
+        const line5b = `${getRandomWord(words.nouns)} ${getRandomWord(words.adjectives)} ${getRandomWord(words.verbs)}`;
+
+        return [line5, line7, line5b];
+    }
+
+    let haikuQueue = [];
+
+    function prepareNextLine() {
+        if (haikuQueue.length === 0) {
+            haikuQueue = generateHaikuLine();
+        }
+        return haikuQueue.pop();
+    }
+
+    /**
+     * Rendering Logic
+     */
+    function setupCanvas() {
+        ctx.fillStyle = "#f0f0e0";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        // Add some noise to paper
+        ctx.fillStyle = "rgba(0,0,0,0.05)";
+        for(let i=0; i<500; i++) {
+            ctx.fillRect(Math.random() * canvas.width, Math.random() * canvas.height, 2, 2);
+        }
+    }
+
+    function printCharacter(char) {
+        if (state.x > canvas.width - margin) {
+            // Auto new line if word is too long (rare edge case)
+            nextLine();
+        }
+
+        // Ink effect
+        ctx.font = "24px 'Courier New'";
+        ctx.fillStyle = `rgba(20, 20, 30, ${0.8 + Math.random() * 0.2})`; // Slight variation
+        
+        // Slight random rotation for uneven impression
+        const angle = (Math.random() - 0.5) * 0.1;
+        
+        ctx.save();
+        ctx.translate(state.x, state.y);
+        ctx.rotate(angle);
+        
+        // Draw shadow/offset for 3D ink effect
+        ctx.shadowColor = "rgba(0,0,0,0.2)";
+        ctx.shadowBlur = 2;
+        ctx.shadowOffsetX = 1;
+        ctx.shadowOffsetY = 1;
+        
+        ctx.fillText(char, 0, 0);
+        
+        // Redraw text without shadow for clarity
+        ctx.shadowColor = "transparent";
+        ctx.fillText(char, 0, 0);
+        
+        ctx.restore();
+
+        state.x += charWidth;
+    }
+
+    function nextLine() {
+        state.y += lineHeight;
+        state.x = margin;
+        state.lineIndex++;
+    }
+
+    function updateCarriageVisual() {
+        // The carriage moves left as text is typed
+        const offset = -(state.x - margin);
+        carriage.style.transform = `translateX(${offset}px)`;
+    }
+
+    /**
+     * Animation & Timing
+     */
+    
+    // The typing loop
+    function typeLoop() {
+        if (state.isRetyping) {
+            // Handle X strike retyping
+            setTimeout(typeLoop, 300); // Pause before retyping
+            return;
+        }
+
+        if (state.isScrolling || state.isTearing) {
+            setTimeout(typeLoop, 100);
+            return;
+        }
+
+        // Check if page is full
+        if (state.y + lineHeight > canvas.height - margin) {
+            triggerPageTear();
+            return;
+        }
+
+        // If we have chars in buffer, type one
+        if (state.buffer.length > 0) {
+            const char = state.buffer.shift();
+            performStrike(char, () => {
+                setTimeout(typeLoop, Math.random() * 50 + 30); // Random typing speed
+            });
+        } else {
+            // Buffer empty, load more
+            loadTextBuffer();
+            // Don't recurse immediately, wait for loadTextBuffer logic to fill it
+            setTimeout(typeLoop, 100);
+        }
+    }
+
+    function loadTextBuffer() {
+        // If current line is empty and buffer is empty, start new line
+        if (state.currentLine === "" && state.buffer.length === 0) {
+            state.currentLine = prepareNextLine();
+        }
+
+        // If current line has content, add to buffer
+        if (state.currentLine.length > 0) {
+            // Add space if needed
+            if (state.buffer.length > 0 && state.currentLine[0] !== ' ' && state.x > margin) {
+                state.buffer.push(' ');
+            }
+            
+            const char = state.currentLine.shift();
+            state.buffer.push(char);
+        }
+    }
+
+    function performStrike(char, callback) {
+        // Animate Type Bar
+        typeBar.classList.remove('striking');
+        void typeBar.offsetWidth; // Trigger reflow
+        typeBar.classList.add('striking');
+
+        // Move type bar position to current X
+        const barX = state.x; 
+        // The type bar in DOM is centered. We need to position the 'head' of the bar 
+        // relative to the paper. 
+        // Actually, simpler: The paper moves (carriage). The type bar stays fixed relative to frame 
+        // but visually we need it to look like it's hitting the specific spot.
+        // With the carriage moving, the type bar (fixed in DOM) will naturally hit the paper at different spots.
+        // But wait, in CSS `#type-bar` is absolute. Let's fix it to be aligned with the margin visually?
+        // No, the paper moves left. So the type bar needs to be positioned at the right of the paper stack?
+        // Easiest visual hack: Keep type bar at center of screen (where platen is), move paper left.
+        
+        // Let's position the type bar relative to the paper container using the X coordinate logic
+        // Since the paper moves left via CSS transform, the type bar should stay at a fixed point.
+        // Let's assume the platen center is roughly the strike zone.
+        // We will position the type bar absolutely based on the canvas context.
+        
+        // Re-positioning logic:
+        // Canvas width 500. Center is 250.
+        // x is 0..500.
+        // DOM x = ContainerLeft + (250 - x) approx.
+        // Actually, simpler:
+        // The paper div is 500px wide.
+        // We translate the paper left by `state.x - margin`.
+        // So the point `state.x` on the paper is currently at:
+        // 0 (start) - (state.x - margin) = margin - state.x.
+        // We need the Type Bar to be at that position.
+        
+        typeBar.style.left = `${(margin - state.x) + 250}px`; // 250 is half of typewriter width approx (800/2 = 400, paper width 500, center offset 50... math gets tricky).
+        
+        // Let's do simpler: 
+        // Paper is centered in typewriter.
+        // Typewriter width 800. Paper 500.
+        // Paper Left = 150. Paper Center = 400.
+        // If x=0 (margin), we want bar at 150+40.
+        // If x=200, we want bar at 150+240.
+        // Formula: BarPos = 150 + 40 + state.x.
+        // But wait, if paper moves left, the bar stays still.
+        // So BarPos should be constant? No, the paper moves.
+        // If the paper moves left, the text moves left under the stationary bar.
+        // So the bar stays at the "writing position".
+        // Where is the writing position?
+        // It's usually slightly right of center.
+        // Let's say writing position is at Canvas X = 250 (Center).
+        // So when x=250, the bar is in the middle.
+        
+        // Let's fix the type bar in the DOM to be fixed in space.
+        // We calculate its Left style based on the current X so it stays on top of the letter.
+        // Wait, if the paper moves, the letter moves. The bar must move with it? 
+        // NO. In a typewriter, the carriage (paper) moves. The type bar is fixed.
+        // So: 
+        // 1. Move Paper (Carriage transform).
+        // 2. Draw on Paper (Canvas).
+        // 3. Type Bar stays fixed at the "Type Impact Point".
+        
+        // Let's place the Type Bar at the center of the Typewriter frame (x=400).
+        // The Paper Center is at x=400.
+        // So if x=250 (middle of paper), impact is at 400.
+        // If x=0 (left of paper), impact is at 150.
+        // If x=500 (right of paper), impact is at 650.
+        
+        // So, Type Bar Left = 150 + state.x.
+        // Let's verify. 
+        // Carriage moves left by (state.x - margin).
+        // So Paper Left becomes 150 - (state.x - margin).
+        // Impact Point (fixed) = 400.
+        // Relative Impact on Paper = 400 - (150 - state.x + margin) = 250 - margin + state.x.
+        // This is getting complicated.
+        
+        // Visual Trick:
+        // Just place the Type Bar absolutely.
+        // We want it to hit the character we are about to print.
+        // The character is at `state.x` on the canvas.
+        // The canvas is moving.
+        // Let's fix the Type Bar to be at `Left: 150px` (Left edge of paper).
+        // And we move the Canvas? No.
+        
+        // Let's stick to: Carriage moves left.
+        // Carriage Left = 150.
+        // Carriage Transform X = -(state.x - margin).
+        // We want the Type Bar to hit the point `state.x` on the paper.
+        // That point is currently at: 150 + state.x + (-(state.x - margin)) = 150 + margin.
+        // So the Type Bar should be fixed at Left = 150 + margin (approx 190px).
+        
+        typeBar.style.left = "190px"; 
+
+        // Print
+        printCharacter(char);
+        updateCarriageVisual();
+
+        // Bell logic
+        if (state.x > canvas.width - margin - 50) {
+            bell.classList.add('ringing');
+            setTimeout(() => bell.classList.remove('ringing'), 200);
+        }
+
+        // Completion
+        setTimeout(callback, 80);
+    }
+
+    /**
+     * Complex Actions
+     */
+
+    // X Strike (Cross out word)
+    function triggerXStrike() {
+        state.isRetyping = true;
+        
+        // Find last word typed
+        // We need to look at the visual text or track it.
+        // Simple: go back N pixels.
+        // Let's just go back 200 pixels to be safe and cross out the end.
+        const startX = state.x;
+        const startY = state.y;
+        
+        // Draw X's
+        ctx.strokeStyle = "rgba(20, 20, 30, 0.8)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        // Draw some random scribbles
+        for(let i=0; i<5; i++) {
+            const lx = startX - (i * 10);
+            const ly = startY - 10;
+            ctx.moveTo(lx, ly);
+            ctx.lineTo(lx - 10, ly + 10);
+        }

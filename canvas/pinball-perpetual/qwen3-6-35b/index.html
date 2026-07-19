@@ -46,4 +46,558 @@
             text-align: center;
             padding: 20px;
             text-shadow: 0 0 10px #fff;
-            font-size: 
+            font-size: 32px;
+            font-weight: bold;
+            color: #0ff;
+        }
+        
+        .score-label {
+            font-size: 14px;
+            color: #888;
+            display: block;
+            margin-bottom: 5px;
+        }
+
+        #status-msg {
+            position: absolute;
+            bottom: 20px;
+            width: 100%;
+            text-align: center;
+            color: #ff0055;
+            font-size: 20px;
+            text-shadow: 0 0 10px #ff0055;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <canvas id="pinballCanvas"></canvas>
+    <div id="ui-layer">
+        <div class="score-board">
+            <span class="score-label">SCORE</span>
+            <span id="score">0</span>
+        </div>
+        <div id="status-msg">BALL DRAINED</div>
+    </div>
+</div>
+
+<script>
+/**
+ * PINBALL ENGINE
+ * Pure Canvas + JS. No external assets.
+ */
+
+const canvas = document.getElementById('pinballCanvas');
+const ctx = canvas.getContext('2d');
+const scoreEl = document.getElementById('score');
+const statusEl = document.getElementById('status-msg');
+
+// Configuration
+const WIDTH = 500;
+const HEIGHT = 800;
+canvas.width = WIDTH;
+canvas.height = HEIGHT;
+
+// Physics Constants
+const GRAVITY = 0.25;
+const FRICTION = 0.99;
+const BOUNCE_DAMPING = 0.7;
+const FLIPPER_FORCE = 1.8;
+const MAX_SPEED = 25;
+const BALL_RADIUS = 10;
+
+// Game State
+let score = 0;
+let particles = [];
+let popups = [];
+let lastTime = 0;
+
+// Input State (Simulated AI)
+const input = {
+    leftPressed: false,
+    rightPressed: false,
+    launcherCharged: false
+};
+
+// ---------------------------------------------------------
+// CLASSES
+// ---------------------------------------------------------
+
+class Vector {
+    constructor(x, y) { this.x = x; this.y = y; }
+    add(v) { return new Vector(this.x + v.x, this.y + v.y); }
+    sub(v) { return new Vector(this.x - v.x, this.y - v.y); }
+    mult(n) { return new Vector(this.x * n, this.y * n); }
+    mag() { return Math.sqrt(this.x * this.x + this.y * this.y); }
+    norm() { let m = this.mag(); return m === 0 ? new Vector(0,0) : new Vector(this.x/m, this.y/m); }
+    dot(v) { return this.x * v.x + this.y * v.y; }
+    dist(v) { return Math.sqrt((this.x - v.x)**2 + (this.y - v.y)**2); }
+}
+
+class Ball {
+    constructor() {
+        this.reset();
+    }
+
+    reset() {
+        // Start in launcher channel
+        this.pos = new Vector(WIDTH - 25, HEIGHT - 50);
+        this.vel = new Vector(0, 0);
+        this.inPlay = false;
+        this.stuckTimer = 0;
+    }
+
+    launch() {
+        this.inPlay = true;
+        // Random slight angle to the left
+        this.vel = new Vector(-2 + Math.random() * 1, -20 - Math.random() * 5);
+    }
+
+    update() {
+        // Gravity
+        this.vel.y += GRAVITY;
+
+        // Friction
+        this.vel = this.vel.mult(FRICTION);
+
+        // Cap Speed
+        let speed = this.vel.mag();
+        if (speed > MAX_SPEED) {
+            this.vel = this.vel.norm().mult(MAX_SPEED);
+        }
+
+        // Move
+        this.pos = this.pos.add(this.vel);
+
+        // Wall Collisions (Simple Box Boundaries)
+        if (this.pos.x < BALL_RADIUS) {
+            this.pos.x = BALL_RADIUS;
+            this.vel.x *= -0.5;
+        } else if (this.pos.x > WIDTH - BALL_RADIUS) {
+            this.pos.x = WIDTH - BALL_RADIUS;
+            this.vel.x *= -0.5;
+        }
+
+        // Top Wall
+        if (this.pos.y < BALL_RADIUS) {
+            this.pos.y = BALL_RADIUS;
+            this.vel.y *= -0.5;
+        }
+
+        // Drain Check
+        if (this.pos.y > HEIGHT + 50) {
+            return 'drain';
+        }
+
+        return 'active';
+    }
+
+    draw() {
+        ctx.beginPath();
+        ctx.arc(this.pos.x, this.pos.y, BALL_RADIUS, 0, Math.PI * 2);
+        ctx.fillStyle = '#fff';
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = '#fff';
+        ctx.fill();
+        ctx.shadowBlur = 0;
+    }
+}
+
+class Flipper {
+    constructor(x, y, type) {
+        this.pivot = new Vector(x, y);
+        this.length = 80;
+        this.type = type; // 'left' or 'right'
+        this.angle = type === 'left' ? Math.PI / 6 : Math.PI - Math.PI / 6;
+        this.restAngle = type === 'left' ? Math.PI / 6 : Math.PI - Math.PI / 6;
+        this.activeAngle = type === 'left' ? -Math.PI / 6 : Math.PI + Math.PI / 6;
+        this.currentAngle = this.restAngle;
+        this.width = 15;
+    }
+
+    toggle(active) {
+        // AI Imperfection: Random chance to miss or delay slightly
+        if (active) {
+            this.currentAngle = this.activeAngle;
+        } else {
+            this.currentAngle = this.restAngle;
+        }
+    }
+
+    update() {
+        // Smooth transition
+        let target = this.currentAngle;
+        let speed = 0.2;
+        if (Math.abs(this.angle - target) > 0.01) {
+            this.angle += (target - this.angle) * 15 * (1/60); // Fast movement
+        } else {
+            this.angle = target;
+        }
+    }
+
+    draw() {
+        const end = new Vector(
+            this.pivot.x + Math.cos(this.angle) * this.length,
+            this.pivot.y + Math.sin(this.angle) * this.length
+        );
+
+        ctx.save();
+        ctx.translate(this.pivot.x, this.pivot.y);
+        ctx.rotate(this.angle);
+        
+        ctx.fillStyle = '#0ff';
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = '#0ff';
+        
+        // Draw rounded rect for flipper
+        ctx.beginPath();
+        ctx.roundRect(0, -this.width/2, this.length, this.width, 10);
+        ctx.fill();
+        
+        ctx.restore();
+    }
+
+    getEndpoint() {
+        return new Vector(
+            this.pivot.x + Math.cos(this.angle) * this.length,
+            this.pivot.y + Math.sin(this.angle) * this.length
+        );
+    }
+    
+    // Collision logic: Ball vs Line Segment
+    checkCollision(ball) {
+        const p1 = this.pivot;
+        const p2 = this.getEndpoint();
+        
+        // Vector from p1 to p2
+        const lineVec = p2.sub(p1);
+        // Vector from p1 to ball
+        const ballVec = ball.pos.sub(p1);
+        
+        // Project ball vector onto line (t parameter 0..1)
+        const lineLen = lineVec.mag();
+        const lineUnit = lineVec.norm();
+        let t = ballVec.dot(lineUnit) / lineLen;
+        t = Math.max(0, Math.min(1, t));
+        
+        // Closest point on line segment
+        const closest = p1.add(lineUnit.mult(t * lineLen));
+        const dist = ball.pos.dist(closest);
+        
+        if (dist < BALL_RADIUS + this.width/2) {
+            // Collision detected
+            let normal = ball.pos.sub(closest).norm();
+            
+            // Reflect velocity
+            // V_new = V - 2(V . N)N
+            let dot = ball.vel.dot(normal);
+            ball.vel = ball.vel.sub(normal.mult(2 * dot));
+            
+            // Add flipper impulse
+            // If flipper is moving (active), add extra force
+            let isMoving = (this.currentAngle !== this.restAngle);
+            let impulse = isMoving ? FLIPPER_FORCE : 0.5;
+            
+            // Push ball out of collision to prevent sticking
+            ball.pos = closest.add(normal.mult(BALL_RADIUS + this.width/2 + 1));
+            
+            // Add velocity based on flipper rotation direction
+            if (isMoving) {
+                // Tangent of rotation
+                ball.vel = ball.vel.add(normal.mult(impulse * 2));
+                // Spin effect
+                ball.vel.x += (this.type === 'left' ? 2 : -2);
+            } else {
+                // Dead bounce
+                ball.vel = ball.vel.mult(0.5);
+            }
+            
+            return true;
+        }
+        return false;
+    }
+}
+
+class Bumper {
+    constructor(x, y, radius, scoreVal, color) {
+        this.pos = new Vector(x, y);
+        this.radius = radius;
+        this.scoreVal = scoreVal;
+        this.color = color;
+        this.flash = 0;
+    }
+
+    draw() {
+        ctx.beginPath();
+        ctx.arc(this.pos.x, this.pos.y, this.radius, 0, Math.PI * 2);
+        ctx.fillStyle = this.flash > 0 ? '#fff' : this.color;
+        ctx.shadowBlur = this.flash > 0 ? 30 : 10;
+        ctx.shadowColor = this.color;
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+
+        if (this.flash > 0) this.flash--;
+    }
+
+    checkCollision(ball) {
+        let d = ball.pos.dist(this.pos);
+        if (d < this.radius + BALL_RADIUS) {
+            // Push out
+            let normal = ball.pos.sub(this.pos).norm();
+            ball.pos = this.pos.add(normal.mult(this.radius + BALL_RADIUS + 1));
+            
+            // Bounce
+            ball.vel = ball.vel.add(normal.mult(1)); // Bumper force
+            ball.vel = ball.vel.mult(1.2); // Boost speed
+            
+            // Effects
+            this.flash = 10;
+            addScore(this.scoreVal, ball.pos.x, ball.pos.y, this.color);
+            createParticles(ball.pos.x, ball.pos.y, this.color);
+            return true;
+        }
+        return false;
+    }
+}
+
+class Wall {
+    constructor(x1, y1, x2, y2) {
+        this.p1 = new Vector(x1, y1);
+        this.p2 = new Vector(x2, y2);
+    }
+    
+    draw() {
+        ctx.beginPath();
+        ctx.moveTo(this.p1.x, this.p1.y);
+        ctx.lineTo(this.p2.x, this.p2.y);
+        ctx.strokeStyle = '#555';
+        ctx.lineWidth = 5;
+        ctx.stroke();
+    }
+
+    checkCollision(ball) {
+        // Line segment collision
+        let lineVec = this.p2.sub(this.p1);
+        let ballVec = ball.pos.sub(this.p1);
+        let lineLen = lineVec.mag();
+        let lineUnit = lineVec.norm();
+        
+        let t = ballVec.dot(lineUnit) / lineLen;
+        t = Math.max(0, Math.min(1, t));
+        
+        let closest = this.p1.add(lineUnit.mult(t * lineLen));
+        let dist = ball.pos.dist(closest);
+        
+        if (dist < BALL_RADIUS) {
+            let normal = ball.pos.sub(closest).norm();
+            let dot = ball.vel.dot(normal);
+            ball.vel = ball.vel.sub(normal.mult(2 * dot));
+            ball.vel = ball.vel.mult(BOUNCE_DAMPING);
+            ball.pos = closest.add(normal.mult(BALL_RADIUS + 1));
+            return true;
+        }
+        return false;
+    }
+}
+
+// ---------------------------------------------------------
+// GAME OBJECTS
+// ---------------------------------------------------------
+
+const ball = new Ball();
+const leftFlipper = new Flipper(150, 650, 'left');
+const rightFlipper = new Flipper(350, 650, 'right');
+
+// Table Layout
+const bumpers = [
+    new Bumper(250, 200, 25, 100, '#f0f'), // Top Center
+    new Bumper(150, 300, 20, 50, '#0f0'), // Left
+    new Bumper(350, 300, 20, 50, '#0f0'), // Right
+    new Bumper(200, 450, 20, 75, '#ff0'), // Left Low
+    new Bumper(300, 450, 20, 75, '#ff0')  // Right Low
+];
+
+// Slingshots (Triangular walls that kick ball)
+const walls = [
+    // Left Wall
+    new Wall(50, 550, 120, 650),
+    // Right Wall
+    new Wall(450, 550, 380, 650),
+    // Top Arch (approximated with segments)
+    new Wall(50, 450, 50, 100),
+    new Wall(50, 100, 100, 50),
+    new Wall(100, 50, 400, 50),
+    new Wall(400, 50, 450, 100),
+    new Wall(450, 100, 450, 450),
+    // Guide rails for flippers
+    new Wall(100, 650, 130, 700),
+    new Wall(400, 650, 370, 700),
+    // Launcher wall
+    new Wall(WIDTH - 40, 0, WIDTH - 40, HEIGHT)
+];
+
+// Spinner (Rotating obstacle)
+const spinner = {
+    pos: new Vector(250, 550),
+    angle: 0,
+    length: 60,
+    update: function() {
+        this.angle += 0.1;
+    },
+    draw: function() {
+        ctx.save();
+        ctx.translate(this.pos.x, this.pos.y);
+        ctx.rotate(this.angle);
+        ctx.fillStyle = '#f00';
+        ctx.fillRect(-this.length/2, -5, this.length, 10);
+        ctx.restore();
+    },
+    checkCollision: function(ball) {
+        // Treat as a rotating line segment
+        let p1 = this.pos;
+        let p2 = new Vector(
+            this.pos.x + Math.cos(this.angle) * this.length,
+            this.pos.y + Math.sin(this.angle) * this.length
+        );
+        let lineVec = p2.sub(p1);
+        let ballVec = ball.pos.sub(p1);
+        let lineLen = lineVec.mag();
+        let lineUnit = lineVec.norm();
+        let t = ballVec.dot(lineUnit) / lineLen;
+        t = Math.max(0, Math.min(1, t));
+        let closest = p1.add(lineUnit.mult(t * lineLen));
+        let dist = ball.pos.dist(closest);
+        
+        if (dist < BALL_RADIUS + 5) {
+            let normal = ball.pos.sub(closest).norm();
+            let dot = ball.vel.dot(normal);
+            ball.vel = ball.vel.sub(normal.mult(2 * dot));
+            ball.vel = ball.vel.mult(0.8);
+            addScore(10, this.pos.x, this.pos.y - 20, '#f00');
+        }
+    }
+};
+
+// ---------------------------------------------------------
+// EFFECTS & HELPERS
+// ---------------------------------------------------------
+
+function addScore(val, x, y, color) {
+    score += val;
+    scoreEl.innerText = score;
+    
+    popups.push({
+        text: val,
+        x: x,
+        y: y,
+        vy: -2,
+        life: 1.0,
+        color: color
+    });
+}
+
+function createParticles(x, y, color) {
+    for(let i=0; i<10; i++) {
+        particles.push({
+            x: x,
+            y: y,
+            vx: (Math.random() - 0.5) * 10,
+            vy: (Math.random() - 0.5) * 10,
+            life: 1.0,
+            color: color
+        });
+    }
+}
+
+function drawLauncher() {
+    // Draw plunger area
+    ctx.fillStyle = '#222';
+    ctx.fillRect(WIDTH - 35, 0, 35, HEIGHT);
+    
+    // Draw Plunger
+    let pX = WIDTH - 15;
+    let pY = HEIGHT - 50;
+    if (input.launcherCharged) {
+        pY = HEIGHT - 50 + (50 * 0.5); // Compressed
+    }
+    
+    ctx.fillStyle = '#888';
+    ctx.fillRect(pX - 10, pY, 20, 20);
+}
+
+// ---------------------------------------------------------
+// AI LOGIC
+// ---------------------------------------------------------
+
+function runAI() {
+    // If ball is in play and below a certain point, flippers activate
+    // Add imperfection: delay and randomness
+    
+    const triggerY = 500;
+    const ballX = ball.pos.x;
+    
+    // Left Flipper Logic
+    if (ball.pos.y > triggerY && ball.pos.x < WIDTH/2) {
+        // Ball is on left side, low down
+        if (Math.random() < 0.15) input.leftPressed = true;
+    } else {
+        input.leftPressed = false;
+    }
+
+    // Right Flipper Logic
+    if (ball.pos.y > triggerY && ball.pos.x >= WIDTH/2) {
+        if (Math.random() < 0.15) input.rightPressed = true;
+    } else {
+        input.rightPressed = false;
+    }
+
+    // Launcher Logic
+    if (!ball.inPlay) {
+        // AI waits a random time then shoots
+        if (Math.random() < 0.02) {
+            statusEl.style.opacity = 1;
+            statusEl.innerText = "RELOADING...";
+            setTimeout(() => {
+                ball.launch();
+                statusEl.style.opacity = 0;
+            }, 800 + Math.random() * 1000);
+        }
+    }
+}
+
+// ---------------------------------------------------------
+// MAIN LOOP
+// ---------------------------------------------------------
+
+function update() {
+    runAI();
+    
+    // Update Flippers
+    leftFlipper.toggle(input.leftPressed);
+    rightFlipper.toggle(input.rightPressed);
+    leftFlipper.update();
+    rightFlipper.update();
+    
+    // Update Spinner
+    spinner.update();
+
+    // Update Ball
+    let status = ball.update();
+    
+    if (status === 'drain') {
+        ball.reset();
+        // Small penalty
+        addScore(-500, WIDTH/2, HEIGHT/2, '#888');
+    }
+
+    // Collisions: Ball vs Bumpers
+    bumpers.forEach(b => b.checkCollision(ball));
+    
+    // Collisions: Ball vs Walls
+    walls.forEach(w => w

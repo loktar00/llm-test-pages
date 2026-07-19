@@ -11,36 +11,565 @@
             width: 100%;
             height: 100%;
             overflow: hidden;
-            background-color: #000;
-            font-family: sans-serif;
+            background-color: #1a1a1a;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         }
         canvas {
             display: block;
         }
+        #ui {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            color: rgba(255, 255, 255, 0.7);
+            pointer-events: none;
+            font-size: 14px;
+        }
     </style>
 </head>
 <body>
-    <canvas id="simCanvas"></canvas>
-    <script>
-        const canvas = document.getElementById('simCanvas');
-        const ctx = canvas.getContext('2d');
 
-        let width, height;
-        let isometricScale = 40;
-        const mapSize = 30; // Size of the grid (30x30)
-        const halfTileW = 20; // Visual width of half a tile
-        const halfTileH = 10; // Visual height of half a tile
+<div id="ui">
+    <div id="status">Phase: Nature</div>
+    <div id="population">Pop: 0</div>
+</div>
+<canvas id="cityCanvas"></canvas>
 
-        // Configuration
-        const CYCLE_DURATION = 18000; // Total ms for full cycle (Growth -> Peak -> Decay -> Reset)
-        const GROWTH_START = 0.0;
-        const PEAK_START = 0.4;
-        const DECAY_START = 0.7;
-        const RESET_START = 0.9;
+<script>
+/**
+ * CONFIGURATION & CONSTANTS
+ */
+const CONFIG = {
+    gridSize: 60,
+    tileSize: 40,
+    gridRows: 20,
+    gridCols: 40,
+    color: {
+        grass: '#5c9e5c',
+        grassDark: '#4a854a',
+        road: '#555555',
+        water: '#334455',
+        ruin: '#3a3a3a',
+        overgrowth: '#2d402d'
+    },
+    phases: {
+        NATURE: 0,
+        GROWTH: 1,
+        PEAK: 2,
+        DECAY: 3,
+        RUIN: 4
+    },
+    phaseDurations: {
+        NATURE: 4000,
+        GROWTH: 12000,
+        PEAK: 15000,
+        DECAY: 10000,
+        RUIN: 8000
+    }
+};
+
+/**
+ * UTILS
+ */
+const rand = (min, max) => Math.random() * (max - min) + min;
+const randInt = (min, max) => Math.floor(rand(min, max));
+const dist = (x1, y1, x2, y2) => Math.sqrt((x2-x1)**2 + (y2-y1)**2);
+
+/**
+ * ISOMETRIC MATH
+ */
+function toIso(x, y, z = 0) {
+    return {
+        x: (x - y) * CONFIG.tileSize + (document.getElementById('cityCanvas').width / 2),
+        y: (x + y) * (CONFIG.tileSize / 2) - z + (document.getElementById('cityCanvas').height / 4)
+    };
+}
+
+/**
+ * CLASSES
+ */
+
+class Tile {
+    constructor(c, r) {
+        this.c = c;
+        this.r = r;
+        this.baseHeight = (Math.sin(c * 0.2) + Math.cos(r * 0.2)) * 0.5; // Gentle rolling hills
+        this.z = this.baseHeight;
         
-        // State
-        let cycleTime = 0;
-        let grid = [];
-        let entities = []; // Cars, particles
-        let particles = []; // Floating text or dust
-        let last
+        this.type = 'grass'; // grass, road
+        this.building = null;
+        this.density = 0; // 0 to 1 (how grown the tile is)
+        
+        // For trees
+        this.hasTree = false;
+        this.treeType = randInt(0, 2);
+        this.treeScale = rand(0.8, 1.2);
+    }
+
+    draw(ctx, phase, time) {
+        const pos = toIso(this.c, this.r, this.z);
+        const hw = CONFIG.tileSize;
+        const hh = CONFIG.tileSize / 2;
+
+        // 1. Draw Base Tile (Ground)
+        ctx.beginPath();
+        ctx.moveTo(pos.x, pos.y);
+        ctx.lineTo(pos.x + hw, pos.y + hh);
+        ctx.lineTo(pos.x, pos.y + hh * 2);
+        ctx.lineTo(pos.x - hw, pos.y + hh);
+        ctx.closePath();
+
+        // Color logic
+        let color = CONFIG.color.grass;
+        if (this.type === 'road') color = CONFIG.color.road;
+        
+        if (phase === CONFIG.phases.RUIN) {
+            // Mix ruin color over everything
+            ctx.fillStyle = lerpColor(color, CONFIG.color.ruin, 0.6);
+        } else if (phase === CONFIG.phases.NATURE) {
+            // Natural variation
+            ctx.fillStyle = (this.c + this.r) % 2 === 0 ? CONFIG.color.grass : CONFIG.color.grassDark;
+        } else {
+            ctx.fillStyle = color;
+        }
+        ctx.fill();
+
+        // Tile Border
+        ctx.strokeStyle = 'rgba(0,0,0,0.1)';
+        ctx.stroke();
+
+        // 2. Draw Objects (Tree or Building)
+        if (this.building || (this.hasTree && phase === CONFIG.phases.NATURE)) {
+            this.drawObject(ctx, pos, phase);
+        }
+    }
+
+    drawObject(ctx, pos, phase) {
+        if (this.hasTree && !this.building) {
+            // Draw Tree
+            const treeH = 30 * this.treeScale;
+            const scale = 0.8;
+            
+            ctx.save();
+            ctx.translate(pos.x, pos.y - (CONFIG.tileSize * 0.2)); // slightly above tile
+            
+            // Trunk
+            ctx.fillStyle = '#4a3c31';
+            ctx.fillRect(-3, -treeH/2, 6, treeH/2);
+
+            // Leaves (Isometric Cone)
+            ctx.fillStyle = '#2e8a2e';
+            ctx.beginPath();
+            ctx.moveTo(0, -treeH);
+            ctx.lineTo(15 * scale, -treeH/2);
+            ctx.lineTo(0, -treeH/4);
+            ctx.lineTo(-15 * scale, -treeH/2);
+            ctx.fill();
+            
+            ctx.fillStyle = '#3da83d';
+            ctx.beginPath();
+            ctx.moveTo(0, -treeH);
+            ctx.lineTo(15 * scale, -treeH/2);
+            ctx.lineTo(0, -treeH/3);
+            ctx.lineTo(0, -treeH);
+            ctx.fill();
+
+            ctx.restore();
+        }
+
+        if (this.building) {
+            this.building.draw(ctx, pos, this.type);
+        }
+    }
+
+    // Helper to determine if we can build (must be grass, no building, not road)
+    isBuildable() {
+        return this.type === 'grass' && !this.building;
+    }
+}
+
+class Building {
+    constructor(type) {
+        this.type = type; // house, factory, office
+        this.age = 0;
+        this.health = 100;
+        
+        // Visuals
+        if (type === 'house') {
+            this.h = 20;
+            this.colorBody = '#d47878';
+            this.colorRoof = '#8a3a3a';
+            this.w = 12;
+            this.d = 12;
+        } else if (type === 'factory') {
+            this.h = 35;
+            this.colorBody = '#788a9a';
+            this.colorRoof = '#4a5a6a';
+            this.w = 20;
+            this.d = 15;
+            this.hasChimney = true;
+        } else { // office
+            this.h = 50 + rand(0, 20);
+            this.colorBody = '#78a8d4';
+            this.colorRoof = '#4a6a8a';
+            this.w = 15;
+            this.d = 15;
+        }
+    }
+
+    draw(ctx, pos, groundType) {
+        // Offset position to center of tile
+        const x = pos.x;
+        const y = pos.y;
+        
+        // Dimensions
+        const hw = this.w; 
+        const hh = this.d / 2; // isometric depth scaling
+
+        // Shake if damaged or ruined
+        let shakeX = 0;
+        let shakeY = 0;
+        if (this.health < 50) {
+            shakeX = rand(-1, 1);
+            shakeY = rand(-1, 1);
+        }
+
+        ctx.save();
+        ctx.translate(x + shakeX, y + shakeY);
+
+        // Draw 3D Box
+        // Front Face
+        ctx.fillStyle = this.colorBody;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(-hw, -hh);
+        ctx.lineTo(-hw, -(hh + this.h));
+        ctx.lineTo(0, -this.h);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        // Right Face
+        ctx.fillStyle = adjustColor(this.colorBody, -20);
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(hw, -hh);
+        ctx.lineTo(hw, -(hh + this.h));
+        ctx.lineTo(0, -this.h);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        // Roof
+        ctx.fillStyle = this.colorRoof;
+        ctx.beginPath();
+        ctx.moveTo(0, -this.h);
+        ctx.lineTo(hw, -(hh + this.h));
+        ctx.lineTo(0, -(hh * 2 + this.h));
+        ctx.lineTo(-hw, -(hh + this.h));
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        // Chimney (Factory)
+        if (this.hasChimney) {
+            ctx.fillStyle = '#333';
+            ctx.fillRect(hw * 0.5, -(hh + this.h) - 10, 5, 10);
+            
+            // Smoke
+            if (Math.random() > 0.9) {
+                ctx.fillStyle = 'rgba(100,100,100,0.5)';
+                ctx.beginPath();
+                ctx.arc(hw * 0.5 + 2, -(hh + this.h) - 15, 3, 0, Math.PI*2);
+                ctx.fill();
+            }
+        }
+
+        // Ruin effects
+        if (this.health < 40) {
+            ctx.strokeStyle = 'rgba(50,50,50,0.8)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(-hw/2, -this.h);
+            ctx.lineTo(0, -this.h/2);
+            ctx.lineTo(hw/2, -this.h);
+            ctx.stroke();
+        }
+
+        ctx.restore();
+    }
+}
+
+class Car {
+    constructor() {
+        this.reset();
+    }
+
+    reset() {
+        // Pick a random road tile
+        const roads = world.roadTiles;
+        if (roads.length === 0) return;
+        
+        this.idx = randInt(0, roads.length);
+        this.tile = roads[this.idx];
+        this.direction = 1; // 1 or -1 along the row/col
+        
+        // Determine path: Cars follow roads. 
+        // For simplicity in this demo, cars just drive along rows (c) if possible, or cols (r).
+        // We'll check neighbors.
+        const neighbors = this.getNeighbors(this.tile);
+        if (neighbors.length > 0) {
+            const next = neighbors[randInt(0, neighbors.length)];
+            if (next.c !== this.tile.c) {
+                this.axis = 'c'; // moving along col index
+            } else {
+                this.axis = 'r'; // moving along row index
+            }
+        } else {
+            this.axis = 'c';
+        }
+        
+        this.progress = 0; // 0 to 1 on the tile
+        this.speed = rand(0.02, 0.05);
+        this.color = `hsl(${randInt(0, 360)}, 70%, 50%)`;
+    }
+
+    getNeighbors(tile) {
+        const checks = [
+            {c: tile.c + 1, r: tile.r},
+            {c: tile.c - 1, r: tile.r},
+            {c: tile.c, r: tile.r + 1},
+            {c: tile.c, r: tile.r - 1}
+        ];
+        return checks.filter(n => world.grid[n.r] && world.grid[n.r][n.c] && world.grid[n.r][n.c].type === 'road');
+    }
+
+    update() {
+        // Simple movement: interpolate between current tile and next tile
+        // This is a simplified visual path, not a true pathfinding agent
+        this.progress += this.speed;
+        
+        if (this.progress >= 1) {
+            // Need to turn or continue
+            // For visual simplicity, just reset to a new random road with some probability
+            if (Math.random() > 0.5) this.reset();
+            else this.progress = 0; // stay on tile logic (simplified)
+        }
+    }
+
+    draw(ctx) {
+        // Calculate world pos based on progress interpolation
+        // We need a start and end point. 
+        // Since we didn't store the "next" tile explicitly in a complex way, 
+        // we'll just draw it at the center of the current tile for visual stability 
+        // unless we want them to flow.
+        
+        // To make them flow, let's just map them to the Row (r) they are on.
+        // Cars drive horizontally (c-axes) mostly.
+        const r = this.tile.r;
+        const progressX = (this.progress * 1.5) - 0.5; // Move across visual width
+        
+        // Isometric projection of the car
+        // We fake the Z slightly to sit on the road
+        const basePos = toIso(this.tile.c + progressX, r);
+        
+        ctx.save();
+        ctx.translate(basePos.x, basePos.y - 5); // Lift slightly
+        ctx.scale(0.6, 0.6);
+        
+        // Car Body
+        ctx.fillStyle = this.color;
+        ctx.fillRect(-10, -10, 20, 10);
+        
+        // Car Roof
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.fillRect(-6, -14, 12, 4);
+        
+        ctx.restore();
+    }
+}
+
+/**
+ * GLOBALS
+ */
+const canvas = document.getElementById('cityCanvas');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const popEl = document.getElementById('population');
+
+let width, height;
+let world = {
+    grid: [],
+    roadTiles: [],
+    cars: []
+};
+let currentPhase = CONFIG.phases.NATURE;
+let phaseTimer = 0;
+let globalTime = 0;
+
+/**
+ * INITIALIZATION
+ */
+function resize() {
+    width = canvas.width = window.innerWidth;
+    height = canvas.height = window.innerHeight;
+}
+
+function initWorld() {
+    world.grid = [];
+    world.roadTiles = [];
+    world.cars = [];
+
+    for (let r = 0; r < CONFIG.gridRows; r++) {
+        const row = [];
+        for (let c = 0; c < CONFIG.gridCols; c++) {
+            const tile = new Tile(c, r);
+            
+            // Initial Road: From right to left (Row 10)
+            if (r === 10) {
+                tile.type = 'road';
+                world.roadTiles.push(tile);
+            } 
+            // Initial Nature
+            else {
+                if (Math.random() > 0.8) {
+                    tile.hasTree = true;
+                }
+            }
+
+            row.push(tile);
+        }
+        world.grid.push(row);
+    }
+
+    // Add the central building
+    const centerTile = world.grid[10][20];
+    centerTile.building = new Building('house');
+    centerTile.hasTree = false; // Remove tree to build
+    
+    // Add initial cars
+    for(let i=0; i<5; i++) {
+        const car = new Car();
+        car.tile = world.roadTiles[randInt(0, world.roadTiles.length)];
+        world.cars.push(car);
+    }
+}
+
+/**
+ * GAME LOOP LOGIC
+ */
+function updatePhase() {
+    phaseTimer += 16.6; // approx ms per frame
+
+    if (phaseTimer > CONFIG.phaseDurations[currentPhase]) {
+        phaseTimer = 0;
+        
+        // Cycle
+        if (currentPhase === CONFIG.phases.NATURE) currentPhase = CONFIG.phases.GROWTH;
+        else if (currentPhase === CONFIG.phases.GROWTH) currentPhase = CONFIG.phases.PEAK;
+        else if (currentPhase === CONFIG.phases.PEAK) currentPhase = CONFIG.phases.DECAY;
+        else if (currentPhase === CONFIG.phases.DECAY) currentPhase = CONFIG.phases.RUIN;
+        else if (currentPhase === CONFIG.phases.RUIN) currentPhase = CONFIG.phases.NATURE;
+
+        handlePhaseTransition();
+    }
+}
+
+function handlePhaseTransition() {
+    if (currentPhase === CONFIG.phases.NATURE) {
+        // Reset everything
+        world.grid.forEach(row => row.forEach(tile => {
+            tile.building = null;
+            tile.type = 'grass';
+            tile.hasTree = Math.random() > 0.6;
+            tile.z = tile.baseHeight; // Reset height
+        }));
+        world.roadTiles = world.grid[10].map(t => t); // Re-establish main road
+        world.cars = [];
+        statusEl.innerText = "Phase: Nature";
+    }
+    else if (currentPhase === CONFIG.phases.GROWTH) {
+        statusEl.innerText = "Phase: Growth";
+        // Plant some trees
+        world.grid.forEach(row => row.forEach(t => {
+            if (t.type === 'grass' && !t.building && Math.random() > 0.95) t.hasTree = true;
+        }));
+    }
+    else if (currentPhase === CONFIG.phases.PEAK) {
+        statusEl.innerText = "Phase: Peak City";
+        statusEl.style.color = '#8f8';
+        popEl.innerText = "Pop: 100%";
+    }
+    else if (currentPhase === CONFIG.phases.DECAY) {
+        statusEl.innerText = "Phase: Decay";
+        statusEl.style.color = '#fa8';
+    }
+    else if (currentPhase === CONFIG.phases.RUIN) {
+        statusEl.innerText = "Phase: Collapse";
+        statusEl.style.color = '#f88';
+    }
+}
+
+function updateSimulation() {
+    // 1. Handling Phase Specifics
+    
+    if (currentPhase === CONFIG.phases.NATURE) {
+        // Ensure roads exist (the main one)
+        // Remove buildings
+        world.grid.forEach(row => row.forEach(t => {
+            if (t.building) t.building = null;
+            if (t.type === 'road' && t.r !== 10) {
+                t.type = 'grass';
+                world.roadTiles = world.roadTiles.filter(rt => rt !== t);
+            }
+        }));
+        return;
+    }
+
+    // 2. Building Growth Logic (Growth & Peak)
+    if (currentPhase === CONFIG.phases.GROWTH || currentPhase === CONFIG.phases.PEAK) {
+        // Find buildable tiles near road or existing buildings
+        const candidates = [];
+        
+        world.grid.forEach(row => row.forEach(t => {
+            if (t.isBuildable()) {
+                // Check proximity to road or building
+                const neighbors = [
+                    world.grid[t.r+1] && world.grid[t.r+1][t.c],
+                    world.grid[t.r-1] && world.grid[t.r-1][t.c],
+                    world.grid[t.r] && world.grid[t.r][t.c+1],
+                    world.grid[t.r] && world.grid[t.r][t.c-1]
+                ].filter(Boolean);
+
+                const isAdjacent = neighbors.some(n => n.type === 'road' || n.building);
+                
+                if (isAdjacent) {
+                    // Higher density near center
+                    const distToCenter = dist(t.c, t.r, 20, 10);
+                    if (distToCenter < 15) {
+                        if (Math.random() > 0.98) candidates.push(t);
+                    } else {
+                        if (Math.random() > 0.99) candidates.push(t);
+                    }
+                }
+            }
+        }));
+
+        // Build
+        candidates.forEach(t => {
+            const type = Math.random() > 0.7 ? 'factory' : (Math.random() > 0.8 ? 'office' : 'house');
+            t.building = new Building(type);
+            t.hasTree = false;
+            
+            // Make road network organically
+            if (Math.random() > 0.9) {
+                // Expand road
+                // Just make a random neighbor a road
+                const side = randInt(0, 4);
+                let nr = t.r, nc = t.c;
+                if (side === 0) nr++;
+                else if (side === 1) nr--;
+                else if (side === 2) nc++;
+                else nc--;
+                
+                if (world.grid[nr] && world.grid[nr

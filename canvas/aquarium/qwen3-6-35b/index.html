@@ -44,4 +44,491 @@
         const randomInt = (min, max) => Math.floor(random(min, max));
         const degToRad = (deg) => deg * (Math.PI / 180);
 
-        // ---
+        // --- CLASSES ---
+
+        class Vector {
+            constructor(x, y) { this.x = x; this.y = y; }
+            add(v) { this.x += v.x; this.y += v.y; return this; }
+            sub(v) { this.x -= v.x; this.y -= v.y; return this; }
+            mult(n) { this.x *= n; this.y *= n; return this; }
+            mag() { return Math.sqrt(this.x * this.x + this.y * this.y); }
+            normalize() {
+                const m = this.mag();
+                if (m !== 0) this.mult(1 / m);
+                return this;
+            }
+            limit(max) {
+                if (this.mag() > max) {
+                    this.normalize();
+                    this.mult(max);
+                }
+                return this;
+            }
+            copy() { return new Vector(this.x, this.y); }
+        }
+
+        class Particle {
+            constructor(x, y, type) {
+                this.pos = new Vector(x, y);
+                this.vel = new Vector(0, 0);
+                this.acc = new Vector(0, 0);
+                this.type = type; // 'bubble' or 'plankton'
+                this.size = random(2, 5);
+                this.life = 1.0;
+                this.wobbleOffset = random(0, Math.PI * 2);
+            }
+
+            update() {
+                if (this.type === 'bubble') {
+                    this.pos.y -= 1.5; // Rise
+                    this.pos.x += Math.sin(this.pos.y * 0.05 + this.wobbleOffset) * 0.5; // Wobble
+                    this.size = Math.max(1, this.size - 0.005); // Shrink slightly
+                    if (this.pos.y < 0) this.reset();
+                } else if (this.type === 'plankton') {
+                    this.pos.y += 0.2; // Drift down
+                    this.pos.x += Math.sin(Date.now() * 0.001 + this.wobbleOffset) * 0.2;
+                    if (this.pos.y > height) this.pos.y = 0;
+                }
+            }
+
+            reset() {
+                this.pos.x = random(50, width - 50);
+                this.pos.y = height + 10;
+                this.size = random(3, 8);
+            }
+
+            draw() {
+                ctx.beginPath();
+                if (this.type === 'bubble') {
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+                    ctx.arc(this.pos.x, this.pos.y, this.size, 0, Math.PI * 2);
+                    ctx.fill();
+                    // Highlight
+                    ctx.beginPath();
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+                    ctx.arc(this.pos.x - this.size * 0.3, this.pos.y - this.size * 0.3, this.size * 0.2, 0, Math.PI * 2);
+                    ctx.fill();
+                } else {
+                    // Plankton
+                    ctx.fillStyle = 'rgba(144, 238, 144, 0.4)';
+                    ctx.arc(this.pos.x, this.pos.y, 1, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+        }
+
+        class Fish {
+            constructor(type) {
+                this.pos = new Vector(random(100, width - 100), random(100, height - 200));
+                this.vel = new Vector(random(-2, 2), random(-0.5, 0.5));
+                this.acc = new Vector(0, 0);
+                this.type = type;
+                this.maxSpeed = random(2, 4);
+                this.maxForce = 0.15;
+                this.facingRight = true;
+                
+                // Appearance
+                this.length = 0;
+                this.width = 0;
+                this.color1 = '';
+                this.color2 = '';
+                this.tailSpeed = 0;
+                this.tailAngle = 0;
+                
+                this.defineSpecies();
+            }
+
+            defineSpecies() {
+                const speciesList = [
+                    // 1. Clownfish style
+                    () => {
+                        this.length = 40; this.width = 20;
+                        this.color1 = '#ff9900'; this.color2 = '#ffffff';
+                        this.maxSpeed = 2.5;
+                    },
+                    // 2. Blue Tang style
+                    () => {
+                        this.length = 50; this.width = 35;
+                        this.color1 = '#0033cc'; this.color2 = '#001166';
+                        this.maxSpeed = 3.5;
+                    },
+                    // 3. Neon Tetra style
+                    () => {
+                        this.length = 25; this.width = 8;
+                        this.color1 = '#cc0000'; this.color2 = '#000000';
+                        this.maxSpeed = 4.5;
+                        this.tailSpeed = 0.2;
+                    },
+                    // 4. Angelfish style
+                    () => {
+                        this.length = 45; this.width = 50; // Tall
+                        this.color1 = '#ffd700'; this.color2 = '#000000';
+                        this.maxSpeed = 2.0;
+                    },
+                    // 5. Eel style
+                    () => {
+                        this.length = 80; this.width = 10;
+                        this.color1 = '#00ff00'; this.color2 = '#006600';
+                        this.maxSpeed = 3.0;
+                    }
+                ];
+                speciesList[randomInt(0, speciesList.length)]();
+            }
+
+            update() {
+                this.flock();
+                this.vel.add(this.acc);
+                this.vel.limit(this.maxSpeed);
+                this.pos.add(this.vel);
+                this.acc.mult(0);
+
+                // Update Facing Direction
+                if (this.vel.x > 0.1) this.facingRight = true;
+                if (this.vel.x < -0.1) this.facingRight = false;
+
+                // Wall Avoidance
+                this.avoidWalls();
+
+                // Animation
+                const speed = this.vel.mag();
+                this.tailAngle += 0.1 + speed * 0.1;
+            }
+
+            applyForce(force) {
+                this.acc.add(force);
+            }
+
+            // Basic flocking
+            flock() {
+                let alignment = new Vector(0, 0);
+                let cohesion = new Vector(0, 0);
+                let separation = new Vector(0, 0);
+                let count = 0;
+
+                for (let other of fish) {
+                    if (other !== this) {
+                        let d = Math.hypot(this.pos.x - other.pos.x, this.pos.y - other.pos.y);
+                        if (d < 100) {
+                            alignment.add(other.vel);
+                            cohesion.add(other.pos);
+                            if (d < 30) {
+                                let diff = this.pos.copy().sub(other.pos);
+                                diff.normalize();
+                                diff.div(d); // Weight by distance
+                                separation.add(diff);
+                            }
+                            count++;
+                        }
+                    }
+                }
+
+                if (count > 0) {
+                    alignment.div(count);
+                    alignment.limit(0.1); // Steering strength
+                    
+                    cohesion.div(count);
+                    let desired = cohesion.sub(this.pos);
+                    desired.normalize();
+                    desired.mult(this.maxSpeed);
+                    let steer = desired.sub(this.vel);
+                    steer.limit(0.05); // Cohesion is gentle
+
+                    separation.mult(1.5);
+
+                    this.applyForce(alignment);
+                    this.applyForce(cohesion); // Use the steer calculated
+                    this.applyForce(separation);
+                }
+            }
+
+            avoidWalls() {
+                const margin = 50;
+                const strength = 0.5;
+                
+                // Left
+                if (this.pos.x < margin) {
+                    let diff = new Vector(this.pos.x, this.pos.y).sub(new Vector(margin, this.pos.y));
+                    diff.normalize();
+                    diff.mult(strength);
+                    this.applyForce(diff);
+                }
+                // Right
+                if (this.pos.x > width - margin) {
+                    let diff = new Vector(this.pos.x, this.pos.y).sub(new Vector(width - margin, this.pos.y));
+                    diff.normalize();
+                    diff.mult(strength);
+                    this.applyForce(diff);
+                }
+                // Top
+                if (this.pos.y < margin + 20) {
+                    let diff = new Vector(this.pos.x, this.pos.y).sub(new Vector(this.pos.x, margin + 20));
+                    diff.normalize();
+                    diff.mult(strength);
+                    this.applyForce(diff);
+                }
+                // Bottom (Sand)
+                if (this.pos.y > height - margin - 40) {
+                    let diff = new Vector(this.pos.x, this.pos.y).sub(new Vector(this.pos.x, height - margin - 40));
+                    diff.normalize();
+                    diff.mult(strength);
+                    this.applyForce(diff);
+                }
+            }
+
+            draw() {
+                ctx.save();
+                ctx.translate(this.pos.x, this.pos.y);
+                
+                // Flip if facing left
+                if (!this.facingRight) {
+                    ctx.scale(-1, 1);
+                }
+
+                ctx.fillStyle = this.color1;
+                ctx.strokeStyle = this.color2;
+                ctx.lineWidth = 2;
+
+                // Draw body based on type
+                if (this.type === 'eel') {
+                    ctx.beginPath();
+                    ctx.moveTo(this.length / 2, 0);
+                    ctx.quadraticCurveTo(0, -this.width, -this.length / 2, 0);
+                    ctx.quadraticCurveTo(0, this.width, this.length / 2, 0);
+                    ctx.fill();
+                    // Wavy movement visual
+                    const wave = Math.sin(this.tailAngle) * 5;
+                    ctx.beginPath();
+                    ctx.moveTo(-this.length/2, 0);
+                    ctx.lineTo(-this.length/2 - 10, wave);
+                    ctx.stroke();
+                } else if (this.type === 'angelfish') {
+                    ctx.beginPath();
+                    ctx.moveTo(this.length/2, 0);
+                    ctx.quadraticCurveTo(0, -this.width/1.5, 0, -this.width); // Top fin
+                    ctx.quadraticCurveTo(-this.length/3, -this.width/2, -this.length/2, 0); // Tail
+                    ctx.quadraticCurveTo(-this.length/3, this.width/2, 0, this.width); // Bottom fin
+                    ctx.quadraticCurveTo(0, this.width/1.5, this.length/2, 0);
+                    ctx.fill();
+                    ctx.stroke();
+                } else {
+                    // Standard fish (Clown, Tang, Tetra)
+                    ctx.beginPath();
+                    ctx.moveTo(this.length / 2, 0); // Nose
+                    ctx.quadraticCurveTo(0, -this.width, -this.length / 2, 0); // Back
+                    ctx.quadraticCurveTo(0, this.width, this.length / 2, 0); // Belly
+                    ctx.fill();
+                    
+                    // Tail fin animation
+                    const tailOffset = Math.sin(this.tailAngle) * 8;
+                    ctx.beginPath();
+                    ctx.moveTo(-this.length/2, 0);
+                    ctx.lineTo(-this.length/2 - 10, -8 + tailOffset);
+                    ctx.lineTo(-this.length/2 - 10, 8 + tailOffset);
+                    ctx.fill();
+                    
+                    // Stripes (for Clown/Tetra)
+                    if (this.type !== 'Blue Tang') {
+                        ctx.fillStyle = this.color2;
+                        ctx.beginPath();
+                        ctx.moveTo(0, -this.width);
+                        ctx.lineTo(5, this.width);
+                        ctx.lineTo(-5, this.width);
+                        ctx.lineTo(-5, -this.width);
+                        ctx.fill();
+                    }
+                }
+
+                // Eye
+                ctx.fillStyle = 'white';
+                ctx.beginPath();
+                ctx.arc(this.length / 4, -this.width / 4, 3, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = 'black';
+                ctx.beginPath();
+                ctx.arc(this.length / 4 + 1, -this.width / 4, 1.5, 0, Math.PI * 2);
+                ctx.fill();
+
+                ctx.restore();
+            }
+        }
+
+        class BubbleJet {
+            constructor() {
+                this.timer = 0;
+                this.maxTime = 50;
+                this.active = true;
+            }
+            
+            update() {
+                if(this.active) {
+                    if(Math.random() < 0.1) {
+                        bubbles.push(new Particle(random(width/2 - 20, width/2 + 20), height - 50, 'bubble'));
+                    }
+                }
+            }
+        }
+
+        class Plant {
+            constructor(x) {
+                this.x = x;
+                this.baseHeight = random(100, 200);
+                this.segs = randomInt(4, 8);
+                this.swaySpeed = random(0.01, 0.03);
+                this.swayOffset = random(0, 100);
+            }
+
+            draw() {
+                ctx.beginPath();
+                ctx.strokeStyle = '#2e7d32';
+                ctx.lineWidth = 8;
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+
+                let cx = this.x;
+                let cy = height - 30;
+                
+                ctx.moveTo(cx, cy);
+                
+                for (let i = 0; i < this.segs; i++) {
+                    const sway = Math.sin((Date.now() * this.swaySpeed) + this.swayOffset + i) * (i * 3);
+                    cx += sway * 0.5;
+                    cy -= (this.baseHeight / this.segs);
+                    ctx.lineTo(cx, cy);
+                }
+                ctx.stroke();
+
+                // Add leaves
+                ctx.fillStyle = '#4caf50';
+                for(let i=0; i<this.segs; i++) {
+                    let ly = height - 30 - ((this.baseHeight/this.segs) * i);
+                    let lx = this.x + Math.sin((Date.now() * this.swaySpeed) + this.swayOffset + i) * (i * 3) * 0.5;
+                    ctx.beginPath();
+                    ctx.ellipse(lx, ly, 10 + i, 5, Math.PI/4, 0, Math.PI*2);
+                    ctx.fill();
+                }
+            }
+        }
+
+        class Crab {
+            constructor() {
+                this.x = width * 0.8;
+                this.y = height - 45;
+                this.dir = -1;
+                this.speed = 0.5;
+            }
+
+            update() {
+                this.x += this.speed * this.dir;
+                if (this.x > width - 50) this.dir = -1;
+                if (this.x < width/2) this.dir = 1;
+            }
+
+            draw() {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.scale(this.dir, 1);
+                
+                // Legs
+                ctx.strokeStyle = '#d84315';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                // Left legs
+                ctx.moveTo(-5, -5); ctx.lineTo(-10, -15);
+                ctx.moveTo(0, -5); ctx.lineTo(-5, -15);
+                ctx.moveTo(5, -5); ctx.lineTo(0, -15);
+                // Right legs
+                ctx.moveTo(5, 0); ctx.lineTo(10, 5);
+                ctx.moveTo(10, -5); ctx.lineTo(15, 0);
+                ctx.moveTo(15, -10); ctx.lineTo(20, -5);
+                ctx.stroke();
+
+                // Shell
+                ctx.fillStyle = '#ffccbc';
+                ctx.beginPath();
+                ctx.ellipse(0, -10, 12, 8, 0, Math.PI, 0);
+                ctx.fill();
+                
+                // Eye stalks
+                ctx.beginPath();
+                ctx.moveTo(5, -18); ctx.lineTo(8, -25);
+                ctx.moveTo(10, -18); ctx.lineTo(13, -25);
+                ctx.stroke();
+                
+                // Eyes
+                ctx.fillStyle = 'black';
+                ctx.beginPath(); ctx.arc(8, -25, 1.5, 0, Math.PI*2); ctx.fill();
+                ctx.beginPath(); ctx.arc(13, -25, 1.5, 0, Math.PI*2); ctx.fill();
+
+                // Claws
+                ctx.fillStyle = '#ff5722';
+                ctx.beginPath();
+                ctx.ellipse(15, -15, 4, 6, 0.5, 0, Math.PI*2);
+                ctx.fill();
+                ctx.beginPath();
+                ctx.ellipse(18, -18, 3, 4, 0.8, 0, Math.PI*2);
+                ctx.fill();
+
+                ctx.restore();
+            }
+        }
+
+        // --- MAIN EXECUTION ---
+
+        let fish = [];
+        let bubbles = [];
+        let plants = [];
+        let crab;
+        let bubbleJet;
+
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            
+            // Re-init environment if needed (simple reset)
+            plants = [new Plant(width * 0.1), new Plant(width * 0.2), new Plant(width * 0.7), new Plant(width * 0.9)];
+            crab = new Crab();
+            bubbleJet = new BubbleJet();
+        }
+
+        function init() {
+            resize();
+            window.addEventListener('resize', resize);
+            
+            // Create Fish
+            for (let i = 0; i < CONFIG.fishCount; i++) {
+                fish.push(new Fish());
+            }
+            
+            // Create Bubble Pool
+            for (let i = 0; i < CONFIG.bubbleCount; i++) {
+                let b = new Particle(random(0, width), random(0, height), 'bubble');
+                b.pos.y = random(height, height + height); // Start off screen
+                bubbles.push(b);
+            }
+
+            // Create Plankton
+            for(let i=0; i<CONFIG.planktonCount; i++) {
+                bubbles.push(new Particle(random(0, width), random(0, height), 'plankton'));
+            }
+        }
+
+        function drawBackground() {
+            // Gradient Water
+            const gradient = ctx.createLinearGradient(0, 0, 0, height);
+            gradient.addColorStop(0, CONFIG.colors.water1);
+            gradient.addColorStop(1, CONFIG.colors.water2);
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, width, height);
+
+            // Caustics on back glass (simulated)
+            ctx.save();
+            ctx.globalCompositeOperation = 'overlay';
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.05)';
+            for(let i=0; i<10; i++) {
+                const x = (Date.now() * 0.05 + i * 100) % (width + 200) - 100;
+                const y = (Date.now() * 0.02 + i * 50) % (height + 100) - 50;
+                ctx.beginPath();
+                ctx.arc(x, y, 60, 0, Math.PI*2);
+                ctx.fill();

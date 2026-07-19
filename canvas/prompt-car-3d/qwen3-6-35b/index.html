@@ -21,4 +21,451 @@
         #hud-top { display: flex; justify-content: space-between; color: #ffaa00; text-shadow: 2px 2px 0 #000; font-weight: bold; font-size: 24px; }
         #hud-bottom { text-align: center; color: #fff; text-shadow: 1px 1px 0 #000; }
         .bar-container { width: 200px; height: 20px; background: #333; border: 2px solid #555; margin-top: 5px; }
-        .health-bar { height: 100%; background: #d32f2f; width: 100%; transition: width 
+        .health-bar { height: 100%; background: #d32f2f; width: 100%; transition: width 0.1s; }
+        .weapon-text { color: #00ffcc; font-size: 18px; margin-top: 5px; }
+        #death-screen {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.7);
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            pointer-events: auto;
+        }
+        h1 { font-size: 48px; margin: 0; color: #ff4444; text-transform: uppercase; }
+        p { font-size: 24px; }
+        button {
+            background: #d32f2f; color: white; border: none; padding: 15px 30px;
+            font-size: 20px; cursor: pointer; margin-top: 20px; font-family: inherit;
+            text-transform: uppercase;
+        }
+        button:hover { background: #ff0000; }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <div id="ui-layer">
+        <div id="hud-top">
+            <div>SCORE: <span id="score-val">0</span></div>
+            <div>WAVE: <span id="wave-val">1</span></div>
+        </div>
+        <div id="hud-bottom">
+            <div class="bar-container"><div id="health-bar" class="health-bar"></div></div>
+            <div id="weapon-display" class="weapon-text">WEAPON: MACHINE GUN</div>
+            <div style="font-size: 12px; margin-top: 5px; opacity: 0.7;">WASD to Drive | SPACE to Shoot | SHIFT to Boost</div>
+        </div>
+    </div>
+    <div id="death-screen">
+        <h1>Destroyed</h1>
+        <p>Preparing Respawn...</p>
+        <button onclick="respawnPlayer()">Re-Deploy</button>
+    </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+/**
+ * WASTELAND DERBY
+ * A lightweight isometric auto-combat racing simulation.
+ */
+
+// --- CONFIGURATION ---
+const CONFIG = {
+    mapSize: 600,
+    obstacleCount: 40,
+    aiCount: 10,
+    pickupCount: 15,
+    colors: {
+        sky: 0x8b9bb4, // Hazy blue
+        ground: 0xd2b48c, // Sand/Dirt
+        fog: 0xbdb0a0, // Dust color
+        player: 0x2196f3, // Blue
+        enemy: [0xe53935, 0x8e24aa, 0x33691e, 0xbf360c],
+        obstacle: 0x5d4037 // Dark wood/rock
+    },
+    carStats: {
+        speed: 1.8,
+        boostSpeed: 3.2,
+        turnSpeed: 0.06,
+        friction: 0.98,
+        health: 100,
+        radius: 2.5
+    },
+    weapons: {
+        machinegun: { name: "MG", rate: 10, damage: 8, speed: 4, color: 0xffff00, spread: 0.05, count: 1, type: 'bullet' },
+        shotgun: { name: "Shotgun", rate: 40, damage: 6, speed: 4, color: 0xffaa00, spread: 0.3, count: 5, type: 'bullet' },
+        rocket: { name: "Rockets", rate: 60, damage: 50, speed: 2.5, color: 0xff0000, spread: 0.02, count: 1, type: 'rocket', splash: 15 },
+        burst: { name: "Burst", rate: 25, damage: 12, speed: 5, color: 0x00ffff, spread: 0.08, count: 3, type: 'bullet' }
+    }
+};
+
+// --- GLOBALS ---
+let scene, camera, renderer, clock;
+let canvasTexture, groundCanvas, groundCtx;
+let player;
+let cars = [];
+let projectiles = [];
+let particles = [];
+let obstacles = [];
+let pickups = [];
+let wrecks = []; // Visual remains
+let score = 0;
+let gameActive = true;
+let keys = {};
+let cameraShake = 0;
+
+// --- UTILS ---
+const R = Math.random;
+const rand = (min, max) => Math.random() * (max - min) + min;
+const dist = (a, b) => Math.sqrt((a.x - b.x)**2 + (a.z - b.z)**2);
+const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
+
+// --- INITIALIZATION ---
+function init() {
+    // Scene Setup
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(CONFIG.colors.sky);
+    scene.fog = new THREE.FogExp2(CONFIG.colors.fog, 0.008);
+
+    // Camera (Isometric-ish)
+    camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.set(0, 150, 100);
+    camera.lookAt(0, 0, 0);
+
+    // Renderer
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    document.getElementById('game-container').appendChild(renderer.domElement);
+
+    // Lighting
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
+
+    const dirLight = new THREE.DirectionalLight(0xffdfba, 0.8);
+    dirLight.position.set(100, 200, 50);
+    dirLight.castShadow = true;
+    dirLight.shadow.mapSize.width = 2048;
+    dirLight.shadow.mapSize.height = 2048;
+    dirLight.shadow.camera.left = -300;
+    dirLight.shadow.camera.right = 300;
+    dirLight.shadow.camera.top = 300;
+    dirLight.shadow.camera.bottom = -300;
+    scene.add(dirLight);
+
+    // Dynamic Ground System
+    initGround();
+
+    // World Generation
+    generateWorld();
+
+    // Inputs
+    window.addEventListener('keydown', (e) => keys[e.code] = true);
+    window.addEventListener('keyup', (e) => keys[e.code] = false);
+    window.addEventListener('resize', onResize);
+
+    clock = new THREE.Clock();
+
+    // Start Loop
+    animate();
+}
+
+function initGround() {
+    groundCanvas = document.createElement('canvas');
+    groundCanvas.width = 1024;
+    groundCanvas.height = 1024;
+    groundCtx = groundCanvas.getContext('2d');
+    
+    // Base texture
+    groundCtx.fillStyle = '#d2b48c';
+    groundCtx.fillRect(0, 0, 1024, 1024);
+    
+    // Add noise
+    for(let i=0; i<10000; i++) {
+        groundCtx.fillStyle = `rgba(0,0,0,${R()*0.1})`;
+        groundCtx.fillRect(R()*1024, R()*1024, R()*4, R()*4);
+    }
+
+    canvasTexture = new THREE.CanvasTexture(groundCanvas);
+    canvasTexture.wrapS = THREE.RepeatWrapping;
+    canvasTexture.wrapT = THREE.RepeatWrapping;
+
+    const planeGeo = new THREE.PlaneGeometry(CONFIG.mapSize, CONFIG.mapSize);
+    const planeMat = new THREE.MeshStandardMaterial({ 
+        map: canvasTexture, 
+        roughness: 0.9,
+        color: 0xffffff 
+    });
+    const plane = new THREE.Mesh(planeGeo, planeMat);
+    plane.rotation.x = -Math.PI / 2;
+    plane.receiveShadow = true;
+    scene.add(plane);
+}
+
+// --- WORLD GENERATION ---
+function generateWorld() {
+    // Obstacles (Rocks, Ruins, Wrecks)
+    const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+    const rockGeo = new THREE.DodecahedronGeometry(1);
+    
+    for (let i = 0; i < CONFIG.obstacleCount; i++) {
+        const type = R() > 0.5 ? 'rock' : 'building';
+        const size = rand(5, 20);
+        const geo = type === 'rock' ? rockGeo : boxGeo;
+        
+        const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: type === 'rock' ? 0x5d4037 : 0x757575, flatShading: true }));
+        mesh.scale.set(size, type === 'rock' ? size*0.6 : rand(5, 15), size);
+        
+        let x, z, valid;
+        do {
+            x = rand(-CONFIG.mapSize/2 + 50, CONFIG.mapSize/2 - 50);
+            z = rand(-CONFIG.mapSize/2 + 50, CONFIG.mapSize/2 - 50);
+            valid = dist({x, z}, {x:0, z:0}) > 50; // Keep spawn clear
+        } while (!valid);
+
+        mesh.position.set(x, mesh.scale.y/2, z);
+        mesh.rotation.y = R() * Math.PI;
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        scene.add(mesh);
+
+        obstacles.push({
+            mesh: mesh,
+            type: type,
+            radius: size/1.5, // Approximate collision radius
+            x: x, z: z
+        });
+    }
+
+    // Pickups
+    const pickupGeo = new THREE.OctahedronGeometry(1);
+    const weaponKeys = Object.keys(CONFIG.weapons);
+    
+    for (let i = 0; i < CONFIG.pickupCount; i++) {
+        const wKey = weaponKeys[Math.floor(R() * weaponKeys.length)];
+        const wData = CONFIG.weapons[wKey];
+        
+        const mat = new THREE.MeshStandardMaterial({ color: wData.color, emissive: wData.color, emissiveIntensity: 0.5 });
+        const mesh = new THREE.Mesh(pickupGeo, mat);
+        
+        const x = rand(-CONFIG.mapSize/2 + 20, CONFIG.mapSize/2 - 20);
+        const z = rand(-CONFIG.mapSize/2 + 20, CONFIG.mapSize/2 - 20);
+        
+        mesh.position.set(x, 2, z);
+        scene.add(mesh);
+        
+        pickups.push({
+            mesh: mesh,
+            type: wKey,
+            x: x, z: z,
+            active: true,
+            respawnTimer: 0
+        });
+    }
+}
+
+// --- CAR CLASSES ---
+class Car {
+    constructor(isPlayer, startX, startZ) {
+        this.isPlayer = isPlayer;
+        this.id = Math.random().toString(36).substr(2, 9);
+        this.hp = CONFIG.carStats.health;
+        this.maxHp = CONFIG.carStats.health;
+        this.dead = false;
+        this.respawnTimer = 0;
+        
+        // Physics
+        this.pos = new THREE.Vector3(startX, 1, startZ);
+        this.vel = new THREE.Vector3(0, 0, 0);
+        this.angle = R() * Math.PI * 2;
+        this.radius = CONFIG.carStats.radius;
+        
+        // Weapon
+        this.weapon = 'machinegun';
+        this.fireTimer = 0;
+        
+        // Visuals
+        this.group = new THREE.Group();
+        this.group.position.copy(this.pos);
+        scene.add(this.group);
+        this.buildMesh();
+
+        // AI specific
+        this.ai = {
+            target: null,
+            stuckTimer: 0,
+            lastPos: this.pos.clone(),
+            state: 'wander' // wander, chase, flee
+        };
+    }
+
+    buildMesh() {
+        const color = this.isPlayer ? CONFIG.colors.player : CONFIG.colors.enemy[Math.floor(R()*CONFIG.colors.enemy.length)];
+        
+        // Body
+        const bodyGeo = new THREE.BoxGeometry(2.5, 1.5, 4.5);
+        const bodyMat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.7 });
+        const body = new THREE.Mesh(bodyGeo, bodyMat);
+        body.position.y = 0.75;
+        body.castShadow = true;
+        this.group.add(body);
+
+        // Roof/Cab
+        const cabGeo = new THREE.BoxGeometry(2, 1, 2.5);
+        const cabMat = new THREE.MeshStandardMaterial({ color: 0x333333 }); // Dark windows
+        const cab = new THREE.Mesh(cabGeo, cabMat);
+        cab.position.set(0, 1.8, -0.5);
+        this.group.add(cab);
+
+        // Turret
+        const turretGeo = new THREE.CylinderGeometry(0.8, 0.8, 0.5, 8);
+        const turretMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
+        this.turret = new THREE.Mesh(turretGeo, turretMat);
+        this.turret.position.set(0, 1.8, 0.5);
+        this.group.add(this.turret);
+
+        // Gun barrel
+        const barrelGeo = new THREE.CylinderGeometry(0.15, 0.15, 2.5, 8);
+        this.barrel = new THREE.Mesh(barrelGeo, new THREE.MeshStandardMaterial({ color: 0x111111 }));
+        this.barrel.rotation.x = Math.PI / 2;
+        this.barrel.position.set(0, 0, 1.2);
+        this.turret.add(this.barrel);
+
+        // Wheels
+        const wheelGeo = new THREE.CylinderGeometry(0.6, 0.6, 0.4, 12);
+        const wheelMat = new THREE.MeshStandardMaterial({ color: 0x111111 });
+        const positions = [
+            [-1.3, 0.3, -1.5], [1.3, 0.3, -1.5],
+            [-1.3, 0.3, 1.5], [1.3, 0.3, 1.5]
+        ];
+        positions.forEach(p => {
+            const w = new THREE.Mesh(wheelGeo, wheelMat);
+            w.rotation.z = Math.PI / 2;
+            w.position.set(p[0], p[1], p[2]);
+            this.group.add(w);
+        });
+    }
+
+    update(dt) {
+        if (this.dead) {
+            this.handleRespawn(dt);
+            return;
+        }
+
+        if (this.isPlayer) this.handlePlayerInput(dt);
+        else this.handleAI(dt);
+
+        this.applyPhysics(dt);
+        this.checkCollisions();
+        
+        // Update Visuals
+        this.group.position.copy(this.pos);
+        this.group.rotation.y = this.angle;
+        
+        // Turret aims at target
+        if (this.ai.target && !this.ai.target.dead) {
+            const dx = this.ai.target.pos.x - this.pos.x;
+            const dz = this.ai.target.pos.z - this.pos.z;
+            const targetAngle = Math.atan2(dx, dz);
+            // Smooth turret rotation
+            let diff = targetAngle - this.turret.rotation.y;
+            while (diff < -Math.PI) diff += Math.PI*2;
+            while (diff > Math.PI) diff -= Math.PI*2;
+            this.turret.rotation.y += diff * 0.1;
+            
+            // Auto fire
+            this.fire();
+        }
+
+        // Timer
+        if (this.fireTimer > 0) this.fireTimer--;
+    }
+
+    handlePlayerInput(dt) {
+        let acc = 0;
+        let turn = 0;
+        let boost = false;
+
+        if (keys['KeyW'] || keys['ArrowUp']) acc = 1;
+        if (keys['KeyS'] || keys['ArrowDown']) acc = -0.5;
+        if (keys['ShiftLeft'] || keys['ShiftRight']) boost = true;
+        
+        const maxSpd = boost ? CONFIG.carStats.boostSpeed : CONFIG.carStats.speed;
+
+        if (keys['KeyA'] || keys['ArrowLeft']) turn = 1;
+        if (keys['KeyD'] || keys['ArrowRight']) turn = -1;
+
+        // Steering
+        if (Math.abs(this.vel.length()) > 0.1) {
+            this.angle += turn * CONFIG.carStats.turnSpeed * (this.vel.length() / 2);
+        }
+
+        // Acceleration
+        const sin = Math.sin(this.angle);
+        const cos = Math.cos(this.angle);
+        
+        // Add force based on angle
+        const force = acc * 0.15;
+        this.vel.x += -sin * force;
+        this.vel.z += cos * force;
+
+        // Fire
+        if (keys['Space']) this.fire();
+        
+        // Skid marks
+        if (Math.abs(turn) > 0 && Math.abs(this.vel.length()) > 1) {
+            this.addSkidMark();
+        }
+    }
+
+    handleAI(dt) {
+        // Find nearest enemy
+        let nearest = null;
+        let minDist = 1000;
+        
+        // Check player
+        if (!player.dead) {
+            const d = dist(this, player);
+            if (d < minDist) { minDist = d; nearest = player; }
+        }
+        // Check other cars (simple FFA logic)
+        for(let other of cars) {
+            if (other === this || other.dead) continue;
+            const d = dist(this, other);
+            if (d < minDist) { minDist = d; nearest = other; }
+        }
+
+        this.ai.target = nearest;
+
+        if (nearest) {
+            // Chase logic
+            const dx = nearest.pos.x - this.pos.x;
+            const dz = nearest.pos.z - this.pos.z;
+            const targetAngle = Math.atan2(dx, dz);
+            
+            // Steer towards target but drift
+            let diff = targetAngle - this.angle;
+            while (diff < -Math.PI) diff += Math.PI*2;
+            while (diff > Math.PI) diff -= Math.PI*2;
+            
+            // AI "driving" smoothing
+            const turnAmount = clamp(diff, -CONFIG.carStats.turnSpeed, CONFIG.carStats.turnSpeed);
+            this.angle += turnAmount;
+            
+            // Gas
+            const forward = Math.abs(diff) < Math.PI / 2;
+            if (forward) {
+                this.vel.x -= Math.sin(this.angle) * 0.15;
+                this.vel.z += Math.cos(this.angle) * 0.15;
+            } else {
+                // Reverse if wrong way
+                this.vel.x += Math.sin(this.angle) * 0.05;
+                this.vel.z -= Math.cos(this.angle) * 0.05;
+            }
+            
+            // Avoid walls (simple Raycast simulation)
+            const checkDist = 15;
+            const lookX =

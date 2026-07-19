@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Tiny Tank Battle</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #111; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; }
+canvas { display: block; border-radius: 4px; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width = Math.min(window.innerWidth, 1200);
+const H = canvas.height = Math.min(window.innerHeight, 800);
+
+const terrainCanvas = document.createElement('canvas');
+terrainCanvas.width = W; terrainCanvas.height = H;
+const tCtx = terrainCanvas.getContext('2d');
+
+// Generate terrain
+function generateTerrain() {
+  // Base green
+  tCtx.fillStyle = '#3a5a2a';
+  tCtx.fillRect(0, 0, W, H);
+  
+  // Grass texture
+  for (let i = 0; i < 8000; i++) {
+    const x = Math.random() * W;
+    const y = Math.random() * H;
+    const g = 60 + Math.random() * 60;
+    tCtx.fillStyle = `rgba(${30 + Math.random()*30}, ${g}, ${20 + Math.random()*20}, 0.5)`;
+    tCtx.fillRect(x, y, 2 + Math.random()*3, 1);
+  }
+  
+  // Dirt paths
+  tCtx.strokeStyle = '#5a4a2a';
+  tCtx.lineWidth = 30;
+  tCtx.lineCap = 'round';
+  tCtx.beginPath();
+  tCtx.moveTo(0, H * 0.3);
+  tCtx.quadraticCurveTo(W * 0.3, H * 0.2, W * 0.5, H * 0.5);
+  tCtx.quadraticCurveTo(W * 0.7, H * 0.8, W, H * 0.7);
+  tCtx.stroke();
+  tCtx.beginPath();
+  tCtx.moveTo(W * 0.2, 0);
+  tCtx.quadraticCurveTo(W * 0.1, H * 0.5, W * 0.4, H);
+  tCtx.stroke();
+  
+  // Dirt path texture
+  for (let i = 0; i < 2000; i++) {
+    const t = Math.random();
+    let px, py;
+    if (t < 0.5) {
+      const tt = Math.random();
+      px = tt * W * 0.5 + Math.sin(tt * Math.PI) * W * 0.15 + (Math.random()-0.5)*25;
+      py = H*0.3 + tt * H*0.2 + (Math.random()-0.5)*25;
+    } else {
+      const tt = (Math.random()-0.5)*2;
+      px = W*0.2 + tt*W*0.2;
+      py = Math.random()*H;
+    }
+    tCtx.fillStyle = `rgba(${100+Math.random()*40}, ${80+Math.random()*30}, ${40+Math.random()*20}, 0.3)`;
+    tCtx.fillRect(px, py, 3, 3);
+  }
+  
+  // Rocks
+  for (let i = 0; i < 40; i++) {
+    const x = Math.random() * W;
+    const y = Math.random() * H;
+    const r = 3 + Math.random() * 8;
+    tCtx.fillStyle = `rgba(${80+Math.random()*40}, ${75+Math.random()*35}, ${65+Math.random()*30}, 0.6)`;
+    tCtx.beginPath();
+    tCtx.arc(x, y, r, 0, Math.PI*2);
+    tCtx.fill();
+  }
+  
+  // Bushes
+  for (let i = 0; i < 25; i++) {
+    const x = Math.random() * W;
+    const y = Math.random() * H;
+    tCtx.fillStyle = `rgba(${25+Math.random()*20}, ${70+Math.random()*40}, ${20+Math.random()*15}, 0.7)`;
+    tCtx.beginPath();
+    tCtx.arc(x, y, 6 + Math.random()*12, 0, Math.PI*2);
+    tCtx.fill();
+  }
+}
+generateTerrain();
+
+// Game state
+const TERRAIN_DAMAGE = tCtx;
+const units = [];
+const bullets = [];
+const particles = [];
+const walls = [];
+const explosions = [];
+
+const RED = '#e84040';
+const BLUE = '#4080e8';
+const RED_DARK = '#a02020';
+const BLUE_DARK = '#2050a0';
+
+// Wall class
+class Wall {
+  constructor(x, y, w, h) {
+    this.x = x; this.y = y; this.w = w; this.h = h;
+    this.health = 100;
+  }
+  draw() {
+    const alpha = Math.max(0.3, this.health / 100);
+    tCtx.fillStyle = `rgba(120, 100, 80, ${alpha})`;
+    tCtx.fillRect(this.x - this.w/2, this.y - this.h/2, this.w, this.h);
+    tCtx.strokeStyle = `rgba(80, 60, 40, ${alpha})`;
+    tCtx.lineWidth = 1;
+    tCtx.strokeRect(this.x - this.w/2, this.y - this.h/2, this.w, this.h);
+    // Brick pattern
+    tCtx.strokeStyle = `rgba(60, 45, 30, ${alpha * 0.5})`;
+    for (let by = -this.h/2; by < this.h/2; by += 6) {
+      tCtx.beginPath();
+      tCtx.moveTo(this.x - this.w/2, this.y + by);
+      tCtx.lineTo(this.x + this.w/2, this.y + by);
+      tCtx.stroke();
+    }
+    for (let bx = -this.w/2; bx < this.w/2; bx += 8) {
+      tCtx.beginPath();
+      tCtx.moveTo(this.x + bx, this.y - this.h/2);
+      tCtx.lineTo(this.x + bx, this.y + this.h/2);
+      tCtx.stroke();
+    }
+  }
+  damage(dmg) {
+    this.health -= dmg;
+    return this.health <= 0;
+  }
+}
+
+// Create walls
+function createWalls() {
+  walls.length = 0;
+  // Scattered barricades
+  const positions = [
+    [W*0.25, H*0.25, 40, 15], [W*0.75, H*0.75, 40, 15],
+    [W*0.5, H*0.5, 50, 12], [W*0.3, H*0.7, 35, 15],
+    [W*0.7, H*0.3, 35, 15], [W*0.15, H*0.55, 30, 12],
+    [W*0.85, H*0.45, 30, 12], [W*0.4, H*0.15, 45, 12],
+    [W*0.6, H*0.85, 45, 12], [W*0.5, H*0.3, 25, 25],
+    [W*0.35, H*0.55, 25, 25], [W*0.65, H*0.45, 25, 25],
+    [W*0.2, H*0.8, 50, 12], [W*0.8, H*0.2, 50, 12],
+    [W*0.45, H*0.65, 30, 15], [W*0.55, H*0.35, 30, 15],
+  ];
+  positions.forEach(p => {
+    walls.push(new Wall(p[0], p[1], p[2], p[3]));
+  });
+}
+createWalls();
+
+// Unit base
+class Unit {
+  constructor(x, y, team, type) {
+    this.x = x; this.y = y;
+    this.team = team;
+    this.type = type;
+    this.angle = Math.random() * Math.PI * 2;
+    this.turretAngle = this.angle;
+    this.health = 100;
+    this.maxHealth = 100;
+    this.speed = 0;
+    this.maxSpeed = 0;
+    this.fireCooldown = 0;
+    this.fireRate = 0;
+    this.radius = 8;
+    this.alive = true;
+    this.respawnTimer = 0;
+    this.trackTimer = 0;
+    this.targetX = x;
+    this.targetY = y;
+    this.moveTimer = 0;
+    this.shootTimer = 0;
+    this.bazooka = false;
+    this.kills = 0;
+    
+    if (type === 'tank') {
+      this.radius = 14;
+      this.health = 200;
+      this.maxHealth = 200;
+      this.maxSpeed = 0.6;
+      this.fireRate = 80;
+      this.bulletSpeed = 3.5;
+      this.bulletDamage = 35;
+      this.bulletRadius = 3;
+    } else if (type === 'soldier') {
+      this.radius = 5;
+      this.maxSpeed = 1.2;
+      this.fireRate = 25;
+      this.bulletSpeed = 5;
+      this.bulletDamage = 8;
+      this.bulletRadius = 1.5;
+    } else if (type === 'bazooka') {
+      this.radius = 6;
+      this.maxSpeed = 1.0;
+      this.fireRate = 120;
+      this.bulletSpeed = 2.5;
+      this.bulletDamage = 120;
+      this.bulletRadius = 4;
+      this.bazooka = true;
+    }
+    this.fireCooldown = Math.random() * this.fireRate;
+  }
+  
+  getDamage() { return 1 - this.health / this.maxHealth; }
+  
+  findNearestEnemy() {
+    let nearest = null;
+    let minDist = this.type === 'tank' ? 300 : 200;
+    for (const u of units) {
+      if (!u.alive || u.team === this.team) continue;
+      const dx = u.x - this.x;
+      const dy = u.y - this.y;
+      const d = Math.sqrt(dx*dx + dy*dy);
+      if (d < minDist) {
+        minDist = d;
+        nearest = u;
+      }
+    }
+    return nearest;
+  }
+  
+  findNearestEnemyBulldozed() {
+    let nearest = null;
+    let minDist = this.type === 'tank' ? 500 : 350;
+    for (const u of units) {
+      if (!u.alive || u.team === this.team) continue;
+      const dx = u.x - this.x;
+      const dy = u.y - this.y;
+      const d = Math.sqrt(dx*dx + dy*dy);
+      if (d < minDist) {
+        minDist = d;
+        nearest = u;
+      }
+    }
+    return nearest;
+  }
+  
+  update() {
+    if (!this.alive) {
+      this.respawnTimer--;
+      if (this.respawnTimer <= 0) {
+        this.alive = true;
+        this.health = this.maxHealth;
+        this.respawn();
+      }
+      return;
+    }
+    
+    this.fireCooldown--;
+    this.moveTimer--;
+    
+    const enemy = this.findNearestEnemyBulldozed();
+    let moveTarget = null;
+    
+    if (enemy) {
+      const dx = enemy.x - this.x;
+      const dy = enemy.y - this.y;
+      const dist = Math.sqrt(dx*dx + dy*dy);
+      const range = this.type === 'tank' ? 250 : (this.bazooka ? 200 : 120);
+      
+      if (dist > range * 0.7) {
+        this.targetX = enemy.x + (Math.random()-0.5)*40;
+        this.targetY = enemy.y + (Math.random()-0.5)*40;
+        moveTarget = { x: this.targetX, y: this.targetY };
+      } else if (dist > range * 1.3) {
+        this.targetX = enemy.x + (Math.random()-0.5)*60;
+        this.targetY = enemy.y + (Math.random()-0.5)*60;
+        moveTarget = { x: this.targetX, y: this.targetY };
+      }
+      
+      // Aim turret at enemy
+      this.turretAngle = Math.atan2(dy, dx);
+      
+      // Shoot
+      if (this.fireCooldown <= 0 && dist < range) {
+        this.shoot(enemy);
+        this.fireCooldown = this.fireRate + Math.random() * 20;
+      }
+    } else {
+      // Patrol
+      if (this.moveTimer <= 0) {
+        this.targetX = 50 + Math.random() * (W - 100);
+        this.targetY = 50 + Math.random() * (H - 100);
+        this.moveTimer = 100 + Math.random() * 200;
+      }
+      moveTarget = { x: this.targetX, y: this.targetY };
+      this.turretAngle += 0.02;
+    }
+    
+    // Move
+    if (moveTarget) {
+      const dx = moveTarget.x - this.x;
+      const dy = moveTarget.y - this.y;
+      const dist = Math.sqrt(dx*dx + dy*dy);
+      
+      if (dist > 2) {
+        const speed = this.maxSpeed;
+        this.x += (dx / dist) * speed;
+        this.y += (dy / dist) * speed;
+        this.angle = Math.atan2(dy, dx);
+        
+        // Stamp tracks for tanks
+        if (this.type === 'tank') {
+          this.trackTimer++;
+          if (this.trackTimer % 5 === 0) {
+            this.stampTracks();
+          }
+        }
+      }
+    }
+    
+    // Keep in bounds
+    this.x = Math.max(this.radius, Math.min(W - this.radius, this.x));
+    this.y = Math.max(this.radius, Math.min(H - this.radius, this.y));
+    
+    // Avoid walls
+    for (const wall of walls) {
+      const hw = wall.w/2 + this.radius;
+      const hh = wall.h/2 + this.radius;
+      if (this.x > wall.x - hw && this.x < wall.x + hw &&
+          this.y > wall.y - hh && this.y < wall.y + hh) {
+        const pushX = this.x < wall.x ? -1 : 1;
+        const pushY = this.y < wall.y ? -1 : 1;
+        this.x += pushX * 1.5;
+        this.y += pushY * 1.5;
+      }
+    }
+    
+    // Avoid clumping with own team
+    for (const u of units) {
+      if (!u.alive || u === this || u.team !== this.team) continue;
+      const dx = u.x - this.x;
+      const dy = u.y - this.y;
+      const d = Math.sqrt(dx*dx + dy*dy);
+      const minSep = this.radius + u.radius + 15;
+      if (d < minSep && d > 0) {
+        this.x -= (dx/d) * 0.8;
+        this.y -= (dy/d) * 0.8;
+      }
+    }
+    
+    // Avoid clumping with enemies
+    for (const u of units) {
+      if (!u.alive || u.team === this.team) continue;
+      const dx = u.x - this.x;
+      const dy = u.y - this.y;
+      const d = Math.sqrt(dx*dx + dy*dy);
+      const minSep = this.radius + u.radius + 10;
+      if (d < minSep && d > 0) {
+        this.x -= (dx/d) * 0.3;
+        this.y -= (dy/d) * 0.3;
+      }
+    }
+  }
+  
+  stampTracks() {
+    const cos = Math.cos(this.angle);
+    const sin = Math.sin(this.angle);
+    const trackOffset = 5;
+    for (let i = 0; i < 3; i++) {
+      const tx = this.x - cos * (i*3 + 5) - sin * trackOffset;
+      const ty = this.y - sin * (i*3 + 5) + cos * trackOffset;
+      TERRAIN_DAMAGE.fillStyle = `rgba(40, 35, 20, ${0.15 + Math.random()*0.1})`;
+      TERRAIN_DAMAGE.fillRect(tx - 1, ty - 1, 3, 3);
+      
+      const tx2 = this.x - cos * (i*3 + 5) + sin * trackOffset;
+      const ty2 = this.y - sin * (i*3 + 5) - cos * trackOffset;
+      TERRAIN_DAMAGE.fillStyle = `rgba(40, 35, 20, ${0.15 + Math.random()*0.1})`;
+      TERRAIN_DAMAGE.fillRect(tx2 - 1, ty2 - 1, 3, 3);
+    }
+  }
+  
+  stampDeathMark() {
+    if (this.type === 'tank') {
+      // Wreck mark
+      TERRAIN_DAMAGE.save();
+      TERRAIN_DAMAGE.translate(this.x, this.y);
+      TERRAIN_DAMAGE.rotate(this.angle);
+      TERRAIN_DAMAGE.fillStyle = '#1a1a1a';
+      TERRAIN_DAMAGE.fillRect(-14, -10, 28, 20);
+      TERRAIN_DAMAGE.fillStyle = '#0d0d0d';
+      TERRAIN_DAMAGE.beginPath();
+      TERRAIN_DAMAGE.arc(6, 0, 5, 0, Math.PI*2);
+      TERRAIN_DAMAGE.fill();
+      TERRAIN_DAMAGE.restore();
+      
+      // Scorch circle
+      const grad = TERRAIN_DAMAGE.createRadialGradient(this.x, this.y, 0, this.x, this.y, 25);
+      grad.addColorStop(0, 'rgba(30, 20, 10, 0.6)');
+      grad.addColorStop(0.5, 'rgba(40, 25, 10, 0.3)');
+      grad.addColorStop(1, 'rgba(50, 30, 15, 0)');
+      TERRAIN_DAMAGE.fillStyle = grad;
+      TERRAIN_DAMAGE.beginPath();
+      TERRAIN_DAMAGE.arc(this.x, this.y, 25, 0, Math.PI*2);
+      TERRAIN_DAMAGE.fill();
+    } else {
+      // Body mark
+      TERRAIN_DAMAGE.fillStyle = 'rgba(40, 20, 15, 0.5)';
+      TERRAIN_DAMAGE.beginPath();
+      TERRAIN_DAMAGE.arc(this.x, this.y, 5, 0, Math.PI*2);
+      TERRAIN_DAMAGE.fill();
+      TERRAIN_DAMAGE.fillStyle = 'rgba(60, 30

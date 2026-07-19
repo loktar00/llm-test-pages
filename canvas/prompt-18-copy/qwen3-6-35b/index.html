@@ -38,4 +38,522 @@
         // --- CONFIGURATION ---
         const CONFIG = {
             TILE_SIZE: 100,
-            CITY_SIZE: 40, // 40x4
+            CITY_SIZE: 40, // 40x40 blocks
+            ROAD_WIDTH: 0.6, // 60% of tile is road, 40% building
+            ZOMBIE_SPAWN_RATE: 5, // Frames between spawns
+            ZOMBIE_SPAWN_DIST: 1000,
+            CAR_SPEED: 12,
+            CAR_TURN_SPEED: 0.08,
+            CAR_FRICTION: 0.96,
+            CAR_ACCEL: 0.4,
+            WAYPOINT_DETECT_DIST: 80,
+            CAMERA_SMOOTH: 0.1,
+            MAX_BLOOD: 500, // Limit persistent blood for performance
+            MAX_CASINGS: 200
+        };
+
+        // --- SETUP ---
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const persistentCanvas = document.createElement('canvas');
+        const pCtx = persistentCanvas.getContext('2d'); // For drawing permanent damage
+        
+        let W, H;
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+            persistentCanvas.width = W;
+            persistentCanvas.height = H;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // --- UTILS ---
+        const rand = (min, max) => Math.random() * (max - min) + min;
+        const randInt = (min, max) => Math.floor(rand(min, max));
+        const dist = (x1, y1, x2, y2) => Math.hypot(x2 - x1, y2 - y1);
+        
+        // --- WORLD GENERATION ---
+        // 0: Road, 1: Building
+        const cityGrid = [];
+        const waypoints = [];
+        const buildings = []; // For collision geometry
+
+        function generateCity() {
+            cityGrid.length = 0;
+            buildings.length = 0;
+            waypoints.length = 0;
+
+            const cols = CONFIG.CITY_SIZE;
+            const rows = CONFIG.CITY_SIZE;
+
+            // 1. Create Grid (Stripes)
+            for (let y = 0; y < rows; y++) {
+                const row = [];
+                for (let x = 0; x < cols; x++) {
+                    // Make 2 lanes of road vertically, 2 lanes horizontally
+                    const isHorizRoad = (y % 4) === 1 || (y % 4) === 2;
+                    const isVertRoad = (x % 4) === 1 || (x % 4) === 2;
+                    
+                    if (isHorizRoad || isVertRoad) {
+                        row.push(0); // Road
+                    } else {
+                        row.push(1); // Building
+                    }
+                }
+                cityGrid.push(row);
+            }
+
+            // 2. Generate Buildings & Waypoints
+            const ts = CONFIG.TILE_SIZE;
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    const tx = x * ts;
+                    const ty = y * ts;
+
+                    if (cityGrid[y][x] === 1) {
+                        // Add Building
+                        const bWidth = ts * CONFIG.ROAD_WIDTH;
+                        // Center building in the non-road area
+                        const offsetX = (ts - bWidth) / 2;
+                        const offsetY = (ts - bWidth) / 2;
+                        
+                        buildings.push({
+                            x: tx + offsetX,
+                            y: ty + offsetY,
+                            w: bWidth,
+                            h: bWidth,
+                            color: `hsl(0, 0%, ${randInt(15, 30)}%)`
+                        });
+                    } else {
+                        // Add Waypoint at intersections/centers of roads
+                        // Only add at specific intersections to keep graph sparse
+                        if (x % 2 === 1 && y % 2 === 1) {
+                            waypoints.push({
+                                x: tx + ts / 2,
+                                y: ty + ts / 2,
+                                id: `${x},${y}`
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- ENTITIES ---
+
+        class Particle {
+            constructor(x, y, type) {
+                this.x = x;
+                this.y = y;
+                this.type = type; // 'blood', 'smoke', 'spark', 'casing', 'debris'
+                this.life = 1.0;
+                this.decay = rand(0.01, 0.03);
+                this.size = rand(2, 5);
+                this.vx = rand(-2, 2);
+                this.vy = rand(-2, 2);
+                this.color = type === 'blood' ? `rgb(${randInt(100,150)}, 0, 0)` : 
+                             type === 'smoke' ? `rgba(100,100,100,` :
+                             type === 'spark' ? '#ffffaa' : '#888';
+            }
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.life -= this.decay;
+                if(this.type === 'smoke') {
+                    this.size += 0.2;
+                    this.vx *= 0.9;
+                    this.vy *= 0.9;
+                } else {
+                    this.vx *= 0.8;
+                    this.vy *= 0.8;
+                }
+            }
+            draw(ctx) {
+                ctx.globalAlpha = this.life;
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.globalAlpha = 1.0;
+            }
+        }
+
+        class Bullet {
+            constructor(x, y, angle) {
+                this.x = x;
+                this.y = y;
+                this.vx = Math.cos(angle) * 20;
+                this.vy = Math.sin(angle) * 20;
+                this.life = 60; // frames
+                this.active = true;
+            }
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.life--;
+                if (this.life <= 0) this.active = false;
+
+                // Collision with buildings
+                for (let b of buildings) {
+                    if (this.x > b.x && this.x < b.x + b.w &&
+                        this.y > b.y && this.y < b.y + b.h) {
+                        this.active = false;
+                        // Add damage to persistent layer immediately or spawn particle
+                        pCtx.fillStyle = "#222"; // scorch mark
+                        pCtx.beginPath(); pCtx.arc(this.x, this.y, 3, 0, Math.PI*2); pCtx.fill();
+                        return;
+                    }
+                }
+            }
+            draw(ctx) {
+                ctx.strokeStyle = '#ffff00';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(this.x, this.y);
+                ctx.lineTo(this.x - this.vx * 0.5, this.y - this.vy * 0.5);
+                ctx.stroke();
+            }
+        }
+
+        class Zombie {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.vx = 0;
+                this.vy = 0;
+                this.speed = rand(0.5, 1.5);
+                this.active = true;
+                this.color = '#4caf50';
+                this.angle = 0;
+            }
+            update(car) {
+                const d = dist(this.x, this.y, car.x, car.y);
+                
+                // Detection range
+                if (d < 600) {
+                    const targetAngle = Math.atan2(car.y - this.y, car.x - this.x);
+                    // Simple steering
+                    this.x += Math.cos(targetAngle) * this.speed;
+                    this.y += Math.sin(targetAngle) * this.speed;
+                    this.angle = targetAngle;
+                } else {
+                    // Wander slightly
+                    this.x += rand(-0.5, 0.5);
+                    this.y += rand(-0.5, 0.5);
+                }
+
+                // Building collision for zombies
+                for (let b of buildings) {
+                    if (this.x > b.x && this.x < b.x + b.w &&
+                        this.y > b.y && this.y < b.y + b.h) {
+                        this.x -= Math.cos(this.angle) * 2;
+                        this.y -= Math.sin(this.angle) * 2;
+                    }
+                }
+            }
+            draw(ctx) {
+                ctx.fillStyle = this.color;
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.angle);
+                ctx.beginPath();
+                ctx.arc(0, 0, 6, 0, Math.PI * 2);
+                ctx.fill();
+                // Arms
+                ctx.strokeStyle = this.color;
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.moveTo(0, 0); ctx.lineTo(8, 4);
+                ctx.moveTo(0, 0); ctx.lineTo(8, -4);
+                ctx.stroke();
+                ctx.restore();
+            }
+        }
+
+        class Car {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.vx = 0;
+                this.vy = 0;
+                this.angle = -Math.PI / 2;
+                this.health = 100;
+                this.maxHealth = 100;
+                this.targetWaypoint = null;
+                this.active = true;
+                this.width = 20;
+                this.height = 40;
+                this.lastShot = 0;
+                this.skidTimer = 0;
+                
+                // Select random waypoint to start
+                this.pickWaypoint();
+            }
+
+            pickWaypoint() {
+                // Filter reachable waypoints (roads)
+                const possible = waypoints.filter(wp => {
+                    // Simple distance check to current position
+                    return dist(this.x, this.y, wp.x, wp.y) < 1500;
+                });
+                
+                if (possible.length > 0) {
+                    // Pick random nearby
+                    this.targetWaypoint = possible[randInt(0, possible.length)];
+                }
+            }
+
+            update(zombies, bullets) {
+                if (!this.active) return;
+
+                // 1. Steering Logic
+                if (this.targetWaypoint) {
+                    const dx = this.targetWaypoint.x - this.x;
+                    const dy = this.targetWaypoint.y - this.y;
+                    const distToTarget = Math.hypot(dx, dy);
+                    
+                    const targetAngle = Math.atan2(dy, dx);
+                    
+                    // Normalize angles
+                    let diff = targetAngle - this.angle;
+                    while (diff <= -Math.PI) diff += Math.PI * 2;
+                    while (diff > Math.PI) diff -= Math.PI * 2;
+
+                    // Turn towards target
+                    if (Math.abs(diff) > CONFIG.CAR_TURN_SPEED) {
+                        this.angle += Math.sign(diff) * CONFIG.CAR_TURN_SPEED;
+                    } else {
+                        this.angle = targetAngle;
+                    }
+
+                    // Reached waypoint?
+                    if (distToTarget < CONFIG.WAYPOINT_DETECT_DIST) {
+                        this.pickWaypoint();
+                    }
+                }
+
+                // 2. Physics
+                // Accelerate forward
+                this.vx += Math.cos(this.angle) * CONFIG.CAR_ACCEL;
+                this.vy += Math.sin(this.angle) * CONFIG.CAR_ACCEL;
+
+                // Friction
+                this.vx *= CONFIG.CAR_FRICTION;
+                this.vy *= CONFIG.CAR_FRICTION;
+
+                // Cap speed
+                const speed = Math.hypot(this.vx, this.vy);
+                if (speed > CONFIG.CAR_SPEED) {
+                    const ratio = CONFIG.CAR_SPEED / speed;
+                    this.vx *= ratio;
+                    this.vy *= ratio;
+                }
+
+                // Apply velocity
+                const nextX = this.x + this.vx;
+                const nextY = this.y + this.vy;
+
+                // 3. Collision with Buildings
+                let collision = false;
+                for (let b of buildings) {
+                    // AABB vs Point (Approx car as box)
+                    // Simple point collision for car center for this demo to save perf
+                    if (nextX > b.x && nextX < b.x + b.w &&
+                        nextY > b.y && nextY < b.y + b.h) {
+                        
+                        // Bounce
+                        this.vx *= -0.5;
+                        this.vy *= -0.5;
+                        this.x -= this.vx * 2; // Push back
+                        this.y -= this.vy * 2;
+                        this.health -= 5;
+                        collision = true;
+                        
+                        // Damage on canvas
+                        pCtx.fillStyle = "#111"; // Oil stain
+                        pCtx.beginPath(); pCtx.arc(this.x, this.y, 15, 0, Math.PI*2); pCtx.fill();
+                        break;
+                    }
+                }
+
+                if (!collision) {
+                    this.x = nextX;
+                    this.y = nextY;
+                }
+
+                // Skid marks
+                if (Math.abs(diff) > 0.5 && speed > 5) {
+                    this.skidTimer++;
+                    if (this.skidTimer % 3 === 0) {
+                        this.drawSkidMark();
+                    }
+                } else {
+                    this.skidTimer = 0;
+                }
+
+                // 4. Combat Logic
+                
+                // Shooting
+                // Find closest zombie
+                let closestZ = null;
+                let minZDist = 400; // Range
+                
+                for (let z of zombies) {
+                    const d = dist(this.x, this.y, z.x, z.y);
+                    if (d < minZDist) {
+                        minZDist = d;
+                        closestZ = z;
+                    }
+                }
+
+                if (closestZ && Date.now() - this.lastShot > 100) {
+                    this.lastShot = Date.now();
+                    // Shoot from front right and front left
+                    bullets.push(new Bullet(this.x + Math.cos(this.angle)*20, this.y + Math.sin(this.angle)*20, this.angle));
+                }
+
+                // Zombie Collision (Run over)
+                for (let z of zombies) {
+                    if (z.active && dist(this.x, this.y, z.x, z.y) < 25) {
+                        z.active = false;
+                        this.health -= 2;
+                        this.vx *= 0.8; // Slow down
+                        this.vy *= 0.8;
+                        
+                        // Blood splatter on persistent layer
+                        pCtx.fillStyle = "#800";
+                        pCtx.beginPath(); pCtx.arc(z.x, z.y, 10, 0, Math.PI*2); pCtx.fill();
+                        
+                        // Particles
+                        for(let i=0; i<10; i++) particles.push(new Particle(z.x, z.y, 'blood'));
+                    }
+                }
+
+                // Zombie Attack (Drain health)
+                if (this.health <= 0) {
+                    this.active = false;
+                    // Explosion
+                    for(let i=0; i<50; i++) particles.push(new Particle(this.x, this.y, 'smoke'));
+                    for(let i=0; i<50; i++) particles.push(new Particle(this.x, this.y, 'spark'));
+                }
+            }
+
+            drawSkidMark() {
+                pCtx.fillStyle = "rgba(0,0,0,0.3)";
+                const offset = 10;
+                const rx = Math.cos(this.angle + Math.PI/2) * offset;
+                const ry = Math.sin(this.angle + Math.PI/2) * offset;
+                // Rear of car
+                pCtx.fillRect(this.x - rx - 5, this.y - ry - 5, 10, 10);
+            }
+
+            draw(ctx) {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.angle);
+
+                // Body
+                ctx.fillStyle = "#d32f2f"; // Red car
+                ctx.fillRect(-20, -10, 40, 20);
+                
+                // Roof/Windshield
+                ctx.fillStyle = "#222";
+                ctx.fillRect(-10, -8, 15, 16);
+                
+                // Turret/Gun
+                ctx.fillStyle = "#555";
+                ctx.fillRect(0, -2, 25, 4);
+
+                // Headlights
+                ctx.fillStyle = "#ffeb3b";
+                ctx.globalAlpha = 0.6;
+                ctx.beginPath();
+                ctx.moveTo(20, -8); ctx.lineTo(100, -30); ctx.lineTo(100, 30); ctx.lineTo(20, 8);
+                ctx.fill();
+                ctx.globalAlpha = 1.0;
+
+                ctx.restore();
+            }
+        }
+
+        // --- GAME STATE ---
+        let cars = [];
+        let zombies = [];
+        let bullets = [];
+        let particles = [];
+        let frameCount = 0;
+        let camera = { x: 0, y: 0 };
+        let currentCarIndex = 0;
+        let score = { kills: 0, carsLost: 0 };
+        let shake = 0;
+
+        function init() {
+            generateCity();
+            // Spawn first car in a road
+            const startWP = waypoints[0];
+            cars.push(new Car(startWP.x, startWP.y));
+            
+            // Spawn initial zombies
+            for(let i=0; i<100; i++) spawnZombie();
+        }
+
+        function spawnZombie() {
+            // Find a random road tile far away
+            const rx = randInt(0, CONFIG.CITY_SIZE);
+            const ry = randInt(0, CONFIG.CITY_SIZE);
+            if (cityGrid[ry] && cityGrid[ry][rx] === 0) {
+                const wx = rx * CONFIG.TILE_SIZE + CONFIG.TILE_SIZE/2;
+                const wy = ry * CONFIG.TILE_SIZE + CONFIG.TILE_SIZE/2;
+                
+                // Only spawn if far from current car
+                const activeCar = cars[currentCarIndex];
+                if (activeCar && dist(wx, wy, activeCar.x, activeCar.y) > CONFIG.ZOMBIE_SPAWN_DIST) {
+                    zombies.push(new Zombie(wx, wy));
+                }
+            }
+        }
+
+        function update() {
+            frameCount++;
+
+            // Spawner
+            if (frameCount % CONFIG.ZOMBIE_SPAWN_RATE === 0 && zombies.length < 400) {
+                spawnZombie();
+            }
+
+            const car = cars[currentCarIndex];
+
+            // If car died, switch
+            if (!car.active) {
+                score.carsLost++;
+                document.getElementById('carCount').innerText = score.carsLost;
+                
+                // Find next active car or spawn new
+                let nextCar = cars.find(c => c.active);
+                if (nextCar) {
+                    currentCarIndex = cars.indexOf(nextCar);
+                } else {
+                    // Spawn new
+                    const newWP = waypoints[randInt(0, waypoints.length)];
+                    cars.push(new Car(newWP.x, newWP.y));
+                    currentCarIndex = cars.length - 1;
+                    score.carsLost++;
+                    document.getElementById('carCount').innerText = score.carsLost;
+                }
+            }
+
+            // Update Entities
+            if (car) {
+                car.update(zombies, bullets);
+                // Update HUD
+                document.getElementById('healthDisplay').innerText = Math.max(0, Math.floor(car.health)) + "%";
+                if(car.health < 30) {
+                    // Smoke
+                    if(frameCount % 5 === 0) particles.push(new Particle(car.x, car.y, 'smoke'));
+                }
+            }
+
+            zombies.forEach(z => z.update(car));
+            bullets.forEach(b => b.update());
+            particles.forEach(p

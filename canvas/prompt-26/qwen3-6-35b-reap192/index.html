@@ -11,42 +11,311 @@
             width: 100%;
             height: 100%;
             overflow: hidden;
-            background-color: #020205; /* Deepest background */
+            background-color: #050510; /* Deep dark background */
         }
 
         canvas {
             display: block;
-            width: 100%;
-            height: 100%;
         }
 
-        /* We use CSS filters for bloom/glow because it's performant on modern GPUs */
-        #glow-layer {
+        /* 
+           We use CSS filters on the canvas to create the bloom/glow effect.
+           This is much cheaper than doing it in JS for every pixel.
+           We stack multiple blur layers to create a rich glow.
+        */
+        #glow-canvas {
             position: absolute;
             top: 0;
             left: 0;
             width: 100%;
             height: 100%;
-            /* Heavy blur for the bioluminescent glow effect */
-            filter: blur(25px) contrast(1.5) brightness(1.2); 
-            /* Mix blend mode helps merge colors into white-hot centers */
-            mix-blend-mode: screen; 
-            opacity: 0.8;
-            pointer-events: none;
+            filter: blur(20px) contrast(1.2); 
+            opacity: 0.6;
+            mix-blend-mode: screen;
         }
 
-        /* Base layer sits behind the glow */
-        #base-layer {
+        #main-canvas {
             position: absolute;
             top: 0;
             left: 0;
             width: 100%;
             height: 100%;
-            z-index: 0;
-        }
-
-        #glow-layer {
-            z-index: 1;
+            mix-blend-mode: screen;
         }
     </style>
 </head>
+<body>
+
+    <!-- The main canvas handles the pixel manipulation for the metaballs -->
+    <canvas id="main-canvas"></canvas>
+    <!-- The secondary canvas handles the heavy visual bloom/glow -->
+    <canvas id="glow-canvas"></canvas>
+
+    <script>
+        /**
+         * CHROMATIC PLASMA REEF
+         * A metaball screensaver using pixel-manipulation marching algorithm.
+         */
+
+        const mainCanvas = document.getElementById('main-canvas');
+        const glowCanvas = document.getElementById('glow-canvas');
+        const ctx = mainCanvas.getContext('2d', { willRead: true }); // willRead needed for getImageData
+        const gCtx = glowCanvas.getContext('2d');
+
+        let width, height;
+        let imageData, pixels;
+        
+        // Configuration
+        const CONFIG = {
+            particleCount: 45,          // Number of fluid blobs
+            gravity: 0.005,             // Gentle drift
+            damping: 0.99,              // Smooth movement
+            renderScale: 0.25,          // Resolution scale (0.25 = 1/4 res for performance)
+            threshold: 1.1,             // Metaball threshold (higher = tighter, lower = more fluid)
+            colorShiftSpeed: 0.005,     // Rate of hue change
+            bloomStrength: 1.5,         // How strong the glow is
+            depthLayers: 3              // Foreground/Midground/Background
+        };
+
+        // State variables
+        let time = 0;
+        let particles = [];
+
+        // Resize handling
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            
+            // Set resolution lower for the metaball calculation to ensure high FPS
+            const scale = CONFIG.renderScale;
+            mainCanvas.width = width * scale;
+            mainCanvas.height = height * scale;
+            
+            glowCanvas.width = width;
+            glowCanvas.height = height;
+
+            imageData = ctx.createImageData(mainCanvas.width, mainCanvas.height);
+            pixels = imageData.data;
+
+            // Re-initialize particles to fit new screen size
+            initParticles();
+        }
+
+        // Simple utility for random numbers
+        const random = (min, max) => Math.random() * (max - min) + min;
+
+        // Vector math helper
+        const vec = {
+            add: (v1, v2) => ({ x: v1.x + v2.x, y: v1.y + v2.y }),
+            sub: (v1, v2) => ({ x: v1.x - v2.x, y: v1.y - v2.y }),
+            mult: (v, s) => ({ x: v.x * s, y: v.y * s }),
+            mag: (v) => Math.sqrt(v.x * v.x + v.y * v.y),
+            norm: (v) => {
+                const m = Math.sqrt(v.x * v.x + v.y * v.y);
+                return m === 0 ? { x: 0, y: 0 } : { x: v.x / m, y: v.y / m };
+            },
+            dist: (v1, v2) => Math.sqrt((v1.x - v2.x) ** 2 + (v1.y - v2.y) ** 2)
+        };
+
+        class Particle {
+            constructor(depthLayer) {
+                this.layer = depthLayer; // 0: Back, 1: Mid, 2: Front
+                this.reset();
+            }
+
+            reset() {
+                this.x = random(0, width);
+                this.y = random(0, height);
+                
+                // Properties based on depth layer
+                const layerScale = 0.5 + (this.layer * 0.5); // Front is bigger
+                const layerSpeed = 0.2 + (this.layer * 0.4); // Front is faster
+                
+                this.radius = random(40, 120) * layerScale;
+                
+                // Organic movement vectors
+                this.vx = random(-1, 1) * layerSpeed;
+                this.vy = random(-1, 1) * layerSpeed;
+                
+                // Orbital parameters (for clustering behavior)
+                this.angle = random(0, Math.PI * 2);
+                this.orbitSpeed = random(-0.002, 0.002);
+                this.orbitRadius = random(0, 100);
+                
+                // Color phase offset
+                this.hueOffset = random(0, 360);
+            }
+
+            update() {
+                // 1. Flowing Field Motion (Perlin-ish noise replacement)
+                // We combine sine waves to create a pseudo-noise flow field
+                const t = time * 0.0005;
+                const noiseX = Math.sin(this.y * 0.005 + time * 0.0002);
+                const noiseY = Math.cos(this.x * 0.005 + time * 0.0002);
+                
+                this.vx += noiseX * 0.05;
+                this.vy += noiseY * 0.05;
+                
+                // Apply damping to keep them from accelerating infinitely
+                this.vx *= CONFIG.damping;
+                this.vy *= CONFIG.damping;
+                
+                // Apply movement
+                this.x += this.vx;
+                this.y += this.vy;
+
+                // 2. Orbital drift (makes them loop around vaguely)
+                this.angle += this.orbitSpeed;
+                this.x += Math.cos(this.angle) * 0.5;
+                this.y += Math.sin(this.angle) * 0.5;
+
+                // 3. Boundary wrapping (toroidal space)
+                // Wrap around edges smoothly
+                const margin = this.radius;
+                if (this.x < -margin) this.x = width + margin;
+                if (this.x > width + margin) this.x = -margin;
+                if (this.y < -margin) this.y = height + margin;
+                if (this.y > height + margin) this.y = -margin;
+            }
+        }
+
+        function initParticles() {
+            particles = [];
+            for (let i = 0; i < CONFIG.particleCount; i++) {
+                // Distribute across depth layers
+                const layer = Math.floor(Math.random() * CONFIG.depthLayers);
+                particles.push(new Particle(layer));
+            }
+        }
+
+        /**
+         * THE METABALL ALGORITHM
+         * 
+         * Instead of raymarching (GPU), we use a direct density field approach on the CPU canvas.
+         * 1. Iterate over every pixel in the low-res canvas.
+         * 2. For each pixel, calculate the "mass" accumulated from all particles.
+         *    Mass = Sum(Radius^2 / Distance^2).
+         * 3. If Mass > Threshold, color the pixel.
+         */
+        function renderMetaballs() {
+            const w = mainCanvas.width;
+            const h = mainCanvas.height;
+            const len = w * h;
+            const t = time * CONFIG.colorShiftSpeed;
+
+            // Pre-calculate particle data to avoid object overhead in loop
+            // Store x, y, radius squared, and color for fast access
+            const pData = particles.map(p => {
+                return {
+                    x: p.x * CONFIG.renderScale, // Convert screen coords to canvas coords
+                    y: p.y * CONFIG.renderScale,
+                    rSq: p.radius * p.radius,
+                    baseHue: (p.hueOffset + t * 100) % 360,
+                    layer: p.layer
+                };
+            });
+
+            // Loop through pixels
+            for (let y = 0; y < h; y++) {
+                for (let x = 0; x < w; x++) {
+                    let mass = 0;
+                    
+                    // Calculate field strength from all particles
+                    for (let i = 0; i < pData.length; i++) {
+                        const p = pData[i];
+                        const dx = x - p.x;
+                        const dy = y - p.y;
+                        const distSq = dx * dx + dy * dy;
+                        
+                        // Standard metaball function: f(r) = k / r^2
+                        // We use radius^2 in numerator so larger blobs have stronger pull
+                        mass += p.rSq / (distSq + 1); // +1 prevents divide by zero
+                    }
+
+                    // Determine pixel color
+                    if (mass > CONFIG.threshold) {
+                        const idx = (y * w + x) * 4;
+                        
+                        // Color Logic:
+                        // Base color comes from the dominant particle or the average of nearby ones.
+                        // For performance, we approximate based on the accumulated mass 
+                        // and a global color cycle.
+                        
+                        // Brightness increases with mass (density)
+                        const brightness = Math.min(mass * 0.1, 1);
+                        
+                        // Shift hue based on mass to create "energy" gradients
+                        // High mass = White/Cyan core, Low mass edge = Violet/Blue
+                        const hue = (mass * 20 + t * 50) % 360; 
+                        const sat = 80;
+                        const light = 50 + (brightness * 40);
+
+                        // HSL to RGB conversion (optimized inline)
+                        // This is a standard algorithm condensed for speed
+                        const c = (1 - Math.abs(2 * light / 100 - 1)) * sat / 100;
+                        const x_val = c * (1 - Math.abs((hue / 60) % 2 - 1));
+                        const m = light / 100 - c / 2;
+                        
+                        let r, g, b;
+                        if (hue < 60) { r=c; g=x_val; b=0; }
+                        else if (hue < 120) { r=x_val; g=c; b=0; }
+                        else if (hue < 180) { r=0; g=c; b=x_val; }
+                        else if (hue < 240) { r=0; g=x_val; b=c; }
+                        else if (hue < 300) { r=x_val; g=0; b=c; }
+                        else { r=c; g=0; b=x_val; }
+
+                        pixels[idx]     = (r + m) * 255;
+                        pixels[idx + 1] = (g + m) * 255;
+                        pixels[idx + 2] = (b + m) * 255;
+                        pixels[idx + 3] = 255; // Alpha
+                    } else {
+                        // Background (deep navy/black)
+                        const idx = (y * w + x) * 4;
+                        pixels[idx] = 5;
+                        pixels[idx + 1] = 5;
+                        pixels[idx + 2] = 20;
+                        pixels[idx + 3] = 255;
+                    }
+                }
+            }
+
+            ctx.putImageData(imageData, 0, 0);
+        }
+
+        function renderGlow() {
+            // Clear glow canvas
+            gCtx.clearRect(0, 0, width, height);
+            
+            // Draw the main canvas onto the glow canvas (upscaled)
+            // CSS filters on the canvas element handle the blur, 
+            // but we can also do a slight draw for sharper control if needed.
+            // Here we rely on the CSS filter defined in <style> for the heavy lifting.
+            
+            // However, to ensure the glow canvas actually renders the image, 
+            // we draw it here. The CSS filter makes it look like bloom.
+            gCtx.drawImage(mainCanvas, 0, 0, width, height);
+        }
+
+        function loop() {
+            time++;
+
+            // Update physics
+            particles.forEach(p => p.update());
+
+            // Render pixel manipulation
+            renderMetaballs();
+
+            // Render bloom layer
+            renderGlow();
+
+            requestAnimationFrame(loop);
+        }
+
+        // Start
+        window.addEventListener('resize', resize);
+        resize();
+        loop();
+
+    </script>
+</body>
+</html>

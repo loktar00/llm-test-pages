@@ -11,7 +11,7 @@
             width: 100%;
             height: 100%;
             overflow: hidden;
-            background-color: #050510;
+            background-color: #000;
         }
         canvas {
             display: block;
@@ -21,25 +21,283 @@
 <body>
     <canvas id="canvas"></canvas>
     <script>
-        // --- Setup ---
+        /**
+         * Starling Murmuration Screensaver
+         * Core Logic: 
+         * 1. Canvas setup with dusk gradient.
+         * 2. Procedural landscape generation.
+         * 3. Boids algorithm (Separation, Alignment, Cohesion).
+         * 4. Predator avoidance system.
+         * 5. Rendering loop with density/opacity adjustments.
+         */
+
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
-        
+
         let width, height;
-        let stars = [];
+        let boids = [];
+        let predator;
         
-        // --- Constants ---
-        const BOID_COUNT = 550; // Number of birds
-        const MAX_SPEED = 4.5;
-        const MIN_SPEED = 2.0;
-        const PERCEPTION_RADIUS = 40;
-        const SEPARATION_RADIUS = 20;
-        const SEPARATION_FORCE = 0.5;
-        const COHESION_FORCE = 0.02;
-        const ALIGNMENT_FORCE = 0.05;
-        const LIMITS_FORCE = 0.5;
-        const PREDATOR_INTERVAL = 300; // Frames between predator attacks
-        const PREDATOR_FORCE = 1.5;
-        const PREDATOR_RADIUS = 150;
-        const PREDATOR_DURATION = 60;
-        const FOG_DENSITY = 0.9
+        // Configuration
+        const BOID_COUNT = 500; // Number of stars/specks
+        const VIEW_RADIUS = 75; // How far they see
+        const SEPARATION_DIST = 25; // How far they push away from neighbors
+        const PREDATOR_DIST = 150; // Distance to trigger avoidance
+        const PREDATOR_SPEED = 3.5;
+        const MAX_SPEED = 3;
+        const TURN_FACTOR = 0.2;
+        
+        // Canvas Resize
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            initLandscape();
+        }
+        window.addEventListener('resize', resize);
+
+        // --- Vector Helper ---
+        class Vector {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+            }
+            add(v) { return new Vector(this.x + v.x, this.y + v.y); }
+            sub(v) { return new Vector(this.x - v.x, this.y - v.y); }
+            mult(n) { return new Vector(this.x * n, this.y * n); }
+            mag() { return Math.sqrt(this.x * this.x + this.y * this.y); }
+            normalize() {
+                let m = this.mag();
+                if (m !== 0) return new Vector(this.x / m, this.y / m);
+                return new Vector(0, 0);
+            }
+            limit(max) {
+                if (this.mag() > max) return this.normalize().mult(max);
+                return this;
+            }
+        }
+
+        // --- Landscape ---
+        let landscapePoints = [];
+        function initLandscape() {
+            landscapePoints = [];
+            let y = height;
+            let segWidth = 10;
+            // Generate rolling hills
+            for (let x = 0; x <= width; x += segWidth) {
+                // Simple noise simulation using math
+                let n = Math.sin(x * 0.005) * 100 + 
+                        Math.sin(x * 0.02) * 40 + 
+                        Math.sin(x * 0.1) * 10;
+                let baseHeight = height * 0.75;
+                let h = baseHeight - n - Math.random() * 15;
+                // Ensure it doesn't go above the middle too much
+                if (h < height * 0.6) h = height * 0.6;
+                landscapePoints.push({x, y: h});
+            }
+            // Add a final segment to close the shape
+            landscapePoints.push({x: width, y: height});
+            landscapePoints.push({x: 0, y: height});
+        }
+
+        function drawLandscape() {
+            ctx.fillStyle = '#0d0816'; // Very dark silhouette color
+            ctx.beginPath();
+            if (landscapePoints.length < 2) return;
+            ctx.moveTo(landscapePoints[0].x, landscapePoints[0].y);
+            for (let i = 1; i < landscapePoints.length; i++) {
+                // Smooth curve between points
+                // Simple lineTo for performance is fine for this aesthetic, 
+                // but let's add a tiny bit of curve logic if needed. 
+                // Standard lineTo looks good for distant hills.
+                ctx.lineTo(landscapePoints[i].x, landscapePoints[i].y);
+            }
+            ctx.lineTo(width, height);
+            ctx.lineTo(0, height);
+            ctx.fill();
+        }
+
+        // --- Boid Class ---
+        class Boid {
+            constructor() {
+                this.pos = new Vector(Math.random() * width, Math.random() * height * 0.8);
+                this.vel = new Vector(Math.random() * 2 - 1, Math.random() * 2 - 1);
+                this.acc = new Vector(0, 0);
+                this.alpha = Math.random() * 0.5 + 0.3; // Varying opacity for density effect
+                this.size = Math.random() * 1.5 + 0.5;
+            }
+
+            applyForce(force) {
+                this.acc = this.acc.add(force);
+            }
+
+            update() {
+                this.pos = this.pos.add(this.vel);
+                this.vel = this.vel.add(this.acc);
+                this.vel = this.vel.limit(MAX_SPEED);
+                this.acc = new Vector(0, 0); // Reset acceleration
+
+                // Wrap around screen
+                if (this.pos.x < 0) this.pos.x = width;
+                if (this.pos.x > width) this.pos.x = 0;
+                if (this.pos.y < 0) this.pos.y = height * 0.8; // Don't go too high
+                if (this.pos.y > height * 0.8) this.pos.y = height * 0.8;
+            }
+
+            // The 3 rules
+            flock(boids) {
+                let separation = new Vector(0, 0);
+                let alignment = new Vector(0, 0);
+                let cohesion = new Vector(0, 0);
+                let count = 0;
+
+                for (let other of boids) {
+                    let d = this.pos.sub(other.pos).mag();
+                    
+                    // Separation (Stronger, closer range)
+                    if (d < SEPARATION_DIST && d > 0) {
+                        let diff = this.pos.sub(other.pos).normalize();
+                        diff = diff.mult(1/d); // Weight by distance
+                        separation = separation.add(diff);
+                    }
+                    
+                    // Alignment & Cohesion (Weaker, further range)
+                    if (d < VIEW_RADIUS) {
+                        alignment = alignment.add(other.vel);
+                        cohesion = cohesion.add(other.pos);
+                        count++;
+                    }
+                }
+
+                if (count > 0) {
+                    alignment = alignment.mult(1/count).normalize().mult(MAX_SPEED).sub(this.vel).limit(TURN_FACTOR);
+                    cohesion = cohesion.mult(1/count).sub(this.pos).normalize().mult(MAX_SPEED).sub(this.vel).limit(TURN_FACTOR);
+                }
+                
+                // Predator Avoidance
+                if (predator.active) {
+                    let dToPredator = this.pos.sub(predator.pos).mag();
+                    if (dToPredator < PREDATOR_DIST) {
+                        let flee = this.pos.sub(predator.pos).normalize().mult(MAX_SPEED * 2).sub(this.vel).limit(TURN_FACTOR * 3);
+                        this.applyForce(flee.mult(3)); // High weight on fleeing
+                    }
+                }
+
+                this.applyForce(separation.mult(1.5));
+                this.applyForce(alignment.mult(1.0));
+                this.applyForce(cohesion.mult(1.0));
+            }
+
+            show() {
+                // Draw boids based on velocity for a slight tail effect, 
+                // or just as specks. 
+                // To make them look like "smoke", we draw them as soft circles.
+                ctx.fillStyle = `rgba(10, 10, 15, ${this.alpha})`;
+                ctx.beginPath();
+                ctx.arc(this.pos.x, this.pos.y, this.size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        // --- Predator ---
+        class Predator {
+            constructor() {
+                this.pos = new Vector(Math.random() * width, Math.random() * height);
+                this.vel = new Vector(0, 0);
+                this.active = false;
+                this.timer = 0;
+                this.target = null;
+                this.life = 0;
+            }
+
+            activate() {
+                this.active = true;
+                this.life = 300; // Frames to stay active
+                // Pick a random boid to target
+                this.target = boids[Math.floor(Math.random() * boids.length)];
+                // Start position offset from target
+                this.pos = this.target.pos.add(new Vector(200, -200));
+                this.vel = new Vector(0,0);
+            }
+
+            update() {
+                if (!this.active) {
+                    // Randomly decide to activate
+                    if (Math.random() < 0.002) {
+                        this.activate();
+                    }
+                    return;
+                }
+
+                this.life--;
+                if (this.life <= 0) {
+                    this.active = false;
+                    return;
+                }
+
+                // Move towards target
+                let desired = this.target.sub(this.pos);
+                desired = desired.normalize().mult(PREDATOR_SPEED);
+                let steer = desired.sub(this.vel);
+                steer.limit(0.2);
+                this.vel = this.vel.add(steer);
+                this.pos = this.pos.add(this.vel);
+            }
+
+            draw() {
+                // Predator is invisible, but maybe leaves a faint distortion trail?
+                // Or just nothing. The prompt says "invisible predator".
+            }
+        }
+
+        // --- Initialization ---
+        function init() {
+            resize();
+            for (let i = 0; i < BOID_COUNT; i++) {
+                boids.push(new Boid());
+            }
+            predator = new Predator();
+            animate();
+        }
+
+        // --- Main Loop ---
+        function animate() {
+            // Create dusk gradient
+            let gradient = ctx.createLinearGradient(0, 0, 0, height);
+            gradient.addColorStop(0, '#0f0c29'); // Deep purple/black
+            gradient.addColorStop(0.5, '#302b63'); // Mid purple
+            gradient.addColorStop(0.8, '#784b85'); // Muted pink/purple
+            gradient.addColorStop(1, '#d76d77'); // Sunset orange near horizon
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, width, height);
+
+            // Update and Draw Boids
+            // Optimization: Spatial hashing would be better for 700+ boids, 
+            // but O(N^2) with 500 is acceptable on modern JS engines (~250k checks/frame).
+            
+            // Sort boids by Y depth slightly to simulate 3D stacking? 
+            // Actually, simple layering is fine.
+            
+            for (let boid of boids) {
+                boid.flock(boids);
+                boid.update();
+                boid.show();
+            }
+
+            // Predator Logic
+            predator.update();
+            // predator.draw(); // Invisible
+
+            // Draw Landscape
+            drawLandscape();
+
+            requestAnimationFrame(animate);
+        }
+
+        // Start
+        init();
+
+    </script>
+</body>
+</html>

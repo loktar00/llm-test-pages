@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>N-Body Gravity Simulation</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; display: flex; justify-content: center; align-items: center; height: 100vh; }
+canvas { display: block; }
+#info { position: absolute; top: 15px; left: 50%; transform: translateX(-50%); color: #fff; font-family: 'Segoe UI', Arial, sans-serif; font-size: 16px; text-align: center; pointer-events: none; text-shadow: 0 0 10px rgba(0,0,0,0.8); }
+#label { font-size: 22px; font-weight: bold; margin-bottom: 4px; }
+#timer { font-size: 14px; opacity: 0.7; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div id="info"><div id="label"></div><div id="timer"></div></div>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const labelEl = document.getElementById('label');
+const timerEl = document.getElementById('timer');
+
+let W, H, cx, cy;
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    cx = W / 2;
+    cy = H / 2;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// Stars
+const stars = [];
+for (let i = 0; i < 400; i++) {
+    stars.push({
+        x: Math.random(),
+        y: Math.random(),
+        r: Math.random() * 1.5 + 0.3,
+        brightness: Math.random() * 0.6 + 0.4,
+        twinkleSpeed: Math.random() * 2 + 0.5
+    });
+}
+
+// Physics constants
+const G = 1;
+const SOFTENING = 2;
+
+class Body {
+    constructor(x, y, vx, vy, mass, radius, color, name) {
+        this.x = x; this.y = y;
+        this.vx = vx; this.vy = vy;
+        this.mass = mass;
+        this.radius = radius;
+        this.color = color;
+        this.name = name;
+        this.trail = [];
+        this.maxTrail = 300;
+    }
+}
+
+function createSolarSystem() {
+    const bodies = [];
+    // Sun at center
+    const sunMass = 10000000;
+    bodies.push(new Body(0, 0, 0, 0, sunMass, 20, '#FDB813', 'Sun'));
+
+    // Planet data: [distance, period_factor, radius, color, name]
+    // Period = 3 * period_factor seconds for Earth to orbit in 3s
+    // v = sqrt(GM/r), angular velocity for Earth = 2π/3
+    const EarthDist = 150;
+    const omegaEarth = 2 * Math.PI / 3;
+    const GM = omegaEarth * omegaEarth * EarthDist * EarthDist * EarthDist;
+
+    const planets = [
+        { r: 55, period: 0.4, rad: 3, color: '#A0522D', name: 'Mercury' },
+        { r: 90, period: 1.0, rad: 5, color: '#E8C84A', name: 'Venus' },
+        { r: EarthDist, period: 3.0, rad: 5.5, color: '#4A90D9', name: 'Earth' },
+        { r: 210, period: 5.8, rad: 4, color: '#D94A3A', name: 'Mars' },
+        { r: 340, period: 14, rad: 12, color: '#D4A55A', name: 'Jupiter' },
+        { r: 440, period: 22, rad: 10, color: '#C8B87A', name: 'Saturn' },
+    ];
+
+    for (const p of planets) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = Math.sqrt(GM / p.r);
+        const vx = -Math.sin(angle) * speed;
+        const vy = Math.cos(angle) * speed;
+        bodies.push(new Body(Math.cos(angle) * p.r, Math.sin(angle) * p.r, vx, vy, p.r * 50, p.rad, p.color, p.name));
+    }
+    return bodies;
+}
+
+function createEarthMoon() {
+    const bodies = [];
+    const sunMass = 10000000;
+    bodies.push(new Body(0, 0, 0, 0, sunMass, 20, '#FDB813', 'Sun'));
+
+    const EarthDist = 150;
+    const omegaEarth = 2 * Math.PI / 3;
+    const GM = omegaEarth * omegaEarth * EarthDist * EarthDist * EarthDist;
+    const earthSpeed = Math.sqrt(GM / EarthDist);
+
+    const earth = new Body(EarthDist, 0, 0, earthSpeed, 500000, 7, '#4A90D9', 'Earth');
+    bodies.push(earth);
+
+    // Moon orbiting Earth
+    const moonDist = 30;
+    const moonPeriod = 0.6;
+    const moonOmega = 2 * Math.PI / moonPeriod;
+    const moonSpeed = moonOmega * moonDist;
+    const moonMass = 10000;
+
+    // Moon orbits Earth in the same direction as Earth orbits Sun
+    const moon = new Body(EarthDist + moonDist, 0, 0, earthSpeed + moonSpeed, moonMass, 3, '#CCCCCC', 'Moon');
+    bodies.push(moon);
+
+    return bodies;
+}
+
+function createFigure8() {
+    // Plummer's figure-8 three-body solution
+    // Two equal masses tracing a figure-8
+    const scale = 120;
+    const vScale = 0.6;
+    const mass = 1000000;
+
+    const bodies = [];
+
+    // Body 1
+    bodies.push(new Body(
+        -0.970243 * scale, 0.243064 * scale,
+        0.9320237 * vScale, 0.6615013 * vScale,
+        mass, 10, '#FF6B6B', 'Body A'
+    ));
+
+    // Body 2
+    bodies.push(new Body(
+        0.970243 * scale, -0.243064 * scale,
+        0.9320237 * vScale, 0.6615013 * vScale,
+        mass, 10, '#4ECDC4', 'Body B'
+    ));
+
+    // Small body in the middle to add visual interest (the third body in the classic figure-8)
+    bodies.push(new Body(
+        0, 0,
+        -2 * 0.9320237 * vScale, -2 * 0.6615013 * vScale,
+        1000, 4, '#FFE66D', 'Body C'
+    ));
+
+    return bodies;
+}
+
+const simulations = [
+    { name: 'Solar System', create: createSolarSystem },
+    { name: 'Sun, Earth & Moon', create: createEarthMoon },
+    { name: 'Figure-8 Orbit', create: createFigure8 }
+];
+
+let simIndex = 0;
+let simTimer = 0;
+const SIM_DURATION = 3;
+let bodies = [];
+let lastTime = 0;
+let simStarted = false;
+
+function startSimulation(index) {
+    simIndex = index % simulations.length;
+    simTimer = 0;
+    bodies = simulations[simIndex].create();
+    labelEl.textContent = simulations[simIndex].name;
+    simStarted = true;
+}
+
+startSimulation(0);
+
+function stepPhysics(dt) {
+    const substeps = 8;
+    const subDt = dt / substeps;
+
+    for (let s = 0; s < substeps; s++) {
+        // Compute accelerations
+        for (let i = 0; i < bodies.length; i++) {
+            let ax = 0, ay = 0;
+            for (let j = 0; j < bodies.length; j++) {
+                if (i === j) continue;
+                const dx = bodies[j].x - bodies[i].x;
+                const dy = bodies[j].y - bodies[i].y;
+                const distSq = dx * dx + dy * dy + SOFTENING * SOFTENING;
+                const dist = Math.sqrt(distSq);
+                const force = G * bodies[j].mass / (distSq * dist);
+                ax += force * dx;
+                ay += force * dy;
+            }
+            bodies[i].ax = ax;
+            bodies[i].ay = ay;
+        }
+
+        // Update velocities and positions
+        for (const b of bodies) {
+            b.vx += b.ax * subDt;
+            b.vy += b.ay * subDt;
+            b.x += b.vx * subDt;
+            b.y += b.vy * subDt;
+        }
+    }
+
+    // Record trails
+    for (const b of bodies) {
+        b.trail.push({ x: b.x, y: b.y });
+        if (b.trail.length > b.maxTrail) {
+            b.trail.shift();
+        }
+    }
+}
+
+function drawStars(time) {
+    for (const s of stars) {
+        const twinkle = 0.5 + 0.5 * Math.sin(time * s.twinkleSpeed);
+        const alpha = s.brightness * (0.6 + 0.4 * twinkle);
+        ctx.beginPath();
+        ctx.arc(s.x * W, s.y * H, s.r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+        ctx.fill();
+    }
+}
+
+function drawTrails() {
+    for (const b of bodies) {
+        if (b.trail.length < 2) continue;
+        for (let i = 1; i < b.trail.length; i++) {
+            const alpha = (i / b.trail.length) * 0.7;
+            const width = (i / b.trail.length) * 2.5;
+            ctx.beginPath();
+            ctx.moveTo(cx + b.trail[i - 1].x, cy + b.trail[i - 1].y);
+            ctx.lineTo(cx + b.trail[i].x, cy + b.trail[i].y);
+            ctx.strokeStyle = b.color + Math.floor(alpha * 255).toString(16).padStart(2, '0');
+            ctx.lineWidth = width;
+            ctx.stroke();
+        }
+    }
+}
+
+function drawBodies() {
+    for (const b of bodies) {
+        // Glow
+        const gradient = ctx.createRadialGradient(cx + b.x, cy + b.y, 0, cx + b.x, cy + b.y, b.radius * 3);
+        gradient.addColorStop(0, b.color);
+        gradient.addColorStop(0.4, b.color + '88');
+        gradient.addColorStop(1, 'transparent');
+        ctx.beginPath();
+        ctx.arc(cx + b.x, cy + b.y, b.radius * 3, 0, Math.PI * 2);
+        ctx.fillStyle = gradient;
+        ctx.fill();
+
+        // Body
+        ctx.beginPath();
+        ctx.arc(cx + b.x, cy + b.y, b.radius, 0, Math.PI * 2);
+        ctx.fillStyle = b.color;
+        ctx.fill();
+
+        // Sun glow for large bodies
+        if (b.radius > 15) {
+            const sunGrad = ctx.createRadialGradient(cx + b.x, cy + b.y, b.radius * 0.5, cx + b.x, cy + b.y, b.radius * 6);
+            sunGrad.addColorStop(0, 'rgba(253, 184, 19, 0.3)');
+            sunGrad.addColorStop(1, 'transparent');
+            ctx.beginPath();
+            ctx.arc(cx + b.x, cy + b.y, b.radius * 6, 0, Math.PI * 2);
+            ctx.fillStyle = sunGrad;
+            ctx.fill();
+        }
+    }
+}
+
+function drawProgress() {
+    const progress = simTimer / SIM_DURATION;
+    const barWidth = 200;
+    const barHeight = 4;
+    const barX = (W - barWidth) / 2;
+    const barY = H - 20;
+
+    ctx.fillStyle = 'rgba(255,255,255,0.15)';
+    ctx.fillRect(barX, barY, barWidth, barHeight);
+
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.fillRect(barX, barY, barWidth * progress, barHeight);
+}
+
+function animate(timestamp) {
+    if (!lastTime) lastTime = timestamp;
+    let dt = (timestamp - lastTime) / 1000;
+    lastTime = timestamp;
+
+    // Clamp dt to avoid spiral of death
+    if (dt > 0.05) dt = 0.05;
+
+    // Update simulation timer
+    if (simStarted) {
+        simTimer += dt;
+        const elapsed = simTimer;
+        const remaining = Math.max(0, SIM_DURATION - elapsed);
+        timerEl.textContent = `${simulations[simIndex].name} — ${remaining.toFixed(1)}s`;
+
+        if (simTimer >= SIM_DURATION) {
+            simStarted = false;
+            setTimeout(() => {
+                startSimulation((simIndex + 1) % simulations.length);
+            }, 200);
+        }
+    } else {
+        timerEl.textContent = '';
+    }
+
+    // Physics
+    if (simStarted) {
+        stepPhysics(dt);
+    }
+
+    // Clear with slight fade for motion blur effect
+    ctx.fillStyle = 'rgba(0, 0, 5, 1)';
+    ctx.fillRect(0, 0, W, H);
+
+    // Draw stars
+    drawStars(timestamp / 1000);
+
+    // Draw trails
+    drawTrails();
+
+    // Draw bodies
+    drawBodies();
+
+    // Draw progress bar
+    drawProgress();
+
+    requestAnimationFrame(animate);
+}
+
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>

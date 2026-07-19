@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Endless Marble Run</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
+  #stage { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<script>
+(function () {
+  const canvas = document.getElementById('stage');
+  const ctx = canvas.getContext('2d');
+
+  let W = 0, H = 0;
+  function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // World coordinates: vertical, origin top-left, y increases downward.
+  // World is 600 wide (x: 0..600) and "infinite" tall.
+  const WORLD_W = 640;
+  const GRAVITY = 1400;            // px/s^2
+  const RESTITUTION = 0.55;        // bounciness off hard surfaces
+  const FRICTION = 0.998;          // air drag per frame step (implicit)
+  const SPIN_DAMP = 0.92;
+  const MARBLE_R = 11;
+  const MAX_MARBLES = 26;
+
+  // Course is organized in vertical "cells" of height CELL_H.
+  const CELL_H = 220;
+  let cells = {}; // key: cellIndex (integer), value: array of segments & gadgets
+
+  // Camera: smoothly follows cluster of active marbles.
+  // camera.y is the world y at top of screen.
+  let camera = { x: 0, y: 0, vx: 0, vy: 0 };
+
+  // Marbles
+  const marbles = [];
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function randInt(a, b) { return Math.floor(rand(a, b + 1)); }
+  function chance(p) { return Math.random() < p; }
+  function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+  // --- Course generation -------------------------------------------------
+
+  // Segments are line segments: { x1, y1, x2, y2, kind, color, ... }
+  // kind: 'ramp', 'wall', 'bumper', 'spinner-blade', 'funnel', 'floor'
+  // Spinners are groups: { type:'spinner', cx, cy, angle, omega, blades:[{x1,y1,x2,y2}], radius }
+  // Bumpers are segments with high restitution and "flash" timer.
+
+  function genCell(idx) {
+    const y0 = idx * CELL_H;
+    const y1 = y0 + CELL_H;
+    const items = [];
+
+    // Choose a layout variant.
+    const variant = randInt(0, 5);
+
+    // Helper: push a ramp
+    function ramp(x1, y1, x2, y2, kind='ramp') {
+      items.push({ x1, y1, x2, y2, kind, flash: 0 });
+    }
+
+    const margin = 30;
+    const left = margin;
+    const right = WORLD_W - margin;
+
+    if (variant === 0) {
+      // Zig-zag ramps
+      let x = chance(0.5) ? left : right;
+      let y = y0 + 20;
+      while (y < y1 - 20) {
+        const nx = (x === left) ? right : left;
+        const ny = y + rand(70, 110);
+        ramp(x, y, nx, ny);
+        x = nx; y = ny;
+      }
+      // small bumpers along the way
+      for (let i = 0; i < 2; i++) {
+        const bx = rand(left+40, right-40);
+        const by = y0 + rand(40, CELL_H-40);
+        items.push(makeBumper(bx, by, 18));
+      }
+    } else if (variant === 1) {
+      // Funnel + side ramps
+      const fx = rand(left+120, right-120);
+      const fy = y0 + rand(70, 130);
+      const fw = rand(120, 180);
+      const fh = rand(70, 110);
+      const neck = 22;
+      // left funnel wall
+      ramp(fx - fw/2, fy, fx - neck/2, fy + fh, 'funnel');
+      // right funnel wall
+      ramp(fx + fw/2, fy, fx + neck/2, fy + fh, 'funnel');
+      // small floor under neck
+      ramp(fx - neck/2, fy + fh, fx + neck/2, fy + fh + 6, 'funnel');
+      // incoming ramps from top corners
+      ramp(left, y0 + 10, fx - fw/2 + 10, fy + 10);
+      ramp(right, y0 + 10, fx + fw/2 - 10, fy + 10);
+      // exit ramp
+      ramp(fx - 10, fy + fh + 6, rand(left+30, right-30), y1 - 10);
+      // bumper near exit
+      items.push(makeBumper(rand(left+40, right-40), y0 + rand(150, CELL_H-40), 

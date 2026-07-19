@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { margin: 0; overflow: hidden; background: #1a1410; font-family: 'Georgia', serif; }
+  canvas { display: block; cursor: crosshair; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+// === CORE SETUP ===
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H, groundY;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  groundY = H - 80;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// === GAME STATE ===
+let time = 0;
+let round = 1;
+let assaultPhase = 'ongoing'; // ongoing, breach, repelled, clearing, repair
+let phaseTimer = 0;
+let outcome = null;
+
+// === ENTITIES ===
+let attackers = [];
+let defenders = [];
+let arrows = [];
+let stones = [];
+let debris = [];
+let walls = [];
+let towers = []; // siege towers
+let rams = [];
+let catapults = [];
+let flags = [];
+let smoke = [];
+
+// === CONSTANTS ===
+const WALL_BASE_X = () => W * 0.72;
+const WALL_TOP_Y = () => groundY - 180;
+const WALL_THICKNESS = 22;
+const SEGMENT_HEIGHT = 30;
+
+// === UTILITIES ===
+const rand = (a, b) => a + Math.random() * (b - a);
+const randInt = (a, b) => Math.floor(rand(a, b + 1));
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const dist = (x1, y1, x2, y2) => Math.hypot(x2 - x1, y2 - y1);
+
+// === WALL SYSTEM ===
+function buildWalls() {
+  walls = [];
+  const baseX = WALL_BASE_X();
+  const topY = WALL_TOP_Y();
+  const segments = 6; // vertical stack
+  for (let i = 0; i < segments; i++) {
+    walls.push({
+      x: baseX,
+      y: topY + i * SEGMENT_HEIGHT,
+      w: WALL_THICKNESS,
+      h: SEGMENT_HEIGHT,
+      hp: 100,
+      maxHp: 100,
+      broken: false,
+      debrisSpawned: false,
+      offsetY: 0
+    });
+  }
+  // Gate (bottom segment, stronger)
+  walls.push({
+    x: baseX,
+    y: topY + segments * SEGMENT_HEIGHT,
+    w: WALL_THICKNESS * 1.4,
+    h: SEGMENT_HEIGHT * 1.5,
+    hp: 200,
+    maxHp: 200,
+    broken: false,
+    debrisSpawned: false,
+    isGate: true,
+    offsetY: 0
+  });
+}
+
+function damageWall(segment, dmg) {
+  segment.hp -= dmg;
+  if (segment.hp <= 0 && !segment.broken) {
+    segment.broken = true;
+    spawnDebris(segment);
+  }
+}
+
+function spawnDebris(segment) {
+  const count = randInt(5, 9);
+  for (let i = 0; i < count; i++) {
+    debris.push({
+      x: segment.x + rand(0, segment.w),
+      y: segment.y + rand(0, segment.h),
+      vx: rand(-3, -0.5) + (segment.isGate ? rand(-1, 1) : 0),
+      vy: rand(-5, -2),
+      r: rand(3, 8),
+      rot: rand(0, Math.PI * 2),
+      vrot: rand(-0.3, 0.3),
+      life: 1,
+      color: ['#5a4a3a', '#6b5b4a', '#4a3a2a'][randInt(0, 2)]
+    });
+  }
+  // Smoke
+  for (let i = 0; i < 8; i++) {
+    smoke.push({
+      x: segment.x + segment.w / 2,
+      y: segment.y + segment.h / 2,
+      vx: rand(-1, 1),
+      vy: rand(-3, -1),
+      r: rand(8, 16),
+      life: 1,
+      decay: rand(0.008, 0.02)
+    });
+  }
+}
+
+// === BREACH DETECTION ===
+function checkBreach() {
+  // Breach if any lower 3 segments broken
+  const lowerSegments = walls.slice(-4);
+  const brokenCount = lowerSegments.filter(s => s.broken).length;
+  if (brokenCount >= 2) return true;
+  if (walls[walls.length - 1].broken) return true; // gate broken
+  return false;
+}
+
+function isWallBrokenAt(y) {
+  for (const seg of walls) {
+    if (!seg.broken && y >= seg.y && y < seg.y + seg.h) return false;
+  }
+  return true;
+}
+
+function lowestBreachY() {
+  // Returns the y of the lowest broken segment opening
+  let lowest = Infinity;
+  for (const seg of walls) {
+    if (seg.broken) {
+      const segBottom = seg.y + seg.h;
+      if (segBottom < lowest) lowest = segBottom;
+    }
+  }
+  return lowest === Infinity ? null : lowest;
+}
+
+// === ATTACKERS ===
+class Att

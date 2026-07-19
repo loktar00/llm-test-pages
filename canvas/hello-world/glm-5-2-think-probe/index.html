@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Particle Words</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+    background: #000;
+    cursor: default;
+  }
+  #c {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ===== Setup =====
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setClearColor(0x000000, 1);
+
+let width = window.innerWidth;
+let height = window.innerHeight;
+renderer.setSize(width, height);
+
+// Orthographic-ish camera in 2D-ish space
+let camera;
+function setupCamera() {
+  const aspect = width / height;
+  const viewH = 1000; // virtual units tall
+  const viewW = viewH * aspect;
+  camera = new THREE.OrthographicCamera(-viewW/2, viewW/2, viewH/2, -viewH/2, -2000, 2000);
+  camera.position.z = 1000;
+}
+setupCamera();
+
+// ===== Scene =====
+const scene = new THREE.Scene();
+
+// ===== Particle system =====
+const PARTICLE_COUNT = 4500;
+const positions = new Float32Array(PARTICLE_COUNT * 3);
+const colors = new Float32Array(PARTICLE_COUNT * 3);
+const sizes = new Float32Array(PARTICLE_COUNT);
+
+// Per-particle state arrays
+const targets = new Float32Array(PARTICLE_COUNT * 3);   // current target position
+const origins = new Float32Array(PARTICLE_COUNT * 3);   // where particle starts for current transition
+const velocities = new Float32Array(PARTICLE_COUNT * 3);// drift velocity
+const seeds = new Float32Array(PARTICLE_COUNT);         // random seed for drift
+const states = new Uint8Array(PARTICLE_COUNT);          // 0 = transitioning, 1 = drifting, 2 = exploding
+
+// Initialize particles in a big cloud
+for (let i = 0; i < PARTICLE_COUNT; i++) {
+  const i3 = i * 3;
+  positions[i3]   = (Math.random() - 0.5) * 3000;
+  positions[i3+1] = (Math.random() - 0.5) * 2000;
+  positions[i3+2] = (Math.random() - 0.5) * 400;
+  targets[i3] = positions[i3];
+  targets[i3+1] = positions[i3+1];
+  targets[i3+2] = positions[i3+2];
+  origins[i3] = positions[i3];
+  origins[i3+1] = positions[i3+1];
+  origins[i3+2] = positions[i3+2];
+  velocities[i3] = 0; velocities[i3+1] = 0; velocities[i3+2] = 0;
+  seeds[i] = Math.random() * 1000;
+  states[i] = 1;
+
+  // color: warm white / golden / cyan blend
+  const t = Math.random();
+  // gradient palette
+  const c = new THREE.Color();
+  const h = 0.55 + (Math.random() - 0.5) * 0.2; // 0.45 - 0.65 -> blue to teal
+  const s = 0.6 + Math.random() * 0.4;
+  const l = 0.6 + Math.random() * 0.3;
+  c.setHSL(h, s, l);
+  colors[i3] = c.r; colors[i3+1] = c.g; colors[i3+2] = c.b;
+
+  sizes[i] = 6 + Math.random() * 6;
+}
+
+const geometry = new THREE.BufferGeometry();
+geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+
+const material = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uPixelRatio: { value: renderer.getPixelRatio() }
+  },
+  vertexShader: `
+    attribute float size;
+    attribute vec3 color;
+    varying vec3 vColor;
+    varying float vDist;
+    uniform float uTime;
+    uniform float uPixelRatio;
+    void main() {
+      vColor = color;
+      vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+      gl_Position = projectionMatrix * mvPosition;
+      gl_PointSize = size * uPixelRatio * (300.0 / -mvPosition.z);
+      vDist = gl_PointSize;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    varying float vDist;
+    void main() {
+      vec2 c = gl_PointCoord - vec2(0.5);
+      float d = length

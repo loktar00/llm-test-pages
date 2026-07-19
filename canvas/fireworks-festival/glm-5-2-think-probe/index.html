@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Fireworks Over the River</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let W, H, DPR = window.devicePixelRatio || 1;
+
+function resize() {
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR;
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ===== City skyline (precomputed silhouette) =====
+let skyline = [];
+let waterlineY;
+
+function buildSkyline() {
+  skyline = [];
+  waterlineY = H * 0.62;
+  const buildingsBase = waterlineY;
+  let x = -20;
+  // Seed for stable skyline
+  let seed = 12345;
+  const rnd = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; };
+  while (x < W + 20) {
+    const w = 24 + rnd() * 70;
+    const h = 30 + rnd() * (H * 0.32);
+    const top = buildingsBase - h;
+    skyline.push({x, w, top, h, windows: []});
+    // windows
+    const cols = Math.max(1, Math.floor(w / 9));
+    const rows = Math.max(1, Math.floor(h / 11));
+    for (let i = 1; i < cols; i++) {
+      for (let j = 1; j < rows; j++) {
+        if (rnd() < 0.55) {
+          skyline[skyline.length-1].windows.push({
+            x: x + i * (w/cols),
+            y: top + j * (h/rows),
+            lit: rnd() < 0.7,
+            flick: rnd()
+          });
+        }
+      }
+    }
+    x += w;
+  }
+}
+buildSkyline();
+window.addEventListener('resize', buildSkyline);
+
+// ===== Audio (whistles & booms) =====
+let audioCtx = null;
+function initAudio() {
+  if (!audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) {}
+  }
+}
+function whistleSound(pan) {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  const p = audioCtx.createStereoPanner ? audioCtx.createStereoPanner() : null;
+  o.type = 'sine';
+  o.frequency.setValueAtTime(900 + Math.random()*400, t);
+  o.frequency.exponentialRampToValueAtTime(2400 + Math.random()*800, t + 0.8);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(0.04, t + 0.05);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 1.0);
+  o.connect(g);
+  if (p) { p.pan.value = pan; g.connect(p); p.connect(audioCtx.destination); }
+  else g.connect(audioCtx.destination);
+  o.start(t); o.stop(t + 1.0);
+}
+function boomSound(pan, intensity=1) {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  const bufLen = audioCtx.sampleRate * 0.6;
+  const buf = audioCtx.createBuffer(1, bufLen, audioCtx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < bufLen; i++) {
+    data[i] = (Math.random()*2 - 1) * Math.pow(1 - i/bufLen, 2.5);
+  }
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  const g = audioCtx.createGain();
+  g.gain.value = 0.18 * intensity;
+  const p = audioCtx.createStereoPanner ? audioCtx.createStereoPanner() : null;
+  if (p) { p.pan.value = pan; }
+  src.connect(g);
+  if (p) { g.connect(p); p.connect(audioCtx.destination); }
+  else g.connect(audioCtx.destination);
+  src.start(t);
+}
+
+// ===== Particle classes =====
+const GRAV = 0.038;
+const DRAG = 0.985;
+
+class Shell {
+  constructor(x, y, tx, ty, pattern, palette, delay=0) {
+    this.x = x; this.y = y;
+    this.tx = tx; this.ty = ty;
+    const dist = Math.hypot(tx-x, ty-y);
+    const speed = 7.5 + Math.random()*1.5;
+    const ang = Math.atan2(ty-y, tx-x);
+    this.vx = Math.cos(ang) * speed;
+    this.vy = Math.sin(ang) * speed;
+   

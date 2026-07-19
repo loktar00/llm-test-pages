@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Starling Murmuration</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <script>
+        /**
+         * Starling Murmuration Simulation
+         * Features:
+         * - boids algorithm (separation, alignment, cohesion)
+         * - Dusk gradient background
+         * - Landscape silhouette
+         * - Invisible predator that stirs the flock
+         * - Smoke-like rendering
+         */
+
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let boids = [];
+        let boidCount = 500;
+        
+        // Configuration
+        const config = {
+            visualRange: 60,
+            separationDist: 20,
+            maxSpeed: 4,
+            minSpeed: 2,
+            separationForce: 1.5,
+            alignmentForce: 0.3,
+            cohesionForce: 0.2,
+            edgeMargin: 100,
+            edgeTurnForce: 0.5,
+            predatorSpeed: 3.5,
+            predatorForce: 1.5,
+            predatorRadius: 150
+        };
+
+        // Predator state
+        const predator = {
+            x: Math.random() * 2000,
+            y: Math.random() * 1000,
+            vx: 0,
+            vy: 0,
+            state: 'idle', // idle, hunting, resting
+            timer: 0,
+            targetX: 0,
+            targetY: 0
+        };
+
+        // Landscape data (procedural generation)
+        let landscapePoints = [];
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            generateLandscape();
+        }
+
+        function generateLandscape() {
+            landscapePoints = [];
+            const segments = 50;
+            const segmentWidth = width / segments;
+            
+            // Base terrain
+            for (let i = 0; i <= segments; i++) {
+                const x = i * segmentWidth;
+                // Simple noise-like generation using sine waves
+                const baseH = height - 100;
+                const noise = Math.sin(i * 0.1) * 50 + Math.sin(i * 0.3) * 20 + Math.sin(i * 0.05) * 100;
+                const y = Math.min(baseH + noise, height - 20); // Keep some margin
+                landscapePoints.push({x, y});
+            }
+            
+            // Add some extra details for trees/buildings (jagged edges)
+            landscapePoints.forEach((pt, idx) => {
+                if (Math.random() > 0.7) {
+                    pt.y -= Math.random() * 40; // Jaggedness
+                }
+            });
+        }
+
+        class Boid {
+            constructor() {
+                this.x = Math.random() * width;
+                this.y = Math.random() * height * 0.6; // Start in the sky
+                this.vx = (Math.random() - 0.5) * 4;
+                this.vy = (Math.random() - 0.5) * 2;
+                this.size = Math.random() * 1.5 + 1;
+            }
+
+            update() {
+                this.flock();
+                this.avoidEdges();
+                this.avoidLandscape();
+                
+                // Apply velocity
+                this.x += this.vx;
+                this.y += this.vy;
+
+                // Speed limits
+                const speed = Math.sqrt(this.vx*this.vx + this.vy*this.vy);
+                if (speed > config.maxSpeed) {
+                    this.vx = (this.vx / speed) * config.maxSpeed;
+                    this.vy = (this.vy / speed) * config.maxSpeed;
+                } else if (speed < config.minSpeed) {
+                    this.vx = (this.vx / speed) * config.minSpeed;
+                    this.vy = (this.vy / speed) * config.minSpeed;
+                }
+            }
+
+            flock() {
+                let separationX = 0, separationY = 0;
+                let alignmentVx = 0, alignmentVy = 0;
+                let cohesionX = 0, cohesionY = 0;
+                let neighbors = 0;
+
+                for (let other of boids) {
+                    if (other === this) continue;
+                    const dx = this.x - other.x;
+                    const dy = this.y - other.y;
+                    const distSq = dx*dx + dy*dy;
+
+                    if (distSq < config.visualRange * config.visualRange) {
+                        // Separation
+                        if (distSq < config.separationDist * config.separationDist) {
+                            const dist = Math.sqrt(distSq);
+                            separationX += (dx / dist) * (config.separationDist - dist);
+                            separationY += (dy / dist) * (config.separationDist - dist);
+                        }
+
+                        // Alignment & Cohesion
+                        alignmentVx += other.vx;
+                        alignmentVy += other.vy;
+                        cohesionX += other.x;
+                        cohesionY += other.y;
+                        neighbors++;
+                    }
+                }
+
+                if (neighbors > 0) {
+                    // Alignment
+                    alignmentVx /= neighbors;
+                    alignmentVy /= neighbors;
+                    alignmentVx = (alignmentVx - this.vx) * config.alignmentForce;
+                    alignmentVy = (alignmentVy - this.vy) * config.alignmentForce;
+
+                    // Cohesion
+                    cohesionX /= neighbors;
+                    cohesionY /= neighbors;
+                    cohesionX = (cohesionX - this.x) * config.cohesionForce;
+                    cohesionY = (cohesionY - this.y) * config.cohesionForce;
+                }
+
+                // Predator Avoidance
+                let predX = 0, predY = 0;
+                const pdx = this.x - predator.x;
+                const pdy = this.y - predator.y;
+                const pDist = Math.sqrt(pdx*pdx + pdy*pdy);
+                
+                if (pDist < config.predatorRadius) {
+                    predX = (pdx / pDist) * config.predatorForce * (1 - pDist/config.predatorRadius);
+                    predY = (pdy / pDist) * config.predatorForce * (1 - pDist/config.predatorRadius);
+                }
+
+                // Apply forces
+                this.vx += separationX * config.separationForce + alignmentVx + cohesionX + predX;
+                this.vy += separationY * config.separationForce + alignmentVy + cohesionY + predY;
+            }
+
+            avoidEdges() {
+                const margin = config.edgeMargin;
+                const turn = config.edgeTurnForce;
+
+                if (this.x < margin) this.vx += turn;
+                if (this.x > width - margin) this.vx -= turn;
+                if (this.y < margin) this.vy += turn;
+                if (this.y > height - 150) this.vy -= turn; // Don't go too low
+            }
+
+            avoidLandscape() {
+                // Simple collision with generated landscape
+                // Find which segment we are in
+                const idx = Math.floor(this.x / (width / landscapePoints.length));
+                if (idx >= 0 && idx < landscapePoints.length) {
+                    const pt = landscapePoints[idx];
+                    if (this.y > pt.y - 20) {
+                        this.vy -= 2; // Fly up
+                    }
+                }
+            }
+
+            draw() {
+                // Calculate angle for rotation
+                const angle = Math.atan2(this.vy, this.vx);
+                
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(angle);
+                
+                // Draw a small teardrop/dot shape
+                ctx.fillStyle = 'rgba(20, 20, 25, 0.8)';
+                ctx.beginPath();
+                ctx.ellipse(0, 0, this.size * 2, this.size, 0, 0, Math.PI * 2);
+                ctx.fill();
+                
+                ctx.restore();
+            }
+        }
+
+        function updatePredator() {
+            // Simple AI: Wander randomly, then dive occasionally
+            
+            if (predator.state === 'idle') {
+                predator.timer--;
+                if (predator.timer <= 0) {
+                    predator.state = 'hunting';
+                    // Pick a random spot in the upper 2/3rds of the screen
+                    predator.targetX = Math.random() * width;
+                    predator.targetY = Math.random() * (height * 0.6);
+                    predator.timer = 0;
+                }
+            } else if (predator.state === 'hunting') {
+                const dx = predator.targetX - predator.x;
+                const dy = predator.targetY - predator.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                
+                if (dist > 5) {
+                    predator.vx = (dx / dist) * config.predatorSpeed;
+                    predator.vy = (dy / dist) * config.predatorSpeed;
+                } else {
+                    predator.state = 'idle';
+                    predator.timer = Math.random() * 300 + 200; // Wait time
+                }
+            }
+
+            predator.x += predator.vx;
+            predator.y += predator.vy;
+
+            // Keep predator on screen loosely
+            if (predator.x < -100) predator.x = width + 100;
+            if (predator.x > width + 100) predator.x = -100;
+            if (predator.y < -100) predator.y = height + 100;
+            if (predator.y > height - 100) predator.y = -100;
+        }
+
+        function drawBackground() {
+            // Dusk Gradient
+            const gradient = ctx.createLinearGradient(0, 0, 0, height);
+            gradient.addColorStop(0, '#1a1a2e'); // Deep blue/purple
+            gradient.addColorStop(0.4, '#2d3436'); // Dark grey
+            gradient.addColorStop(0.7, '#483d4b'); // Mauve
+            gradient.addColorStop(1, '#6e2c00'); // Faint sunset orange at horizon
+            
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, width, height);
+        }
+
+        function drawLandscape() {
+            ctx.fillStyle = '#050505'; // Almost black silhouette
+            
+            ctx.beginPath();
+            ctx.moveTo(0, height);
+            ctx.lineTo(0, landscapePoints[0].y);
+            
+            for (let i = 1; i < landscapePoints.length; i++) {
+                // Quadratic curve for smoother look
+                const p0 = landscapePoints[i-1];
+                const p1 = landscapePoints[i];
+                const midX = (p0.x + p1.x) / 2;
+                const midY = (p0.y + p1.y) / 2;
+                ctx.quadraticCurveTo(p0.x, p0.y, midX, midY);
+            }
+            
+            const lastPt = landscapePoints[landscapePoints.length-1];
+            ctx.lineTo(lastPt.x, lastPt.y);
+            ctx.lineTo(width, height);
+            ctx.closePath();
+            ctx.fill();
+        }
+
+        function init() {
+            resize();
+            window.addEventListener('resize', resize);
+            
+            for (let i = 0; i < boidCount; i++) {
+                boids.push(new Boid());
+            }
+            
+            loop();
+        }
+
+        function loop() {
+            // 1. Clear and Draw Background
+            drawBackground();
+            
+            // 2. Draw Landscape
+            drawLandscape();
+            
+            // 3. Update and Draw Boids
+            // Using globalCompositeOperation for density effect (optional, but keeps it simple here)
+            for (let boid of boids) {
+                boid.update();
+                boid.draw();
+            }
+            
+            // 4. Update Predator (invisible, but affects physics)
+            updatePredator();
+
+            requestAnimationFrame(loop);
+        }
+
+        init();
+
+    </script>
+</body>
+</html>

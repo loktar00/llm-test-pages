@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>City Fireworks Night</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #020205;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+
+    let width, height;
+    let horizon;
+
+    // Configuration
+    const GRAVITY = 0.08;
+    const DRAG = 0.97;
+    const PARTICLE_COUNT = 120;
+    const SKY_PARTICLES = 100;
+    const RIVER_HEIGHT_RATIO = 0.35;
+    
+    // Palettes
+    const palettes = [
+        ['#FFD700', '#FF4500', '#FFFFFF'], // Gold/Orange
+        ['#00FFFF', '#0000FF', '#FFFFFF'], // Cyan/Blue
+        ['#FF1493', '#8B0045', '#FFC0CB'], // Pink/Red
+        ['#7FFF00', '#006400', '#FFFFFF'], // Green
+        ['#FF00FF', '#8B00FF', '#FFFFFF'], // Purple
+        ['#FFFFFF', '#C0C0C0', '#808080']  // Silver
+    ];
+
+    let fireworks = [];
+    let particles = [];
+    let stars = [];
+    let buildings = [];
+    let frameCount = 0;
+    let isFinale = false;
+    let finaleTimer = 0;
+    let finaleDuration = 0;
+
+    // Resize handling
+    function resize() {
+        width = canvas.width = window.innerWidth;
+        height = canvas.height = window.innerHeight;
+        horizon = height * (1 - RIVER_HEIGHT_RATIO);
+        generateCity();
+        generateStars();
+    }
+    window.addEventListener('resize', resize);
+
+    // Utils
+    function random(min, max) {
+        return Math.random() * (max - min) + min;
+    }
+
+    function randomColor() {
+        return palettes[Math.floor(Math.random() * palettes.length)];
+    }
+
+    // --- Generators ---
+
+    function generateStars() {
+        stars = [];
+        for (let i = 0; i < SKY_PARTICLES; i++) {
+            stars.push({
+                x: random(0, width),
+                y: random(0, horizon),
+                size: random(0.5, 1.5),
+                alpha: random(0.1, 0.8),
+                twinkleSpeed: random(0.005, 0.02)
+            });
+        }
+    }
+
+    function generateCity() {
+        buildings = [];
+        let currentX = 0;
+        while (currentX < width) {
+            const bWidth = random(20, 80);
+            const bHeight = random(50, 250);
+            buildings.push({
+                x: currentX,
+                y: horizon - bHeight,
+                w: bWidth,
+                h: bHeight,
+                windows: [],
+                color: `rgb(${random(10, 30)}, ${random(10, 30)}, ${random(30, 50)})`
+            });
+            
+            // Add windows
+            const b = buildings[buildings.length - 1];
+            for (let wx = 5; wx < b.w - 5; wx += 10) {
+                for (let wy = 10; wy < b.h - 10; wy += 15) {
+                    if (Math.random() > 0.3) {
+                        b.windows.push({
+                            x: wx,
+                            y: wy,
+                            lit: Math.random() > 0.4,
+                            color: Math.random() > 0.8 ? '#FFD700' : '#FFF' 
+                        });
+                    }
+                }
+            }
+            currentX += bWidth + random(0, 5); // slight overlap
+        }
+    }
+
+    // --- Classes ---
+
+    class Firework {
+        constructor() {
+            this.x = random(width * 0.1, width * 0.9);
+            this.y = horizon;
+            this.targetY = random(height * 0.1, height * 0.5);
+            this.speed = random(6, 12);
+            this.angle = random(-Math.PI / 2 - 0.2, -Math.PI / 2 + 0.2);
+            this.vx = Math.cos(this.angle) * this.speed;
+            this.vy = Math.sin(this.angle) * this.speed;
+            this.hue = random(0, 360);
+            this.trail = [];
+            this.dead = false;
+            this.type = Math.random() > 0.8 ? 'whistle' : 'silent';
+        }
+
+        update() {
+            this.trail.push({x: this.x, y: this.y, alpha: 1});
+            if (this.trail.length > 10) this.trail.shift();
+
+            this.x += this.vx;
+            this.y += this.vy;
+            this.vy += 0.05; // slight gravity on rocket
+
+            if (this.vy >= 0 || this.y <= this.targetY) {
+                this.dead = true;
+                createExplosion(this.x, this.y);
+            }
+        }
+
+        draw() {
+            // Draw Trail
+            ctx.beginPath();
+            for (let i = 0; i < this.trail.length; i++) {
+                const t = this.trail[i];
+                ctx.lineTo(t.x, t.y);
+                t.alpha -= 0.1;
+            }
+            ctx.strokeStyle = `rgba(255, 200, 100, 0.5)`;
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Draw Head
+            ctx.fillStyle = '#FFF';
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, 2, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    class Particle {
+        constructor(x, y, colorSet, type) {
+            this.x = x;
+            this.y = y;
+            this.colorSet = colorSet;
+            this.color = colorSet[Math.floor(Math.random() * colorSet.length)];
+            this.type = type; // peony, willow, ring, double
+            
+            const angle = Math.random() * Math.PI * 2;
+            let speed = random(1, 12);
+
+            if (this.type === 'ring') {
+                speed = random(8, 10);
+                this.angle = angle; // lock angle for ring
+            } else {
+                this.angle = angle;
+            }
+
+            this.vx = Math.cos(this.angle) * speed;
+            this.vy = Math.sin(this.angle) * speed;
+            
+            this.friction = DRAG;
+            this.gravity = GRAVITY;
+            this.alpha = 1;
+            this.decay = random(0.005, 0.015);
+            this.trail = [];
+            this.life = 0;
+            
+            // Willow specific
+            if (this.type === 'willow') {
+                this.decay = 0.008;
+                this.gravity = GRAVITY * 1.5; // falls faster
+                this.friction = 0.985;
+            }
+        }
+
+        update() {
+            this.life++;
+            this.vx *= this.friction;
+            this.vy *= this.friction;
+            this.vy += this.gravity;
+            
+            this.x += this.vx;
+            this.y += this.vy;
+            this.alpha -= this.decay;
+
+            this.trail.push({x: this.x, y: this.y});
+            if (this.trail.length > 5) this.trail.shift();
+
+            if (this.alpha <= 0) return false;
+            return true;
+        }
+
+        draw() {
+            ctx.beginPath();
+            for (let i = 0; i < this.trail.length; i++) {
+                ctx.lineTo(this.trail[i].x, this.trail[i].y);
+            }
+            ctx.strokeStyle = this.color;
+            ctx.globalAlpha = Math.max(0, this.alpha);
+            ctx.lineWidth = this.type === 'willow' ? 1 : 2;
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+
+            // Head
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, 1.5, 0, Math.PI * 2);
+            ctx.fillStyle = '#FFF';
+            ctx.fill();
+        }
+    }
+
+    // --- Logic ---
+
+    function createExplosion(x, y) {
+        const typeRoll = Math.random();
+        let type = 'peony';
+        let colorSet = randomColor();
+
+        if (typeRoll < 0.25) {
+            type = 'willow';
+            colorSet = ['#98FB98', '#00FF00', '#ADFF2F']; // Mostly green
+        } else if (typeRoll < 0.4) {
+            type = 'ring';
+        } else if (typeRoll < 0.55) {
+            type = 'double';
+            colorSet = ['#FF0000', '#FFFFFF'];
+        }
+
+        const count = type === 'double' ? PARTICLE_COUNT : PARTICLE_COUNT;
+        
+        for (let i = 0; i < count; i++) {
+            particles.push(new Particle(x, y, colorSet, type));
+        }
+
+        // Double break logic (delayed second burst)
+        if (type === 'double') {
+            setTimeout(() => {
+                for (let i = 0; i < count / 2; i++) {
+                    particles.push(new Particle(x, y, ['#0000FF', '#00FFFF'], 'peony'));
+                }
+            }, 200);
+        }
+    }
+
+    function drawSky() {
+        // Gradient Sky
+        const grd = ctx.createLinearGradient(0, 0, 0, horizon);
+        grd.addColorStop(0, '#000000');
+        grd.addColorStop(1, '#050515');
+        ctx.fillStyle = grd;
+        ctx.fillRect(0, 0, width, horizon);
+
+        // Stars
+        ctx.fillStyle = '#FFF';
+        stars.forEach(star => {
+            star.alpha += star.twinkleSpeed;
+            const currentAlpha = Math.abs(Math.sin(star.alpha)) * 0.8;
+            ctx.globalAlpha = currentAlpha;
+            ctx.beginPath();
+            ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
+            ctx.fill();
+        });
+        ctx.globalAlpha = 1;
+    }
+
+    function drawCity() {
+        // Draw Buildings
+        buildings.forEach(b => {
+            ctx.fillStyle = b.color;
+            ctx.fillRect(b.x, b.y, b.w, b.h);
+            
+            // Windows
+            b.windows.forEach(win => {
+                if (win.lit) {
+                    ctx.fillStyle = win.color;
+                    ctx.globalAlpha = 0.6;
+                    ctx.fillRect(b.x + win.x, b.y + win.y, 4, 6);
+                }
+            });
+            ctx.globalAlpha = 1;
+        });
+    }
+
+    function drawRiver() {
+        // Base River
+        const riverGrd = ctx.createLinearGradient(0, horizon, 0, height);
+        riverGrd.addColorStop(0, '#050515');
+        riverGrd.addColorStop(1, '#000000');
+        ctx.fillStyle = riverGrd;
+        ctx.fillRect(0, horizon, width, height - horizon);
+
+        // Reflection Logic
+        ctx.save();
+        ctx.translate(0, horizon);
+        ctx.scale(1, -1);
+        
+        // Clip to river area (so we only reflect the sky part)
+        ctx.beginPath();
+        ctx.rect(0, 0, width, horizon);
+        ctx.clip();
+
+        // Draw reflected city (faded)
+        ctx.globalAlpha = 0.3;
+        ctx.fillStyle = '#000';
+        buildings.forEach(b => {
+            ctx.fillRect(b.x, b.y, b.w, b.h);
+        });
+        
+        // Draw reflected particles (faded)
+        ctx.globalAlpha = 0.2;
+        particles.forEach(p => {
+            if (p.y < horizon) {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 2, 0, Math.PI*2);
+                ctx.fillStyle = p.color;
+                ctx.fill();
+            }
+        });
+
+        ctx.restore();
+
+        // Shimmer Overlay
+        ctx.fillStyle = 'rgba(20, 20, 40, 0.1)';
+        for(let i=0; i<20; i++) {
+            const ry = random(horizon, height);
+            const rw = random(50, 200);
+            const rx = random(0, width);
+            ctx.fillRect(rx, ry, rw, 1);
+        }
+    }
+
+    function loop() {
+        requestAnimationFrame(loop);
+        frameCount++;
+
+        // Clear
+        ctx.clearRect(0, 0, width, height);
+
+        // 1. Draw Statics
+        drawSky();
+        drawCity();
+
+        // 2. Fire Logic
+        if (isFinale) {
+            finaleTimer++;
+            if (finaleTimer > 20) { // Fire rapidly
+                fireworks.push(new Firework());
+                fireworks.push(new Firework());
+                finaleTimer = 0;
+            }
+            if (finaleTimer > 600) { // End finale after ~10s
+                isFinale = false;
+                finaleDuration = 0;
+            }
+        } else {
+            if (frameCount % 40 === 0 && Math.random() > 0.2) {
+                fireworks.push(new Firework());
+            }
+            
+            // Check for finale trigger
+            if (frameCount % 6000 === 0) { // Every ~10 seconds (approx)
+                isFinale = true;
+                finaleTimer = 0;
+            }
+        }
+
+        // 3. Update & Draw Fireworks (Rockets)
+        for (let i = fireworks.length - 1; i >= 0; i--) {
+            fireworks[i].update();
+            fireworks[i].draw();
+            if (fireworks[i].dead) fireworks.splice(i, 1);
+        }
+
+        // 4. Update & Draw Particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+            const alive = particles[i].update();
+            if (alive) {
+                particles[i].draw();
+            } else {
+                particles.splice(i, 1);
+            }
+        }
+
+        // 5. Draw River Reflections
+        drawRiver();
+    }
+
+    // Init
+    resize();
+    loop();
+
+</script>
+</body>
+</html>

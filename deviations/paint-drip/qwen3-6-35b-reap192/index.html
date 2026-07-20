@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dripping Paint Art</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #f0f0f0;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let drips = [];
+        let whiteOverlay = 0; // 0 to 1, represents fading out
+        let isFadingOut = false;
+
+        // Configuration
+        const PALETTE = [
+            '#FF3B30', // Red
+            '#FF9500', // Orange
+            '#FFCC00', // Yellow
+            '#4CD964', // Green
+            '#5AC8FA', // Light Blue
+            '#007AFF', // Blue
+            '#585DFF', // Indigo
+            '#AF52DE', // Purple
+            '#FF2A8D'  // Pink
+        ];
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            // Redraw background if needed, though we handle it in loop
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        class Drip {
+            constructor() {
+                this.x = Math.random() * width;
+                this.y = -20;
+                this.vx = (Math.random() - 0.5) * 0.5;
+                this.vy = 0;
+                this.radius = 5 + Math.random() * 10;
+                this.color = PALETTE[Math.floor(Math.random() * PALETTE.length)];
+                this.weight = 1; // 1 = fresh/wet, 0 = dried
+                this.drySpeed = 0.0005 + Math.random() * 0.001;
+                this.isDying = false;
+                this.opacity = 1;
+            }
+
+            update() {
+                // Gravity and friction
+                this.vy += 0.1;
+                this.vy *= 0.98; 
+
+                // Thickness based on radius affects speed (thicker = faster)
+                const thicknessFactor = this.radius / 15;
+                
+                // If heavy, move faster. If dry, slow down significantly.
+                if (this.weight > 0.1) {
+                    this.y += this.vy * thicknessFactor;
+                    // Random slight horizontal drift (branching effect)
+                    this.vx += (Math.random() - 0.5) * 0.05;
+                    this.x += this.vx;
+                } else {
+                    this.isDying = true;
+                }
+
+                // Drying process
+                this.weight -= this.drySpeed;
+                if (this.weight < 0) this.weight = 0;
+
+                // Check collision with bottom or other drips (simplified)
+                if (this.y > height) {
+                    return false; // Remove drip
+                }
+
+                // Check collision with "wet" surface (other active drips)
+                // This is a simulation optimization: we don't check every frame against every drip
+                // Instead, we just let them paint.
+                
+                return true;
+            }
+
+            draw(ctx) {
+                if (this.weight <= 0) return;
+
+                ctx.globalAlpha = this.weight;
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                // Draw a teardrop shape
+                ctx.ellipse(this.x, this.y, this.radius * 0.8, this.radius * 1.5, 0, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Add a little highlight for wetness
+                ctx.fillStyle = 'rgba(255,255,255,0.3)';
+                ctx.beginPath();
+                ctx.ellipse(this.x - this.radius*0.2, this.y - this.radius*0.5, this.radius * 0.3, this.radius * 0.6, 0, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        // We use a secondary canvas to store the "permanent" paint layer
+        const paintCanvas = document.createElement('canvas');
+        const paintCtx = paintCanvas.getContext('2d');
+
+        function render() {
+            // Clear main canvas
+            ctx.clearRect(0, 0, width, height);
+
+            // Background base (paper color)
+            ctx.fillStyle = '#f4f4f4';
+            ctx.fillRect(0, 0, width, height);
+
+            // Handle Fading Out
+            if (isFadingOut) {
+                whiteOverlay += 0.005;
+                if (whiteOverlay >= 1) {
+                    whiteOverlay = 0;
+                    isFadingOut = false;
+                    paintCtx.clearRect(0, 0, width, height);
+                    drips = [];
+                }
+            }
+
+            // Draw the permanent layer (dripped paint)
+            ctx.drawImage(paintCanvas, 0, 0);
+
+            // Draw active drips
+            // Filter out dead drips
+            drips = drips.filter(d => d.update());
+            
+            // Add new drips occasionally
+            if (!isFadingOut && Math.random() < 0.1) {
+                drips.push(new Drip());
+            }
+
+            // Calculate coverage for fade out
+            // We sample the paintCanvas pixels
+            // Note: For performance, we check a small fraction of pixels
+            let coverage = 0;
+            const sampleRate = 100; // Check 1 pixel every 100px
+            let checked = 0;
+            let covered = 0;
+
+            // Optimization: Don't check full res every frame
+            if (Math.random() < 0.05 && !isFadingOut) {
+                const imgData = paintCtx.getImageData(0, 0, width, height);
+                const data = imgData.data;
+                const len = data.length;
+                
+                // Loop with stride for performance
+                for (let i = 0; i < len; i += 4 * sampleRate) {
+                    checked++;
+                    // Check alpha channel
+                    if (data[i + 3] > 10) {
+                        covered++;
+                    }
+                }
+                
+                const ratio = covered / checked;
+                // Threshold for triggering fade out (e.g., 40% coverage)
+                if (ratio > 0.4) {
+                    isFadingOut = true;
+                }
+            }
+
+            // Draw the white overlay if fading
+            if (isFadingOut) {
+                ctx.fillStyle = `rgba(244, 244, 244, ${whiteOverlay})`;
+                ctx.fillRect(0, 0, width, height);
+            }
+
+            requestAnimationFrame(render);
+        }
+
+        // Main update loop for physics and painting
+        function updatePhysics() {
+            if (isFadingOut) return;
+
+            // Update drips
+            for (let i = 0; i < drips.length; i++) {
+                const d = drips[i];
+                
+                // Draw onto the permanent canvas
+                // This is where the "blending" happens naturally via canvas compositing
+                paintCtx.globalAlpha = d.weight * 0.5; // Multi-layering creates depth
+                paintCtx.fillStyle = d.color;
+                
+                // Draw the drip shape onto the permanent canvas
+                paintCtx.beginPath();
+                paintCtx.ellipse(d.x, d.y, d.radius * 0.8, d.radius * 1.5, 0, 0, Math.PI * 2);
+                paintCtx.fill();
+
+                // Add a slight trail behind it to simulate the run
+                if (d.vy > 0) {
+                    paintCtx.beginPath();
+                    paintCtx.moveTo(d.x, d.y);
+                    paintCtx.lineTo(d.x - d.vx * 5, d.y - d.vy * 10);
+                    paintCtx.lineWidth = d.radius;
+                    paintCtx.lineCap = 'round';
+                    paintCtx.strokeStyle = d.color;
+                    paintCtx.stroke();
+                }
+            }
+
+            // Clean up drips that have fallen off or dried completely on the permanent canvas
+            // We remove them from the array, but they stay on the paintCanvas
+            drips = drips.filter(d => {
+                if (d.y > height) return false;
+                if (d.weight <= 0 && d.isDying) return false;
+                return true;
+            });
+
+            requestAnimationFrame(updatePhysics);
+        }
+
+        // Start
+        updatePhysics();
+        render();
+
+    </script>
+</body>
+</html>

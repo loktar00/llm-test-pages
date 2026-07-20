@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lava Lamp Metaballs</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            /* Hardware acceleration for the main canvas helps with the glow effects */
+            filter: blur(2px) contrast(1.2) brightness(1.1); 
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+
+    <script>
+        /**
+         * Metaball Lava Lamp
+         * 
+         * Algorithm:
+         * 1. Physics: Blobs move with a sine-wave vertical motion to simulate heat cycles.
+         * 2. Field Calculation: We iterate over a low-resolution grid (the "Coarse Buffer").
+         *    For every pixel, we sum the influence of all blobs (1/r).
+         * 3. Rendering: 
+         *    - If the sum > threshold, color the pixel based on field strength (density).
+         *    - Higher density = hotter/brighter color.
+         *    - We use an offscreen canvas for the field calculation to keep the main loop fast.
+         */
+
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d', { alpha: false });
+
+        // Configuration
+        const CONFIG = {
+            blobCount: 10,
+            resolutionScale: 0.08, // Size of the simulation grid relative to screen (lower = higher res, slower)
+            blobRadius: 45,        // The 'radius' parameter in the blob function
+            speed: 0.015,          // Vertical movement speed
+            threshold: 1.0,        // The iso-surface threshold for the field
+            glowIntensity: 0.5     // Intensity of the canvas CSS filter glow
+        };
+
+        let width, height;
+        let cols, rows;
+        let simulationCanvas, simCtx;
+        
+        // Blob State
+        const blobs = [];
+
+        class Blob {
+            constructor(id) {
+                this.id = id;
+                this.reset(true);
+            }
+
+            reset(initial = false) {
+                // Center X
+                this.x = Math.random() * width;
+                // Random Y (spread across the height)
+                this.y = Math.random() * height;
+                // Random size variation
+                this.r = CONFIG.blobRadius * (0.8 + Math.random() * 0.4);
+                // Random vertical speed
+                this.vy = (Math.random() * 0.5 + 0.5) * (Math.random() < 0.5 ? 1 : -1);
+                // Random phase for sine wave
+                this.phase = Math.random() * Math.PI * 2;
+                // Random horizontal wobble
+                this.vx = (Math.random() - 0.5) * 0.5;
+            }
+
+            update(t) {
+                // Physics: Heat cycle
+                // Blobs rise (negative velocity) or sink (positive velocity)
+                // We add a sine wave to the Y velocity to simulate the "bubble" effect 
+                // (accelerating up, slowing down at top, accelerating down).
+                
+                // Determine direction based on position relative to center roughly
+                // But true lava lamps have random mixing, so we rely on the sine wave + friction.
+                
+                const move = Math.sin(t * CONFIG.speed + this.phase);
+                
+                // Move vertically
+                this.y += this.vy * move;
+                
+                // Move horizontally slightly
+                this.x += this.vx;
+
+                // Wrap around boundaries
+                if (this.y > height + this.r) this.y = -this.r;
+                if (this.y < -this.r) this.y = height + this.r;
+                if (this.x > width + this.r) this.x = -this.r;
+                if (this.x < -this.r) this.x = width + this.r;
+            }
+        }
+
+        function init() {
+            resize();
+            window.addEventListener('resize', resize);
+
+            // Create blobs
+            for (let i = 0; i < CONFIG.blobCount; i++) {
+                blobs.push(new Blob(i));
+            }
+
+            // Create offscreen buffer for the raw field calculation
+            // We draw directly to ImageData to avoid overhead
+            simulationCanvas = document.createElement('canvas');
+            simCtx = simulationCanvas.getContext('2d', { willReadFrequently: true });
+
+            animate();
+        }
+
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+
+            // Calculate grid size based on resolution scale
+            // This is the "Coarse Buffer" resolution
+            cols = Math.floor(width * CONFIG.resolutionScale);
+            rows = Math.floor(height * CONFIG.resolutionScale);
+
+            // Set the offscreen canvas to the coarse resolution
+            simulationCanvas.width = cols;
+            simulationCanvas.height = rows;
+
+            // Create a new ImageData buffer for pixel manipulation
+            const imgData = simCtx.createImageData(cols, rows);
+            // Store this for reuse to avoid allocation overhead
+            simulationCanvas.imageData = imgData; 
+        }
+
+        function render() {
+            const imgData = simulationCanvas.imageData.data;
+            const len = imgData.length;
+
+            // Constants for calculation
+            const r2 = CONFIG.blobRadius * CONFIG.blobRadius;
+            const invR = 1.0 / CONFIG.blobRadius;
+            
+            // Pre-calculate a lookup table for color gradients to avoid math in the loop
+            // Map: Field Strength (0 to ~4) -> Color
+            // We want a "Hot" look: Deep Red -> Orange -> Yellow -> White Core
+            
+            // We will calculate color on the fly using bitwise ops for speed, 
+            // but optimized math is better here.
+            
+            // We need to scale coordinates to the grid
+            const scaleX = cols / width;
+            const scaleY = rows / height;
+
+            for (let y = 0; y < rows; y++) {
+                // Convert grid Y to screen Y for distance calc
+                const screenY = y / scaleY;
+                
+                // Pre-calculate Y differences squared for all blobs
+                // This saves multiplication inside the blob loop
+                const yDiffs = []; 
+                for(let i=0; i<blobs.length; i++) {
+                    yDiffs[i] = (screenY - blobs[i].y) * (screenY - blobs[i].y);
+                }
+
+                for (let x = 0; x < cols; x++) {
+                    const screenX = x / scaleX;
+                    
+                    let field = 0;
+                    
+                    // Calculate Field Sum
+                    for (let i = 0; i < blobs.length; i++) {
+                        const blob = blobs[i];
+                        const dx = screenX - blob.x;
+                        const dy = screenY - blob.y;
+                        
+                        // Distance squared (avoid sqrt for performance)
+                        const distSq = dx*dx + dy*dy;
+                        
+                        // The potential field function (simplified: 1 / r^2 usually looks chunky)
+                        // Using a smoother falloff: radius^2 / (distance^2 + epsilon)
+                        // Or simply: radius / distance
+                        // Let's use: radius^2 / (distance^2 + r2) -> saturates at 1.0 at center
+                        field += (r2 / (distSq + r2 * 0.1));
+                    }
+
+                    // Index in ImageData
+                    const idx = (y * cols + x) * 4;
+
+                    if (field > CONFIG.threshold) {
+                        // Inside the blob
+                        // Normalize field value to get "Heat"
+                        // Max theoretical field is when all blobs overlap perfectly (approx blobCount)
+                        // But usually it's around 2-4 inside the mass.
+                        const heat = Math.min(1.0, (field - CONFIG.threshold) * 0.5);
+                        
+                        // Color Mapping
+                        // Deep Lava: Dark Red -> Bright Orange -> Yellow -> White Core
+                        // Using a procedural gradient
+                        
+                        // Base Dark Red
+                        let r = 80; 
+                        let g = 10; 
+                        let b = 10; 
+
+                        if (heat > 0.1) {
+                            // Transition to Orange
+                            r += heat * 175; 
+                            g += heat * 80;
+                        }
+                        if (heat > 0.5) {
+                            // Transition to Yellow/White
+                            r += (heat - 0.5) * 50;
+                            g += (heat - 0.5) * 150;
+                            b += (heat - 0.5) * 50;
+                        }
+                        
+                        // Inner Glow (Core)
+                        if (heat > 0.8) {
+                            const core = (heat - 0.8) * 5;
+                            r += core * 75;
+                            g += core * 75;
+                            b += core * 75;
+                        }
+
+                        imgData[idx] = r;
+                        imgData[idx + 1] = g;
+                        imgData[idx + 2] = b;
+                        imgData[idx + 3] = 255; // Alpha
+                    } else {
+                        // Outside
+                        // Dark background color, maybe a very faint red reflection?
+                        // For a glass lamp look, the background should be dark.
+                        // We'll make the background pixels very dark red based on proximity
+                        // to the threshold for a subtle "glow through glass" effect
+                        const dist = CONFIG.threshold - field;
+                        if (dist < 0.5) {
+                            const glow = dist * 2; // 0 to 1
+                            imgData[idx] = 20 * glow;
+                            imgData[idx+1] = 5 * glow;
+                            imgData[idx+2] = 5 * glow;
+                            imgData[idx+3] = 255;
+                        } else {
+                            // Deep black
+                            imgData[idx] = 0;
+                            imgData[idx+1] = 0;
+                            imgData[idx+2] = 0;
+                            imgData[idx+3] = 255;
+                        }
+                    }
+                }
+            }
+
+            simCtx.putImageData(simulationCanvas.imageData, 0, 0);
+
+            // Draw the coarse simulation to the main canvas
+            // We rely on CSS 'filter: blur' to smooth the pixels into a liquid surface
+            ctx.drawImage(simulationCanvas, 0, 0, width, height);
+            
+            // Draw a subtle vignette overlay
+            drawVignette();
+        }
+
+        function drawVignette() {
+            // We need a gradient for the vignette. 
+            // Re-creating gradients every frame is expensive. 
+            // We'll use a simpler approach: draw a radial gradient once and cache it, 
+            // or just use a solid dark overlay with a composite operation.
+            
+            // For simplicity in a single file without external assets, we'll skip the heavy 
+            // radial gradient draw and rely on the CSS filter + the edge glow logic in the render loop.
+        }
+        
+        // Pre-generate vignette canvas to save FPS
+        const vignetteCanvas = document.createElement('canvas');
+        const vCtx = vignetteCanvas.getContext('2d');
+        
+        function initVignette() {
+            // Vignette size doesn't need to be full res if we use object-fit stretch, 
+            // but for performance let's do 1/4 res.
+            vignetteCanvas.width = window.innerWidth / 2;
+            vignetteCanvas.height = window.innerHeight / 2;
+            
+            const grad = vCtx.createRadialGradient(
+                vignetteCanvas.width/2, vignetteCanvas.height/2, vignetteCanvas.width * 0.2,
+                vignetteCanvas.width/2, vignetteCanvas.height/2, vignetteCanvas.width * 1.2
+            );
+            grad.addColorStop(0, "rgba(0,0,0,0)");
+            grad.addColorStop(0.8, "rgba(0,0,0,0.6)");
+            grad.addColorStop(1, "rgba(0,0,0,1)");
+            
+            vCtx.fillStyle = grad;
+            vCtx.fillRect(0,0, vignetteCanvas.width, vignetteCanvas.height);
+        }
+
+        function drawVignette() {
+            ctx.globalCompositeOperation = 'source-over';
+            // Draw vignette scaled up to full screen
+            ctx.drawImage(vignetteCanvas, 0, 0, width, height);
+            ctx.globalCompositeOperation = 'source-over';
+        }
+
+        function animate() {
+            const time = Date.now();
+            
+            // Update Physics
+            for (let blob of blobs) {
+                blob.update(time);
+            }
+
+            // Render Field
+            render();
+
+            requestAnimationFrame(animate);
+        }
+
+        // Boot
+        init();
+        initVignette();
+        window.addEventListener('resize', () => {
+            initVignette(); // Regenerate vignette on resize
+        });
+
+    </script>
+</body>
+</html>

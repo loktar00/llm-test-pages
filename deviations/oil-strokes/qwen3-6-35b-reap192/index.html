@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Self-Painting Oil Landscape</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #1a1410; }
+canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', () => { resize(); paintScene(); });
+
+// Utility
+function rand(a, b) { return Math.random() * (b - a) + a; }
+function randInt(a, b) { return Math.floor(rand(a, b + 1)); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+function clamp(v, mn, mx) { return Math.max(mn, Math.min(mx, v)); }
+
+// Color helpers
+function hsl(h, s, l) { return `hsl(${h},${s}%,${l}%)`; }
+function rgba(h, s, l, a) { return `hsla(${h},${s}%,${l}%,${a})`; }
+
+// Landscape data
+let landscape = null;
+
+function generateLandscape() {
+  const skyHue = rand(20, 50); // warm tones
+  const isDusk = Math.random() > 0.5;
+  const season = rand(0, 1); // 0=spring green, 0.5=autumn, 1=winter
+
+  const sunAngle = rand(0.15, 0.45);
+  const sunX = W * lerp(0.2, 0.8, sunAngle);
+  const sunY = H * lerp(0.15, 0.35, sunAngle);
+
+  // Mountains
+  const mountains = [];
+  const numMtnLayers = randInt(2, 4);
+  for (let i = 0; i < numMtnLayers; i++) {
+    const points = [];
+    const baseY = H * lerp(0.4, 0.55, i / numMtnLayers);
+    const segments = randInt(8, 16);
+    for (let j = 0; j <= segments; j++) {
+      const x = (j / segments) * W;
+      const noise = Math.sin(j * 1.3 + i * 2.1) * H * 0.08 +
+                    Math.sin(j * 2.7 + i * 0.7) * H * 0.04 +
+                    Math.sin(j * 0.5 + i * 3.3) * H * 0.12;
+      points.push({ x, y: baseY - Math.abs(noise) });
+    }
+    mountains.push({
+      points,
+      baseY,
+      color: hsl(skyHue + i * 8, rand(10, 25), lerp(25, 15, i / numMtnLayers)),
+      colorBright: hsl(skyHue + i * 8 + 15, rand(15, 30), lerp(35, 25, i / numMtnLayers))
+    });
+  }
+
+  // Hills
+  const hills = [];
+  for (let i = 0; i < randInt(2, 4); i++) {
+    const cx = rand(W * 0.1, W * 0.9);
+    const cy = rand(H * 0.55, H * 0.75);
+    const rx = rand(W * 0.15, W * 0.35);
+    const ry = rand(H * 0.08, H * 0.18);
+    const hue = season < 0.33 ? rand(80, 140) : season < 0.66 ? rand(30, 50) : rand(180, 220);
+    hills.push({ cx, cy, rx, ry, hue, sat: rand(20, 45), lit: rand(20, 40) });
+  }
+
+  // Ground
+  const groundY = H * rand(0.6, 0.7);
+  const groundHue = season < 0.33 ? rand(90, 130) : season < 0.66 ? rand(25, 45) : rand(170, 200);
+
+  // Trees
+  const trees = [];
+  const numTrees = randInt(1, 6);
+  for (let i = 0; i < numTrees; i++) {
+    trees.push({
+      x: rand(W * 0.05, W * 0.95),
+      y: rand(groundY, H * 0.72),
+      height: rand(H * 0.08, H * 0.22),
+      width: rand(H * 0.03, H * 0.08),
+      hue: season < 0.33 ? rand(80, 150) : season < 0.66 ? rand(20, 50) : rand(180, 210),
+      type: Math.random() > 0.5 ? 'round' : 'pine'
+    });
+  }
+
+  // Clouds
+  const clouds = [];
+  for (let i = 0; i < randInt(2, 5); i++) {
+    clouds.push({
+      x: rand(-W * 0.1, W * 1.1),
+      y: rand(H * 0.05, H * 0.3),
+      w: rand(W * 0.1, W * 0.25),
+      h: rand(H * 0.02, H * 0.06),
+      opacity: rand(0.3, 0.7)
+    });
+  }
+
+  // Water feature
+  let water = null;
+  if (Math.random() > 0.4) {
+    water = {
+      x: rand(W * 0.1, W * 0.6),
+      y: groundY + H * 0.05,
+      w: rand(W * 0.15, W * 0.35),
+      h: rand(H * 0.03, H * 0.08)
+    };
+  }
+
+  // Path/road
+  let path = null;
+  if (Math.random() > 0.4) {
+    path = {
+      x: rand(W * 0.3, W * 0.7),
+      y: H * 0.85,
+      endX: rand(W * 0.2, W * 0.8),
+      endY: groundY + H * 0.1,
+      width: rand(H * 0.02, H * 0.05)
+    };
+  }
+
+  return {
+    skyHue, isDusk, sunX, sunY, sunAngle,
+    mountains, hills, groundY, groundHue,
+    trees, clouds, water, path
+  };
+}
+
+// Brush stroke class
+class BrushStroke {
+  constructor(points, color, thickness, type, options = {}) {
+    this.points = points; // array of {x,y}
+    this.color = color;
+    this.thickness = thickness;
+    this.type = type; // 'sky', 'mountain', 'hill', 'ground', 'tree', 'detail', 'water', 'path', 'cloud', 'sun'
+    this.alpha = options.alpha || 0.8;
+    this.bristleCount = options.bristleCount || randInt(3, 7);
+    this.impasto = options.impasto !== undefined ? options.impasto : true;
+    this.delay = options.delay || 0;
+    this.strokeWidth = options.strokeWidth || 1;
+    this.colorVariation = options.colorVariation || 0;
+  }
+
+  getPoint(t) {
+    const pts = this.points;
+    const n = pts.length - 1;
+    const i = Math.min(Math.floor(t * n), n - 1);
+    const lt = (t * n) - i;
+    return {
+      x: lerp(pts[i].x, pts[i + 1].x, lt),
+      y: lerp(pts[i].y, pts[i + 1].y, lt)
+    };
+  }
+
+  draw(ctx, progress) {
+    if (progress <= 0) return;
+    const pts = this.points;
+    const len = pts.length;
+    const drawCount = Math.floor(len * progress);
+    if (drawCount < 2) return;
+
+    ctx.save();
+    ctx.globalAlpha = this.alpha;
+
+    for (let b = 0; b < this.bristleCount; b++) {
+      const offset = (b / this.bristleCount - 0.5) * this.thickness;
+      const bristleW = this.thickness * rand(0.1, 0.3);
+
+      ctx.beginPath();
+      ctx.strokeStyle = this.adjustColor(b);
+      ctx.lineWidth = bristleW;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      for (let i = 0; i < drawCount; i++) {
+        const t = i / len;
+        const p = this.getPoint(t);
+        const perpX = -Math.sin(Math.atan2(
+          this.getPoint(Math.min(t + 0.01, 1)).y - p.y,
+          this.getPoint(Math.min(t + 0.01, 1)).x - p.x
+        ));
+        const perpY = Math.cos(Math.atan2(
+          this.getPoint(Math.min(t + 0.01, 1)).y - p.y,
+          this.getPoint(Math.min(t + 0.01, 1)).x - p.x
+        ));
+        const bx = p.x + perpX * offset + rand(-1, 1);
+        const by = p.y + perpY * offset + rand(-1, 1);
+        if (i === 0) ctx.moveTo(bx, by);
+        else ctx.lineTo(bx, by);
+      }
+      ctx.stroke();
+
+      // Impasto shadow
+      if (this.impasto && this.thickness > 2) {
+        ctx.beginPath();
+        ctx.globalAlpha = this.alpha * 0.15;
+        ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+        ctx.lineWidth = bristleW * 1.8;
+        ctx.lineCap = 'round';
+        for (let i = 0; i < drawCount; i++) {
+          const t = i / len;
+          const p = this.getPoint(t);
+          const angle = Math.atan2(
+            this.getPoint(Math.min(t + 0.01, 1)).y - p.y,
+            this.getPoint(Math.min(t + 0.01, 1)).x - p.x
+          );
+          const sx = p.x + Math.sin(angle) * (this.thickness * 0.35) + offset;
+          const sy = p.y - Math.cos(angle) * (this.thickness * 0.35) + offset;
+          if (i === 0) ctx.moveTo(sx, sy);
+          else ctx.lineTo(sx, sy);
+        }
+        ctx.stroke();
+
+        // Impasto highlight
+        ctx.beginPath();
+        ctx.globalAlpha = this.alpha * 0.12;
+        ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+        ctx.lineWidth = bristleW * 1.2;
+        for (let i = 0; i < drawCount; i++) {
+          const t = i / len;
+          const p = this.getPoint(t);
+          const angle = Math.atan2(
+            this.getPoint(Math.min(t + 0.01, 1)).y - p.y,
+            this.getPoint(Math.min(t + 0.01, 1)).x - p.x
+          );
+          const sx = p.x - Math.sin(angle) * (this.thickness * 0.3) + offset;
+          const sy = p.y + Math.cos(angle) * (this.thickness * 0.3) + offset;
+          if (i === 0) ctx.moveTo(sx, sy);
+          else ctx.lineTo(sx, sy);
+        }
+        ctx.stroke();
+      }
+    }
+
+    ctx.restore();
+  }
+
+  adjustColor(bristleIndex) {
+    if (this.colorVariation === 0) return this.color;
+    const base = this.parseColor();
+    const v = rand(-this.colorVariation, this.colorVariation);
+    const h = clamp(base.h + v * 10, 0, 360);
+    const s = clamp(base.s + v * 5, 0, 100);
+    const l = clamp(base.l + v * 8, 0, 100);
+    return hsl(h, s, l);
+  }
+
+  parseColor() {
+    const temp = document.createElement('canvas').getContext('2d');
+    temp.fillStyle = this.color;
+    temp.fillRect(0, 0, 1, 1);
+    const d = temp.getImageData(0, 0, 1, 1).data;
+    // Simple hsl from rgb approximation
+    const r = d[0] / 255, g = d[1] / 255, b = d[2] / 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    let h, s, l = (max + min) / 2;
+    if (max === min) { h = s = 0; }
+    else {
+      const d = max - min;
+      s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+      switch (max) {
+        case r: h = ((g - b) / d + (g < b ? 6 : 0)) / 6; break;
+        case g: h = ((b - r) / d + 2) / 6; break;
+        case b: h = ((r - g) / d + 4) / 6; break;
+      }
+    }
+    return { h: h * 360, s: s * 100, l: l * 100 };
+  }
+}
+
+// Dab stroke for highlights
+class DabStroke {
+  constructor(x, y, color, radius, options = {}) {
+    this.x = x; this.y = y; this.color = color;
+    this.radius = radius;
+    this.alpha = options.alpha || 0.9;
+    this.delay = options.delay || 0;
+    this.ellipseX = options.ellipseX || 1;
+    this.ellipseY = options.ellipseY || 1;
+    this.rotation = options.rotation || 0;
+  }
+
+  draw(ctx, progress) {
+    if (progress <= 0) return;
+    ctx.save();
+    ctx.globalAlpha = this.alpha * Math.min(progress * 2, 1);
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.rotation);
+
+    // Main dab
+    ctx.beginPath();
+    ctx.ellipse(0, 0, this.radius * this.ellipseX, this.radius * this.ellipseY, 0, 0, Math.PI * 2);
+    ctx.fillStyle = this.color;
+    ctx.fill();
+
+    // Bristle marks on dab
+    const bristles = randInt(3, 8);
+    for (let i = 0; i < bristles; i++) {
+      const angle = rand(0, Math.PI * 2);
+      const dist = rand(0, this.radius * 0.6);
+      const bx = Math.cos(angle) * dist;
+      const by = Math.sin(angle) * dist;
+      const bLen = rand(this.radius * 0.3, this.radius * 0.8);
+      const bAngle = angle + rand(-0.5, 0.5);
+      ctx.beginPath();
+      ctx.strokeStyle = this.adjustColor(i);
+      ctx.lineWidth = rand(0.5, 2);
+      ctx.lineCap = 'round';
+      ctx.moveTo(bx, by);
+      ctx.lineTo(bx + Math.cos(bAngle) * bLen, by + Math.sin(bAngle) * bLen);
+      ctx.stroke();
+    }
+
+    // Impasto
+    if (this.radius > 2) {
+      ctx.globalAlpha = this.alpha * 0.15;
+      ctx.beginPath();
+      ctx.ellipse(1, 1, this.radius * this.ellipseX, this.radius * this.ellipseY, 0, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0,0,0,0.3)';
+      ctx.fill();
+      ctx.globalAlpha = this.alpha * 0.1;
+      ctx.beginPath();
+      ctx.ellipse(-1, -1, this.radius * this.ellipseX, this.radius * this.ellipseY, 0, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,255,255,0.2)';
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
+  adjustColor(i) {
+    const v = rand(-15, 15);
+    const c = this.parseColor();
+    return hsl(clamp(c.h + v, 0, 360), clamp(c.s + v * 0.3, 0, 100), clamp(c.l + v * 0.5, 0, 100));
+  }
+
+  parseColor() {
+    const temp = document.createElement('canvas').getContext('2d');
+    temp.fillStyle = this.color;
+    temp.fillRect(0, 0, 1, 1);
+    const d = temp.getImageData(0, 0, 1, 1).data;
+    const r = d[0]/255, g = d[1]/255, b = d[2]/255;
+    const max = Math.max(r,g,b), min = Math.min(r,g,b);
+    let h, s, l = (max+min)/2;
+    if (max===min) { h=s=0; }
+    else {
+      const diff=max-min;
+      s=l>0.5?diff/(2-max-min):diff/(max+min);
+      if(max===r)h=((g-b)/diff+(g<b?6:0))/6;
+      else if(max===g)h=((b-r)/diff+2)/6;
+      else h=((r-g)/diff+4)/6;
+    }
+    return {h:h*360,s:s*100,l:l*100};
+  }
+}
+
+// Generate all strokes for a landscape
+function generateStrokes(lc) {
+  const strokes = [];
+  const { skyHue, isDusk, sunX, sunY, mountains, hills, groundY, groundHue, trees, clouds, water, path } = lc;
+
+  // ===== PASS 1: UNDERPAINTING (rough, fast, muted) =====
+  // Sky underpainting - broad horizontal strokes
+  const skySteps = randInt(25, 40);
+  for (let i = 0; i < skySteps; i++) {
+   

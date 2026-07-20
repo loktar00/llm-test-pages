@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Evolving Mazectric Maze</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #050505;
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d', { alpha: false });
+
+        let width, height;
+        let cols, rows;
+        let grid = [];
+        let ants = [];
+        
+        // Simulation Parameters
+        const CELL_SIZE = 4; // Size of one maze cell in pixels
+        const ANTS_COUNT = 150;
+        const PHEROMONE_DECAY = 0.985;
+        const PHEROMONE_STRENGTH = 0.4;
+        const RESPAWN_RATE = 0.05; // Chance to spawn ant per frame per region
+        
+        // Colors
+        const COLOR_BG = '#050505';
+        const COLOR_WALL = '#222';
+        const COLOR_CORRIDOR = '#111';
+        const COLOR_ANT = '#ff3300';
+        const COLOR_PHEROMONE = '#ffaa00';
+        const COLOR_GOAL = '#00ffcc';
+
+        // Setup
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            
+            cols = Math.ceil(width / CELL_SIZE);
+            rows = Math.ceil(height / CELL_SIZE);
+            
+            initGrid();
+        }
+
+        function initGrid() {
+            grid = [];
+            for (let y = 0; y < rows; y++) {
+                let row = [];
+                for (let x = 0; x < cols; x++) {
+                    // Initialize with walls, but leave some random openings
+                    let isWall = Math.random() > 0.1;
+                    row.push({
+                        x, y,
+                        isWall,
+                        isCorridor: !isWall,
+                        pheromone: 0,
+                        regionId: -1
+                    });
+                }
+                grid.push(row);
+            }
+            
+            // Assign region IDs
+            assignRegions();
+        }
+
+        // Region Management (Flood Fill)
+        function assignRegions() {
+            let currentRegionId = 1;
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    const cell = grid[y][x];
+                    if (cell.regionId === -1 && cell.isCorridor) {
+                        floodFillRegion(x, y, currentRegionId);
+                        currentRegionId++;
+                    }
+                }
+            }
+            return currentRegionId; // Total regions created
+        }
+
+        function floodFillRegion(startX, startY, regionId) {
+            let stack = [{x: startX, y: startY}];
+            while(stack.length > 0) {
+                const curr = stack.pop();
+                if (curr.x < 0 || curr.x >= cols || curr.y < 0 || curr.y >= rows) continue;
+                if (grid[curr.y][curr.x].regionId !== -1) continue;
+                
+                grid[curr.y][curr.x].regionId = regionId;
+
+                // Neighbors (Up, Down, Left, Right)
+                const neighbors = [
+                    {x: curr.x, y: curr.y - 1},
+                    {x: curr.x, y: curr.y + 1},
+                    {x: curr.x - 1, y: curr.y},
+                    {x: curr.x + 1, y: curr.y}
+                ];
+
+                for (let n of neighbors) {
+                    if (grid[n.y] && grid[n.y][n.x] && grid[n.y][n.x].isCorridor && grid[n.y][n.x].regionId === -1) {
+                        stack.push(n);
+                    }
+                }
+            }
+        }
+
+        // Mazectric Rules
+        function updateMaze() {
+            const nextGridState = new Int8Array(cols * rows); // 1 = Wall, 0 = Corridor
+            
+            // Copy current state to start
+            for(let i=0; i<grid.length; i++) {
+                for(let j=0; j<grid[i].length; j++) {
+                    nextGridState[i * cols + j] = grid[i][j].isWall ? 1 : 0;
+                }
+            }
+
+            for (let y = 1; y < rows - 1; y++) {
+                for (let x = 1; x < cols - 1; x++) {
+                    const idx = y * cols + x;
+                    const cell = grid[y][x];
+                    
+                    if (!cell.isWall) continue; // Only process walls
+
+                    // Count neighbors
+                    let n = 0;
+                    if (grid[y-1][x].isWall) n++;
+                    if (grid[y+1][x].isWall) n++;
+                    if (grid[y][x-1].isWall) n++;
+                    if (grid[y][x+1].isWall) n++;
+
+                    let s = 0;
+                    if (grid[y-1][x-1].isWall) s++;
+                    if (grid[y-1][x+1].isWall) s++;
+                    if (grid[y+1][x-1].isWall) s++;
+                    if (grid[y+1][x+1].isWall) s++;
+
+                    // Mazectric Rule: If a wall has < 4 neighbors (so 5 or more empty), it becomes a corridor
+                    // This connects regions.
+                    if (n < 4) {
+                        nextGridState[idx] = 0;
+                    }
+                }
+            }
+
+            // Apply changes
+            let changed = false;
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    const cell = grid[y][x];
+                    const newIsWall = nextGridState[y * cols + x] === 1;
+                    if (cell.isWall !== newIsWall) {
+                        cell.isWall = newIsWall;
+                        cell.isCorridor = !newIsWall;
+                        changed = true;
+                        // If wall removed, pheromone might be lost if region ID changes drastically, 
+                        // but we'll handle that by clearing pheromone on open cells periodically or just letting ants find new paths.
+                        if (!newIsWall) cell.pheromone = 0; 
+                    }
+                }
+            }
+
+            // Update Region IDs if changed
+            if (changed) {
+                // Reset region IDs
+                for(let y=0; y<rows; y++) {
+                    for(let x=0; x<cols; x++) {
+                        grid[y][x].regionId = -1;
+                    }
+                }
+                // We don't need to recompute all regions immediately. 
+                // We just mark the changed cells as region-less. 
+                // Ants will find the new regions.
+                // For simplicity, we do a full re-assign every few frames or when stable to keep logic clean, 
+                // but for performance, let's just randomize IDs for walls.
+                for(let y=0; y<rows; y++) {
+                    for(let x=0; x<cols; x++) {
+                        if(grid[y][x].isWall) grid[y][x].regionId = Math.floor(Math.random() * 10000);
+                    }
+                }
+            }
+        }
+
+        // Ant System
+        class Ant {
+            constructor() {
+                this.x = 0;
+                this.y = 0;
+                this.path = [];
+                this.target = null;
+                this.life = 0;
+                this.respawn();
+            }
+
+            respawn() {
+                // Pick a random corridor cell
+                let attempts = 0;
+                while(attempts < 100) {
+                    const rx = Math.floor(Math.random() * cols);
+                    const ry = Math.floor(Math.random() * rows);
+                    if (grid[ry][rx].isCorridor) {
+                        this.x = rx;
+                        this.y = ry;
+                        this.path = [];
+                        this.life = 100;
+                        this.findPath();
+                        break;
+                    }
+                    attempts++;
+                }
+            }
+
+            findPath() {
+                // Simple BFS to find a target in a neighboring region
+                const start = {x: this.x, y: this.y, p: null};
+                let queue = [start];
+                let visited = new Set();
+                visited.add(`${this.x},${this.y}`);
+                
+                let target = null;
+                let startRegion = grid[this.y][this.x].regionId;
+
+                while(queue.length > 0) {
+                    let curr = queue.shift();
+                    
+                    // Check neighbors
+                    const neighbors = [
+                        {x: curr.x, y: curr.y - 1},
+                        {x: curr.x, y: curr.y + 1},
+                        {x: curr.x - 1, y: curr.y},
+                        {x: curr.x + 1, y: curr.y}
+                    ];
+
+                    for (let n of neighbors) {
+                        if (n.x < 0 || n.x >= cols || n.y < 0 || n.y >= rows) continue;
+                        if (!grid[n.y][n.x].isCorridor) continue;
+
+                        const nRegion = grid[n.y][n.x].regionId;
+                        
+                        // If neighbor is in a different region, it's a target
+                        if (nRegion !== startRegion && nRegion !== -1) {
+                            target = n;
+                            break;
+                        }
+
+                        if (!visited.has(`${n.x},${n.y}`)) {
+                            visited.add(`${n.x},${n.y}`);
+                            queue.push({x: n.x, y: n.y, p: curr});
+                        }
+                    }
+                    if (target) break;
+                }
+
+                // Reconstruct path
+                this.path = [];
+                if (target) {
+                    let curr = target;
+                    while (curr.p) {
+                        this.path.unshift(curr);
+                        curr = curr.p;
+                    }
+                }
+            }
+
+            update() {
+                this.life--;
+                if (this.life <= 0 || this.path.length === 0) {
+                    this.respawn();
+                    return;
+                }
+
+                // Move towards next target
+                const next = this.path[0];
+                if (next) {
+                    // Simple interpolation
+                    if (Math.abs(this.x - next.x) > 0.1) this.x += Math.sign(next.x - this.x) * 0.5;
+                    if (Math.abs(this.y - next.y) > 0.1) this.y += Math.sign(next.y - this.y) * 0.5;
+                    
+                    // Snap to grid cell
+                    const gx = Math.round(this.x);
+                    const gy = Math.round(this.y);
+                    if (gx === next.x && gy === next.y) {
+                        this.x = gx;
+                        this.y = gy;
+                        this.path.shift();
+                        
+                        // Drop Pheromone
+                        if (gx >= 0 && gx < cols && gy >= 0 && gy < rows) {
+                            grid[gy][gx].pheromone = Math.min(1, grid[gy][gx].pheromone + PHEROMONE_STRENGTH);
+                        }
+
+                        // If reached end of path, find new path
+                        if (this.path.length === 0) {
+                            this.findPath();
+                        }
+                    }
+                } else {
+                    // No path found, wander or respawn
+                    this.respawn();
+                }
+            }
+
+            draw(ctx) {
+                ctx.fillStyle = COLOR_ANT;
+                ctx.beginPath();
+                ctx.arc(this.x * CELL_SIZE + CELL_SIZE/2, this.y * CELL_SIZE + CELL_SIZE/2, CELL_SIZE * 0.4, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        function initAnts() {
+            for(let i=0; i<ANTS_COUNT; i++) {
+                ants.push(new Ant());
+            }
+        }
+
+        // Rendering
+        function draw() {
+            // Fade out existing canvas content for trail effect (optional, but we draw grid directly)
+            ctx.fillStyle = COLOR_BG;
+            ctx.fillRect(0, 0, width, height);
+
+            // Draw Pheromones
+            // We iterate every few pixels to save perf
+            for (let y = 0; y < rows; y += 1) {
+                for (let x = 0; x < cols; x += 1) {
+                    const cell = grid[y][x];
+                    
+                    // Decay pheromone
+                    cell.pheromone *= PHEROMONE_DECAY;
+                    if (cell.pheromone < 0.01) cell.pheromone = 0;
+
+                    if (cell.pheromone > 0) {
+                        ctx.fillStyle = `rgba(255, 170, 0, ${cell.pheromone})`;
+                        ctx.fillRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+                    }
+                }
+            }
+
+            // Draw Maze Structure (Walls)
+            ctx.fillStyle = COLOR_WALL;
+            ctx.beginPath();
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    if (grid[y][x].isWall) {
+                        ctx.rect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+                    }
+                }
+            }
+            ctx.fill();
+
+            // Draw Ants
+            for (let ant of ants) {
+                ant.draw(ctx);
+            }
+        }
+
+        // Main Loop
+        function loop() {
+            // Update Maze (Every few frames to let ants move)
+            updateMaze();
+            
+            // Update Ants
+            for (let ant of ants) {
+                ant.update();
+            }
+
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        window.addEventListener('resize', () => {
+            resize();
+            initAnts();
+        });
+
+        resize();
+        initAnts();
+        loop();
+
+    </script>
+</body>
+</html>

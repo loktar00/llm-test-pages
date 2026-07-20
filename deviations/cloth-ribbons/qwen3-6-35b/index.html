@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flowing Cloth Ribbons</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #050510;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="c"></canvas>
+    <script>
+        const canvas = document.getElementById('c');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let time = 0;
+
+        // Configuration
+        const RIBBON_COUNT = 5;
+        const SEGMENT_HEIGHT = 15;
+        const GRAVITY = 0.5;
+        const FRICTION = 0.96;
+        const STIFFNESS = 0.8; // Higher is more rigid
+        
+        // Colors for the 5 ribbons
+        const PALETTES = [
+            { r: 60, g: 100, b: 200, a: 0.85 }, // Blue
+            { r: 180, g: 50, b: 200, a: 0.85 }, // Purple
+            { r: 220, g: 60, b: 120, a: 0.85 }, // Pink/Red
+            { r: 40, g: 180, b: 160, a: 0.85 }, // Teal
+            { r: 240, g: 180, b: 60, a: 0.85 }  // Gold
+        ];
+
+        class Point {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.oldX = x;
+                this.oldY = y;
+            }
+
+            update() {
+                const vx = (this.x - this.oldX) * FRICTION;
+                const vy = (this.y - this.oldY) * FRICTION;
+
+                this.oldX = this.x;
+                this.oldY = this.y;
+
+                this.x += vx;
+                this.y += vy + GRAVITY;
+            }
+
+            constrain() {
+                // Pin the top point (first segment)
+                // We don't physically pin it to a coordinate, but we reset its velocity/position relative to the anchor
+                // Actually, for a hanging cloth, the top point shouldn't move in X/Y, but let's let it sway slightly with the wind anchor
+                return; // Logic handled in Ribbon class for the anchor
+            }
+        }
+
+        class Ribbon {
+            constructor(index, total, startX, startY) {
+                this.points = [];
+                this.index = index;
+                this.total = total;
+                
+                // Calculate start position spread evenly across screen width
+                const spacing = width / (total + 1);
+                const x = spacing * (index + 1);
+                const y = startY;
+
+                this.segmentCount = Math.floor(height / SEGMENT_HEIGHT);
+
+                // Create points
+                for (let i = 0; i < this.segmentCount; i++) {
+                    this.points.push(new Point(x, y + i * SEGMENT_HEIGHT));
+                }
+
+                // Wind phase offset
+                this.windOffsetX = index * 1.5;
+                this.windOffsetY = index * 0.2;
+            }
+
+            update(windField) {
+                const topPoint = this.points[0];
+                
+                // Anchor top point to a swaying position
+                const anchorX = topPoint.x; // Keep anchor X fixed to the ribbon's start X
+                const anchorY = topPoint.y; // Keep anchor Y fixed
+
+                // 1. Update Physics (Verlet)
+                for (let p of this.points) {
+                    p.update();
+                }
+
+                // 2. Apply Wind Force
+                // We pass the wind field value for the specific point's Y position
+                for (let i = 0; i < this.points.length; i++) {
+                    const p = this.points[i];
+                    const windVal = windField(p.x, p.y, time, i);
+                    
+                    // Apply wind as a force to velocity (implicit in Verlet via position change)
+                    // We add directly to X velocity approximation
+                    p.x += windVal;
+                }
+
+                // 3. Constraints (Cloth)
+                // Solve distance constraints multiple times for rigidity
+                for (let iter = 0; iter < 3; iter++) {
+                    
+                    // Anchor constraint
+                    this.points[0].x = anchorX;
+                    this.points[0].y = anchorY;
+
+                    // Segment constraints
+                    for (let i = 0; i < this.points.length - 1; i++) {
+                        const p1 = this.points[i];
+                        const p2 = this.points[i + 1];
+
+                        const dx = p2.x - p1.x;
+                        const dy = p2.y - p1.y;
+                        const dist = Math.sqrt(dx * dx + dy * dy);
+                        const diff = (SEGMENT_HEIGHT - dist) / dist * STIFFNESS;
+
+                        const offsetX = dx * diff;
+                        const offsetY = dy * diff;
+
+                        // Move p1 (unless it's the anchor)
+                        if (i !== 0) {
+                            p1.x -= offsetX * 0.5;
+                            p1.y -= offsetY * 0.5;
+                        }
+
+                        // Move p2
+                        p2.x += offsetX * 0.5;
+                        p2.y += offsetY * 0.5;
+                    }
+                }
+            }
+
+            draw(ctx) {
+                const color = PALETTES[this.index];
+                
+                // Draw each segment
+                for (let i = 0; i < this.points.length - 1; i++) {
+                    const p1 = this.points[i];
+                    const p2 = this.points[i + 1];
+
+                    // Vector of the segment
+                    const dx = p2.x - p1.x;
+                    const dy = p2.y - p1.y;
+                    
+                    // Normal vector (perpendicular) for lighting calculations
+                    const len = Math.sqrt(dx*dx + dy*dy);
+                    if(len === 0) continue;
+                    
+                    const nx = -dy / len;
+                    const ny = dx / len;
+
+                    // Light direction (0, -1) is straight down (top of screen)
+                    // We want to see the "front" of the ribbon when it bends towards top/left
+                    // Dot product of Normal and Light
+                    const dot = (nx * 0) + (ny * -1); // Light from top
+                    
+                    // Sheen calculation: 0 to 1
+                    const light = Math.max(0, dot);
+                    
+                    // Base color vs Highlight color
+                    const r = Math.min(255, color.r + light * 100);
+                    const g = Math.min(255, color.g + light * 120);
+                    const b = Math.min(255, color.b + light * 150);
+
+                    ctx.beginPath();
+                    ctx.moveTo(p1.x, p1.y);
+                    ctx.lineTo(p2.x, p2.y);
+                    
+                    // Thickness: slightly thinner at the bottom for perspective
+                    const thickness = 20 - (i / this.points.length) * 10;
+                    ctx.lineWidth = thickness;
+                    
+                    ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${color.a})`;
+                    ctx.lineCap = 'round';
+                    ctx.lineJoin = 'round';
+                    ctx.stroke();
+
+                    // Optional: Draw a subtle specular highlight line
+                    if (light > 0.8) {
+                        ctx.beginPath();
+                        ctx.moveTo(p1.x, p1.y);
+                        ctx.lineTo(p2.x, p2.y);
+                        ctx.strokeStyle = `rgba(255, 255, 255, ${light * 0.4})`;
+                        ctx.lineWidth = thickness * 0.3;
+                        ctx.stroke();
+                    }
+                }
+            }
+        }
+
+        let ribbons = [];
+
+        function init() {
+            resize();
+            ribbons = [];
+            for (let i = 0; i < RIBBON_COUNT; i++) {
+                ribbons.push(new Ribbon(i, RIBBON_COUNT, 0, 0));
+            }
+        }
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+        }
+
+        function getWind(x, y, t, index) {
+            // Procedural wind field
+            // Combines sine waves for smooth, organic movement
+            
+            // Wave 1: Slow horizontal swell
+            const wave1 = Math.sin(y * 0.005 + t * 0.8);
+            
+            // Wave 2: Faster ripple
+            const wave2 = Math.sin(y * 0.02 + t * 1.5);
+            
+            // Wave 3: Sudden gusts (Gaussian-ish envelope)
+            const gust = Math.sin(t * 0.2 + index) * Math.cos(y * 0.01 - t * 0.5);
+
+            // Combine
+            let force = (wave1 * 2) + (wave2 * 1) + (gust * 3);
+            
+            // Increase force slightly towards the bottom (momentum)
+            force *= (1 + y * 0.0005);
+            
+            return force;
+        }
+
+        function loop() {
+            // Trail effect
+            ctx.fillStyle = 'rgba(5, 5, 16, 0.3)'; // Dark background with transparency
+            ctx.fillRect(0, 0, width, height);
+
+            time += 0.03;
+
+            // Update and Draw Ribbons
+            // We update based on the current time and the specific Y coordinate of each point
+            for (let ribbon of ribbons) {
+                ribbon.update(getWind);
+                ribbon.draw(ctx);
+            }
+
+            requestAnimationFrame(loop);
+        }
+
+        window.addEventListener('resize', resize);
+        init();
+        loop();
+
+    </script>
+</body>
+</html>

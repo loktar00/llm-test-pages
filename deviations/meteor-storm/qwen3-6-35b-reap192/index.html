@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meteor Storm</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #050508;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        
+        // Storm State
+        let time = 0;
+        let intensity = 0.05; // 0.0 to 1.0
+        const intensitySpeed = 0.0002;
+        const intensityAmplitude = 0.8;
+        const intensityBase = 0.1;
+        
+        // Visual Config
+        const fadeFactor = 0.12; // Lower = longer trails (0.0 to 1.0)
+        const starCount = 300;
+        const stars = [];
+        
+        // Bolide Config
+        let flashAlpha = 0;
+        let smokeParticles = [];
+
+        // Resize Handler
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            createStars();
+            drawRidge(); // Draw background once
+        }
+
+        function createStars() {
+            stars.length = 0;
+            for (let i = 0; i < starCount; i++) {
+                stars.push({
+                    x: Math.random() * width,
+                    y: Math.random() * (height * 0.7), // Keep stars mostly in sky
+                    size: Math.random() * 1.5,
+                    alpha: Math.random() * 0.8 + 0.2
+                });
+            }
+        }
+
+        // Generate a static ridge path
+        function getRidgeY(x) {
+            // Simple noise-like generation using sine waves
+            return height - 100 + 
+                   Math.sin(x * 0.002) * 80 + 
+                   Math.sin(x * 0.01) * 30 + 
+                   Math.sin(x * 0.05) * 10;
+        }
+
+        // Draw the silhouette ridge once
+        function drawRidge() {
+            ctx.fillStyle = '#020204';
+            ctx.beginPath();
+            ctx.moveTo(0, height);
+            for (let x = 0; x <= width; x += 10) {
+                ctx.lineTo(x, getRidgeY(x));
+            }
+            ctx.lineTo(width, height);
+            ctx.fill();
+        }
+
+        // Meteor Class
+        class Meteor {
+            constructor() {
+                this.reset();
+            }
+
+            reset() {
+                this.x = Math.random() * width * 1.5;
+                this.y = -10;
+                const angle = Math.random() * (Math.PI / 4) + (Math.PI / 4); // 45 to 90 degrees
+                const speed = Math.random() * 10 + 10;
+                this.vx = Math.cos(angle) * speed;
+                this.vy = Math.sin(angle) * speed;
+                
+                this.life = 1.0;
+                this.decay = Math.random() * 0.01 + 0.015;
+                this.width = Math.random() * 2 + 1;
+                
+                // Color: White to slight blue/purple tint
+                const hue = Math.random() * 60 + 200; // 200-260 (Blue/Purple)
+                const sat = 50 + Math.random() * 50;
+                const light = 80 + Math.random() * 20;
+                this.color = `hsl(${hue}, ${sat}%, ${light}%)`;
+            }
+
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.life -= this.decay;
+                return this.life > 0;
+            }
+
+            draw() {
+                ctx.beginPath();
+                ctx.strokeStyle = this.color;
+                ctx.lineWidth = this.width * this.life;
+                ctx.lineCap = 'round';
+                
+                // Draw trail backwards from head
+                const trailLen = 40;
+                const angle = Math.atan2(this.vy, this.vx);
+                
+                ctx.moveTo(this.x, this.y);
+                ctx.lineTo(
+                    this.x - Math.cos(angle) * trailLen, 
+                    this.y - Math.sin(angle) * trailLen
+                );
+                ctx.stroke();
+            }
+        }
+
+        // Bolide (Special bright meteor)
+        class Bolide {
+            constructor() {
+                this.x = -100;
+                this.y = height * 0.5;
+                this.vx = 25; // Very fast
+                this.vy = 15;
+                this.active = true;
+                this.trailTimer = 0;
+            }
+
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+
+                // Sky Flash
+                if (this.x > width * 0.2 && this.x < width * 0.8) {
+                    flashAlpha = Math.max(flashAlpha, 0.3);
+                }
+
+                if (this.x > width + 200 || this.y > height + 200) {
+                    this.active = false;
+                }
+            }
+
+            draw() {
+                ctx.save();
+                ctx.globalCompositeOperation = 'lighter';
+                
+                // Bright head
+                const grad = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, 20);
+                grad.addColorStop(0, 'rgba(255, 255, 255, 1)');
+                grad.addColorStop(0.2, 'rgba(200, 220, 255, 0.8)');
+                grad.addColorStop(1, 'rgba(100, 100, 255, 0)');
+                
+                ctx.fillStyle = grad;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, 20, 0, Math.PI * 2);
+                ctx.fill();
+                
+                ctx.restore();
+            }
+        }
+
+        // Smoke Particle Class (Leaves after Bolide)
+        class Smoke {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.vx = (Math.random() - 0.5) * 2;
+                this.vy = (Math.random() - 0.5) * 2 - 1; // Slight upward drift
+                this.life = 1.0;
+                this.decay = 0.005;
+                this.size = 20;
+            }
+
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.size += 0.5;
+                this.life -= this.decay;
+                return this.life > 0;
+            }
+
+            draw() {
+                ctx.save();
+                ctx.globalCompositeOperation = 'source-over'; // Opaque blending
+                // Dark grey smoke
+                const alpha = this.life * 0.15;
+                ctx.fillStyle = `rgba(100, 100, 120, ${alpha})`;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+
+        // Initialize
+        window.addEventListener('resize', resize);
+        resize();
+        drawRidge();
+
+        const meteors = [];
+        let bolide = null;
+
+        function animate() {
+            requestAnimationFrame(animate);
+            time++;
+
+            // 1. Calculate Intensity (Waxing/Waning)
+            // Cycle repeats every ~33 seconds
+            const cycle = Math.sin(time * intensitySpeed);
+            // Map -1..1 to Base..Max
+            intensity = intensityBase + (cycle * 0.5 + 0.5) * intensityAmplitude;
+
+            // 2. Fade Effect (The "Persistence" Trick)
+            // Instead of clearing, we draw a semi-transparent black rect.
+            // This keeps old frames faintly visible, creating trails.
+            ctx.fillStyle = `rgba(5, 5, 10, ${fadeFactor})`;
+            ctx.fillRect(0, 0, width, height);
+
+            // 3. Draw Static Stars (Redraw them every frame so they don't fade away with the background fade)
+            // We use 'lighter' blend to make them twinkle slightly
+            ctx.globalCompositeOperation = 'lighter';
+            stars.forEach(star => {
+                ctx.globalAlpha = star.alpha * (0.5 + 0.5 * Math.sin(time * 0.05 + star.x));
+                ctx.fillStyle = '#FFF';
+                ctx.beginPath();
+                ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
+                ctx.fill();
+            });
+            ctx.globalAlpha = 1.0;
+
+            // 4. Spawn Meteors
+            if (Math.random() < intensity * 0.2) {
+                meteors.push(new Meteor());
+            }
+
+            // 5. Handle Bolides (One per wave)
+            // We check if intensity is high and no bolide exists
+            if (bolide === null && intensity > 0.7 && Math.random() < 0.005) {
+                bolide = new Bolide();
+            }
+
+            // 6. Update & Draw Meteors
+            ctx.globalCompositeOperation = 'lighter';
+            for (let i = meteors.length - 1; i >= 0; i--) {
+                const m = meteors[i];
+                if (!m.update()) {
+                    meteors.splice(i, 1);
+                } else {
+                    m.draw();
+                }
+            }
+
+            // 7. Update & Draw Bolide
+            if (bolide) {
+                bolide.update();
+                bolide.draw();
+                if (!bolide.active) bolide = null;
+            }
+
+            // 8. Sky Flash (Bloom effect)
+            if (flashAlpha > 0) {
+                ctx.globalCompositeOperation = 'screen';
+                ctx.fillStyle = `rgba(200, 210, 255, ${flashAlpha})`;
+                ctx.fillRect(0, 0, width, height);
+                flashAlpha *= 0.95; // Fade out flash
+                if (flashAlpha < 0.01) flashAlpha = 0;
+            }
+
+            // 9. Smoke Trains (Persist after bolide)
+            // Spawn smoke randomly behind bolide
+            if (bolide && bolide.active && Math.random() > 0.5) {
+                smokeParticles.push(new Smoke(bolide.x - 20, bolide.y));
+                smokeParticles.push(new Smoke(bolide.x - 40, bolide.y + Math.random()*10));
+            }
+
+            // Update and Draw Smoke (Drawn normally, not lighter)
+            ctx.globalCompositeOperation = 'source-over';
+            for (let i = smokeParticles.length - 1; i >= 0; i--) {
+                const s = smokeParticles[i];
+                if (!s.update()) {
+                    smokeParticles.splice(i, 1);
+                } else {
+                    s.draw();
+                }
+            }
+        }
+
+        animate();
+    </script>
+</body>
+</html>

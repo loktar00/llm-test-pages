@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Metaball Lava Lamp</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+        }
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+    </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+/**
+ * Metaball Lava Lamp
+ * 
+ * Algorithm:
+ * 1. Physics: Blobs move vertically based on 'heat' (temperature). 
+ *    Hot = rises, Cold = sinks. They drift horizontally and rotate slightly.
+ * 2. Rendering: 
+ *    - Offscreen canvas (scaled down by factor of 4-8) to run per-pixel calculations at 60fps.
+ *    - For each pixel, calculate the scalar field value of all active blobs.
+ *    - F(x,y) = sum( radius^2 / distance^2 ).
+ *    - Threshold at F(x,y) >= 1.0 to determine if the pixel is "inside" a blob.
+ *    - Color mapping: Map the field value or distance to core for color gradient.
+ */
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha: false });
+
+// Configuration
+const SCALE = 5; // Render resolution scale (1/5th of screen for performance)
+const BLOB_COUNT = 10;
+const BLOB_RADIUS = 35; // Logic radius for physics
+const RENDER_RADIUS = 1.8; // Effective radius for field calculation (larger merge area)
+const DAMPING = 0.98;
+const GRAVITY_OFFSET = 0.05;
+const HEAT_SOURCE = 0.02; // How fast it heats/cools
+const MAX_TEMP = 1.0;
+const MIN_TEMP = 0.0;
+
+let width, height, renderWidth, renderHeight;
+let blobs = [];
+let imageData, buffer;
+
+// Blob Class
+class Blob {
+    constructor(index) {
+        this.index = index;
+        this.reset();
+    }
+
+    reset() {
+        // Start at random vertical positions initially
+        this.y = Math.random() * height;
+        this.x = Math.random() * (width - 100) + 50;
+        this.radius = BLOB_RADIUS + Math.random() * 15;
+        
+        // Vertical velocity
+        this.vy = (Math.random() - 0.5) * 2;
+        // Horizontal drift
+        this.vx = (Math.random() - 0.5) * 0.5;
+        
+        // Heat state: 0.0 (cold/heavy) to 1.0 (hot/light)
+        this.temp = Math.random();
+        
+        // Rotation for slight wobble
+        this.angle = Math.random() * Math.PI * 2;
+        this.rotSpeed = (Math.random() - 0.5) * 0.02;
+        
+        // Color offset (so not all blobs look exactly identical)
+        this.hueOffset = Math.random() * 40 - 20; 
+    }
+
+    update(dt) {
+        // 1. Thermodynamics
+        // Base is hot (heating up), Top is cold (cooling down)
+        // Normalized Y: 0 (bottom) to 1 (top)
+        const ny = this.y / height;
+        
+        if (ny > 0.8) {
+            // Cooling at top
+            this.temp -= HEAT_SOURCE;
+        } else if (ny < 0.2) {
+            // Heating at bottom
+            this.temp += HEAT_SOURCE * 1.5;
+        } else {
+            // Transition zone
+            this.temp -= (0.5 - ny) * 0.05; 
+        }
+
+        // Clamp temp
+        if (this.temp < MIN_TEMP) this.temp = MIN_TEMP;
+        if (this.temp > MAX_TEMP) this.temp = MAX_TEMP;
+
+        // 2. Buoyancy / Physics
+        // Higher temp = positive velocity (rises), Lower temp = negative velocity (sinks)
+        // Map temp 0..1 to velocity roughly -1..1
+        const targetVy = (this.temp - 0.5) * 1.5;
+        
+        // Smooth acceleration
+        this.vy += (targetVy - this.vy) * 0.02;
+        
+        // Apply friction
+        this.vy *= DAMPING;
+        this.vx *= DAMPING;
+
+        // 3. Movement
+        this.y += this.vy * dt;
+        this.x += this.vx * dt;
+
+        // 4. Boundaries
+        // Horizontal containment
+        if (this.x < 30) { this.vx = Math.abs(this.vx); }
+        if (this.x > width - 30) { this.vx = -Math.abs(this.vx); }
+
+        // Vertical reset loop (The cycle)
+        if (this.y > height + 50) {
+            this.y = -50;
+            this.temp = 1.0; // Reset to hot
+            this.vy = 0;
+        }
+        if (this.y < -50) {
+            this.y = height + 50;
+            this.temp = 0.0; // Reset to cold
+            this.vy = 0;
+        }
+
+        // 5. Drift and Rotation
+        this.angle += this.rotSpeed;
+        
+        // Add slight random noise to velocity for "organic" feel
+        this.vx += (Math.random() - 0.5) * 0.1;
+        // Keep horizontal speed reasonable
+        if (Math.abs(this.vx) > 1.5) this.vx = 1.5 * Math.sign(this.vx);
+    }
+
+    drawField(ctx) {
+        // We don't draw circles. We just update state.
+        // The rendering loop handles the pixel math.
+    }
+}
+
+// Initialization
+function init() {
+    resize();
+    window.addEventListener('resize', resize);
+    
+    // Create Blobs
+    for (let i = 0; i < BLOB_COUNT; i++) {
+        blobs.push(new Blob(i));
+    }
+    
+    requestAnimationFrame(loop);
+}
+
+function resize() {
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = width;
+    canvas.height = height;
+    
+    renderWidth = Math.ceil(width / SCALE);
+    renderHeight = Math.ceil(height / SCALE);
+    
+    // Create offscreen canvas for field calculation
+    // Using a smaller canvas and scaling up looks nice (pixelated feel) 
+    // but we apply CSS smoothing for the final result.
+    
+    if (!ctx2d) {
+        const offCanvas = document.createElement('canvas');
+        offCanvas.width = renderWidth;
+        offCanvas.height = renderHeight;
+        const offCtx = offCanvas.getContext('2d');
+        ctx2d = offCtx;
+        imageData = offCtx.createImageData(renderWidth, renderHeight);
+        buffer = imageData.data;
+    } else {
+        ctx2d.canvas.width = renderWidth;
+        ctx2d.canvas.height = renderHeight;
+        imageData = ctx2d.createImageData(renderWidth, renderHeight);
+        buffer = imageData.data;
+    }
+}
+
+let ctx2d = null;
+
+// The Physics & Rendering Loop
+function loop(timestamp) {
+    const dt = 16.66; // Fixed time step for consistency
+
+    // 1. Update Physics
+    for (let b of blobs) {
+        b.update(dt);
+    }
+
+    // 2. Render Metaballs
+    // Clear buffer (transparent)
+    // We fill a dark background first to handle the "glass" look later
+    for (let i = 0; i < buffer.length; i += 4) {
+        buffer[i] = 10;     // R
+        buffer[i+1] = 5;    // G
+        buffer[i+2] = 15;   // B
+        buffer[i+3] = 255;  // A
+    }
+
+    // Iterate over every pixel of the low-res canvas
+    // Optimization: Pre-calculate blob centers scaled down
+    const scX = 1 / SCALE;
+    const scY = 1 / SCALE;
+    
+    const blobCenters = blobs.map(b => ({
+        x: b.x * scX,
+        y: b.y * scY,
+        r: b.r || RENDER_RADIUS, // Keep physics radius logic roughly proportional
+        temp: b.temp
+    }));
+
+    // Core Rendering Loop
+    // Threshold calculation: sum(radius^2 / dist^2) >= 1.0
+    // We iterate pixels.
+    
+    const limitX = renderWidth;
+    const limitY = renderHeight;
+    const sqrt2 = 1.414; // Threshold factor
+    
+    for (let y = 0; y < limitY; y++) {
+        for (let x = 0; x < limitX; x++) {
+            let val = 0;
+            
+            // Calculate Field Value
+            // Optimization: Skip if too far from any blob? 
+            // For 10 blobs, simple loop is fast enough on modern JS engines.
+            // Using a simpler distance check first.
+            
+            for (let i = 0; i < blobCenters.length; i++) {
+                const b = blobCenters[i];
+                const dx = x - b.x;
+                const dy = y - b.y;
+                const distSq = dx*dx + dy*dy;
+                
+                // Field contribution
+                // The "effective radius" in the field equation
+                val += (b.r * b.r) / distSq;
+            }
+
+            const index = (y * limitX + x) * 4;
+
+            if (val > 1.0) {
+                // Inside a blob
+                
+                // Calculate "depth" or intensity based on how far above threshold
+                // or distance to center of the "blob group"
+                // Simple approach: Map val to color intensity
+                
+                // Let's simulate "Heat" color based on the dominant blob's temp
+                // Find closest blob to determine color
+                let closestDist = Infinity;
+                let closestTemp = 0;
+                
+                for(let i=0; i<blobCenters.length; i++) {
+                     const b = blobCenters[i];
+                     const d = Math.sqrt((x-b.x)**2 + (y-b.y)**2);
+                     if(d < closestDist) {
+                         closestDist = d;
+                         closestTemp = blobs[i].temp;
+                     }
+                }
+
+                // Color Grading
+                // Cold = Deep Red/Orange (R=180, G=20, B=0)
+                // Hot = Bright Yellow/Gold (R=255, G=255, B=100)
+                // The lava lamp glass is usually dark red/purple
+                
+                // Gradient calculation
+                const t = 0.5 + 0.5 * closestTemp; // 0.0 to 1.0
+                
+                // Base Dark Red
+                const r1 = 120, g1 = 10, b1 = 10;
+                // Bright Core
+                const r2 = 255, g2 = 150, b2 = 50;
+                
+                // Mix
+                let r = r1 + (r2 - r1) * t;
+                let g = g1 + (g2 - g1) * t;
+                let b = b1 + (b2 - b1) * t;
+                
+                // Add Inner Glow logic: 
+                // Center of the blob (val > 2.0) gets brighter/whiter
+                const glow = Math.max(0, (val - 2.0) * 0.2);
+                r = Math.min(255, r + glow * 100);
+                g = Math.min(255, g + glow * 80);
+                
+                // Glass Refraction / Edge Glow
+                // If val is close to 1.0 (edge), darken or add purple tint
+                if (val < 1.2) {
+                     r *= 0.6;
+                     g *= 0.4;
+                     b *= 0.8;
+                }
+
+                buffer[index] = r;
+                buffer[index+1] = g;
+                buffer[index+2] = b;
+                buffer[index+3] = 255; // Opaque
+            }
+        }
+    }
+
+    // Put the low-res image onto the offscreen context
+    ctx2d.putImageData(imageData, 0, 0);
+
+    // Draw to main canvas with smoothing to hide the pixelation of the low-res buffer
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(ctx2d.canvas, 0, 0, width, height);
+    
+    // Optional: Overlay a vignette for the glass effect
+    const grad = ctx.createRadialGradient(width/2, height/2, height * 0.3, width/2, height/2, height * 0.8);
+    grad.addColorStop(0, 'rgba(0,0,0,0)');
+    grad.addColorStop(1, 'rgba(0,0,0,0.6)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, width, height);
+
+    requestAnimationFrame(loop);
+}
+
+// Start
+init();
+
+</script>
+</body>
+</html>

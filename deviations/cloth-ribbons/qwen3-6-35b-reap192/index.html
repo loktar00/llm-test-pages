@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flowing Cloth Ribbons</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #050510; /* Deep space blue */
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let segments = [];
+        const numRibbons = 5;
+        const pointsPerRibbon = 60;
+        const spacing = 15;
+        const gravity = 0.5;
+        const windStrength = 2.5;
+
+        // Configuration for the look
+        const colors = [
+            { h: 180, s: 80, l: 60 }, // Cyan
+            { h: 200, s: 70, l: 50 }, // Blue
+            { h: 270, s: 60, l: 55 }, // Purple
+            { h: 320, s: 65, l: 50 }, // Magenta
+            { h: 340, s: 75, l: 60 }  // Pink/Red
+        ];
+
+        class Point {
+            constructor(x, y, pinned = false) {
+                this.x = x;
+                this.y = y;
+                this.oldx = x;
+                this.oldy = y;
+                this.pinned = pinned;
+                this.mass = 1;
+            }
+
+            update() {
+                if (this.pinned) {
+                    this.x = this.oldx; // Keep static if pinned
+                    this.y = this.oldy;
+                    return;
+                }
+
+                const vx = (this.x - this.oldx) * 0.98; // Friction/Damping
+                const vy = (this.y - this.oldy) * 0.98;
+
+                this.oldx = this.x;
+                this.oldy = this.y;
+
+                this.x += vx;
+                this.y += vy;
+                this.y += gravity;
+            }
+        }
+
+        class Stick {
+            constructor(p1, p2, length) {
+                this.p1 = p1;
+                this.p2 = p2;
+                this.length = length || Math.hypot(p1.x - p2.x, p1.y - p2.y);
+            }
+
+            update() {
+                const dx = this.p2.x - this.p1.x;
+                const dy = this.p2.y - this.p1.y;
+                const dist = Math.hypot(dx, dy);
+                const diff = this.length - dist;
+                const percent = diff / dist / 2;
+                const offsetX = dx * percent;
+                const offsetY = dy * percent;
+
+                if (!this.p1.pinned) {
+                    this.p1.x -= offsetX;
+                    this.p1.y -= offsetY;
+                }
+                if (!this.p2.pinned) {
+                    this.p2.x += offsetX;
+                    this.p2.y += offsetY;
+                }
+            }
+        }
+
+        class Ribbon {
+            constructor(x, colorIndex) {
+                this.points = [];
+                this.sticks = [];
+                this.color = colors[colorIndex % colors.length];
+                
+                for (let i = 0; i < pointsPerRibbon; i++) {
+                    const p = new Point(x, 100 + i * spacing);
+                    if (i === 0) p.pinned = true; // Pin the top point
+                    this.points.push(p);
+                }
+
+                for (let i = 0; i < this.points.length - 1; i++) {
+                    this.sticks.push(new Stick(this.points[i], this.points[i + 1]));
+                }
+            }
+
+            update(time) {
+                // Wind Field
+                // Using sine waves to create procedural gusts
+                // Each ribbon gets a slightly different phase offset
+                const offset = this.points[0].y + (Math.random() * 0.1); // tiny jitter
+                
+                this.points.forEach((p, index) => {
+                    if (p.pinned) return;
+
+                    // Procedural Wind: Complex sine wave
+                    // frequency increases with height (index) to make it wavey
+                    const windY = time * 0.002 + (index * 0.15); 
+                    const wave1 = Math.sin(windY) * 0.8;
+                    const wave2 = Math.sin(windY * 1.5 + 2) * 0.4;
+                    
+                    const windForce = (wave1 + wave2) * windStrength;
+
+                    // Apply wind
+                    p.x += windForce;
+                    
+                    // Slight gravity variation to simulate air resistance
+                    // p.y += 0.05; // Uncomment to make them slowly drift down
+                });
+
+                // Physics solver iterations (higher = stiffer cloth)
+                for (let i = 0; i < 3; i++) {
+                    this.points.forEach(p => p.update());
+                    this.sticks.forEach(s => s.update());
+                }
+            }
+
+            draw(ctx) {
+                const c = this.color;
+                
+                // Draw ribbon as a filled polygon
+                // We need to calculate normals to get width
+                ctx.beginPath();
+                
+                // Top strip
+                for (let i = 0; i < this.points.length - 1; i++) {
+                    const p1 = this.points[i];
+                    const p2 = this.points[i+1];
+                    
+                    // Calculate angle and normal
+                    const dx = p2.x - p1.x;
+                    const dy = p2.y - p1.y;
+                    const angle = Math.atan2(dy, dx);
+                    const width = Math.min(25, 15 + Math.sin(i * 0.2) * 5); // Variable width
+                    
+                    // Normal vector (perpendicular)
+                    const nx = -Math.sin(angle) * width / 2;
+                    const ny = Math.cos(angle) * width / 2;
+
+                    if (i === 0) {
+                        ctx.moveTo(p1.x + nx, p1.y + ny);
+                        ctx.lineTo(p2.x + nx, p2.y + ny);
+                    } else {
+                        ctx.lineTo(p2.x + nx, p2.y + ny);
+                    }
+                }
+
+                // Bottom strip (reverse)
+                for (let i = this.points.length - 2; i >= 0; i--) {
+                    const p1 = this.points[i];
+                    const p2 = this.points[i+1];
+                    const dx = p2.x - p1.x;
+                    const dy = p2.y - p1.y;
+                    const angle = Math.atan2(dy, dx);
+                    const width = Math.min(25, 15 + Math.sin(i * 0.2) * 5);
+                    
+                    const nx = Math.sin(angle) * width / 2; // Inverted normal
+                    const ny = -Math.cos(angle) * width / 2;
+                    
+                    ctx.lineTo(p1.x + nx, p1.y + ny);
+                }
+                
+                ctx.closePath();
+
+                // Create Gradient for shading
+                // We iterate through segments to color based on orientation
+                // Since Path2D gradients are hard to segment, we draw thin strips or use a clipping mask.
+                // Strategy: Draw the shape with a base color, then overlay a gradient based on global tilt, 
+                // then draw individual segment highlights.
+                
+                ctx.fill();
+                
+                // Refinement: Draw segments individually for precise shading on "bends"
+                ctx.globalCompositeOperation = 'source-over';
+                
+                for (let i = 0; i < this.points.length - 1; i++) {
+                    const p1 = this.points[i];
+                    const p2 = this.points[i+1];
+                    
+                    const dx = p2.x - p1.x;
+                    const dy = p2.y - p1.y;
+                    const angle = Math.atan2(dy, dx);
+                    
+                    // Light source assumption: Top-Right, slightly forward
+                    // We compare the segment vector to the normal vector vs light direction
+                    // Light vector roughly (1, -1). 
+                    // If the ribbon bends towards the light, the surface normal aligns with light.
+                    
+                    // Simple approximation: 
+                    // X-angle determines if we see the "side" (darker) or "front" (lighter).
+                    // We use Math.cos(angle) to check tilt.
+                    
+                    const lightFactor = Math.cos(angle + 0.5); // 0.5 rad offset for top-right light
+                    
+                    // Create a gradient for this specific segment
+                    const width = Math.min(25, 15 + Math.sin(i * 0.2) * 5);
+                    const nx = -Math.sin(angle) * width;
+                    const ny = Math.cos(angle) * width;
+
+                    const grad = ctx.createLinearGradient(
+                        p1.x, p1.y,
+                        p1.x + nx, p1.y + ny
+                    );
+
+                    // Calculate color based on light factor
+                    // 0.3 = shadow, 0.8 = highlight, 0.5 = base
+                    const l = c.l + (lightFactor * 20); 
+                    const s = c.s + (lightFactor * 10);
+                    
+                    // Gradient stops
+                    grad.addColorStop(0, `hsla(${c.h}, ${s}%, ${Math.min(80, l - 20)}%, 1)`);
+                    grad.addColorStop(0.4, `hsla(${c.h}, ${s + 10}%, ${l}%, 1)`); // Sheen peak
+                    grad.addColorStop(0.5, `hsla(${c.h}, ${s + 20}%, ${Math.min(90, l + 15)}%, 0.9)`); // Specular highlight
+                    grad.addColorStop(0.6, `hsla(${c.h}, ${s + 10}%, ${l}%, 1)`);
+                    grad.addColorStop(1, `hsla(${c.h}, ${s}%, ${Math.min(80, l - 20)}%, 1)`);
+
+                    ctx.fillStyle = grad;
+                    
+                    // Draw this small quad
+                    ctx.beginPath();
+                    // Normal 1
+                    ctx.moveTo(p1.x - Math.sin(angle)*width/2, p1.y + Math.cos(angle)*width/2);
+                    // Normal 2
+                    ctx.lineTo(p2.x - Math.sin(angle)*width/2, p2.y + Math.cos(angle)*width/2);
+                    // Normal 2 (other side)
+                    ctx.lineTo(p2.x + Math.sin(angle)*width/2, p2.y - Math.cos(angle)*width/2);
+                    // Normal 1 (other side)
+                    ctx.lineTo(p1.x + Math.sin(angle)*width/2, p1.y - Math.cos(angle)*width/2);
+                    ctx.closePath();
+                    ctx.fill();
+                }
+            }
+        }
+
+        function init() {
+            resize();
+            createRibbons();
+            loop();
+        }
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+        }
+
+        function createRibbons() {
+            segments = [];
+            const totalWidth = (numRibbons - 1) * spacing;
+            const startX = (width - totalWidth) / 2;
+
+            for (let i = 0; i < numRibbons; i++) {
+                segments.push(new Ribbon(startX + (i * spacing), i));
+            }
+        }
+
+        let time = 0;
+        function loop() {
+            time++;
+            ctx.clearRect(0, 0, width, height);
+
+            // Draw background subtle gradient
+            const bgGrad = ctx.createRadialGradient(width/2, height/2, 0, width/2, height/2, width);
+            bgGrad.addColorStop(0, '#1a1a2e');
+            bgGrad.addColorStop(1, '#050510');
+            ctx.fillStyle = bgGrad;
+            ctx.fillRect(0,0,width,height);
+
+            segments.forEach(ribbon => {
+                ribbon.update(time);
+                ribbon.draw(ctx);
+            });
+
+            requestAnimationFrame(loop);
+        }
+
+        window.addEventListener('resize', () => {
+            resize();
+            createRibbons();
+        });
+
+        init();
+
+    </script>
+</body>
+</html>

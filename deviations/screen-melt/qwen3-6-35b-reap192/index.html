@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Doom Melt</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            image-rendering: pixelated;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="c"></canvas>
+    <script>
+        const canvas = document.getElementById('c');
+        const ctx = canvas.getContext('2d', { alpha: false });
+
+        let w, h;
+        let cols = [];
+        
+        // Configuration
+        const COLUMN_WIDTH = 4; // Larger chunks for performance and retro feel
+        const MELT_SPEED = 4;
+        const HOLD_TIME = 150; // Frames to hold scene before melting
+        const MELTS = 3; // Total distinct scenes
+
+        // State
+        let currentSceneIndex = 0;
+        let holdCounter = 0;
+        let activeMelts = 0;
+        let frameCount = 0;
+
+        // Scene Generators
+        const scenes = [];
+
+        function init() {
+            resize();
+            window.addEventListener('resize', resize);
+            
+            // Initialize columns
+            const totalCols = Math.ceil(w / COLUMN_WIDTH);
+            for (let i = 0; i < totalCols; i++) {
+                cols.push({
+                    x: i * COLUMN_WIDTH,
+                    y: 0, // Current drip bottom
+                    speed: 0,
+                    wobbleOffset: Math.random() * 100,
+                    delay: Math.random() * 60, // Stagger start
+                    active: false
+                });
+            }
+
+            // Pre-generate scenes
+            for (let i = 0; i < MELTS; i++) {
+                scenes.push(generateRandomSceneData());
+            }
+
+            // Start first scene
+            showScene(0);
+            loop();
+        }
+
+        function resize() {
+            w = window.innerWidth;
+            h = window.innerHeight;
+            canvas.width = w;
+            canvas.height = h;
+        }
+
+        function generateRandomSceneData() {
+            // Create an offscreen buffer for the scene
+            const offCanvas = document.createElement('canvas');
+            offCanvas.width = w;
+            offCanvas.height = h;
+            const offCtx = offCanvas.getContext('2d');
+            
+            const type = Math.floor(Math.random() * 3);
+
+            if (type === 0) {
+                // Abstract / Geometric
+                // Background
+                const grad = offCtx.createLinearGradient(0, 0, 0, h);
+                grad.addColorStop(0, `hsl(${Math.random()*360}, 60%, 10%)`);
+                grad.addColorStop(1, `hsl(${Math.random()*360}, 60%, 20%)`);
+                offCtx.fillStyle = grad;
+                offCtx.fillRect(0, 0, w, h);
+
+                // Shapes
+                for (let i = 0; i < 100; i++) {
+                    offCtx.fillStyle = `rgba(255, 255, 255, ${Math.random() * 0.1})`;
+                    offCtx.strokeStyle = `hsl(${Math.random()*360}, 80%, 60%)`;
+                    offCtx.lineWidth = Math.random() * 3;
+                    
+                    const cx = Math.random() * w;
+                    const cy = Math.random() * h;
+                    const size = Math.random() * 100;
+
+                    offCtx.beginPath();
+                    if (Math.random() > 0.5) {
+                        offCtx.arc(cx, cy, size, 0, Math.PI * 2);
+                    } else {
+                        offCtx.rect(cx - size, cy - size, size * 2, size * 2);
+                    }
+                    if (Math.random() > 0.3) offCtx.fill();
+                    offCtx.stroke();
+                }
+            } 
+            else if (type === 1) {
+                // Terrain / Landscape
+                // Sky
+                const grad = offCtx.createLinearGradient(0, 0, 0, h);
+                grad.addColorStop(0, '#1a0b2e');
+                grad.addColorStop(0.5, '#4b1d52');
+                grad.addColorStop(1, '#1a0b2e');
+                offCtx.fillStyle = grad;
+                offCtx.fillRect(0, 0, w, h);
+
+                // Stars
+                offCtx.fillStyle = '#fff';
+                for(let i=0; i<200; i++) {
+                    offCtx.fillRect(Math.random()*w, Math.random()*h*0.6, Math.random()*2, Math.random()*2);
+                }
+
+                // Mountains
+                for (let layer = 0; layer < 3; layer++) {
+                    offCtx.fillStyle = `rgba(0,0,0, ${0.2 + layer * 0.3})`;
+                    offCtx.beginPath();
+                    offCtx.moveTo(0, h);
+                    const seed = layer * 1000;
+                    for (let x = 0; x <= w; x += 10) {
+                        const noise = Math.sin(x * 0.01 + seed) * 50 + Math.sin(x * 0.03 + seed) * 20;
+                        offCtx.lineTo(x, h - 100 - (layer * 50) + noise);
+                    }
+                    offCtx.lineTo(w, h);
+                    offCtx.fill();
+                }
+            }
+            else {
+                // Matrix / Digital Rain
+                offCtx.fillStyle = 'black';
+                offCtx.fillRect(0, 0, w, h);
+                offCtx.font = '16px monospace';
+                const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789$#@%&*";
+                const fontSize = 20;
+                const columns = w / fontSize;
+                
+                // We just draw a snapshot of rain
+                for (let i = 0; i < columns; i++) {
+                    const char = chars[Math.floor(Math.random() * chars.length)];
+                    const y = Math.random() * h;
+                    offCtx.fillStyle = `hsl(120, 100%, ${20 + Math.random() * 40}%)`;
+                    offCtx.fillText(char, i * fontSize, y);
+                }
+            }
+
+            return offCanvas;
+        }
+
+        function showScene(index) {
+            currentSceneIndex = index;
+            holdCounter = 0;
+            activeMelts = 0;
+            
+            // Reset columns
+            cols.forEach(c => {
+                c.y = 0;
+                c.speed = 0;
+                c.delay = Math.random() * 80; // Randomize delays for next melt
+                c.active = false;
+            });
+        }
+
+        function loop() {
+            // Draw Background (Next Scene)
+            if (scenes.length > 0) {
+                // If we are about to melt, draw the next one underneath. 
+                // If holding, draw current.
+                const nextIndex = (currentSceneIndex + 1) % scenes.length;
+                ctx.drawImage(scenes[nextIndex], 0, 0);
+            }
+
+            // Logic
+            holdCounter++;
+
+            // If we held long enough, trigger melt
+            if (holdCounter > HOLD_TIME) {
+                // Check if any columns are ready to melt
+                cols.forEach(c => {
+                    if (!c.active && c.delay > 0) {
+                        c.delay--;
+                    } else if (!c.active && c.delay <= 0) {
+                        c.active = true;
+                        c.speed = 0;
+                        activeMelts++;
+                    }
+                });
+            }
+
+            // Update and Draw Melts
+            let meltsRemaining = 0;
+            
+            // We render the CURRENT scene on top of the background
+            // But we only draw the "dry" parts (top to y)
+            // Actually, standard melt: 
+            // 1. Draw Scene B (background).
+            // 2. Draw Scene A (foreground).
+            // 3. Where melt happens, draw from Scene A.
+            
+            // Optimization: Use composite operations or just draw the top part.
+            // Since we need the "drip" shape, we draw rects.
+
+            ctx.save();
+            ctx.imageSmoothingEnabled = false;
+
+            cols.forEach(c => {
+                if (!c.active) {
+                    // Still holding the scene
+                    // We need to cover the background with Scene A here
+                    // We can just draw the whole scene, but that's expensive.
+                    // Instead, we rely on the fact that if NO columns are melting, 
+                    // we draw the whole scene at the end.
+                } else {
+                    meltsRemaining++;
+                    
+                    // Update physics
+                    c.speed += 0.5; // Acceleration
+                    c.y += c.speed;
+
+                    // Draw Melt Block
+                    if (c.y > h) {
+                        c.active = false; // Finished
+                        return; 
+                    }
+
+                    // Wobble logic
+                    const wobble = Math.sin((c.y + c.wobbleOffset) * 0.1) * 2;
+                    
+                    // Draw the slice of the current scene
+                    // We clip or just draw rects
+                    const currentScene = scenes[currentSceneIndex];
+                    
+                    // Draw the dry top part
+                    // To save drawing time, we just draw the specific column strip from the source
+                    // But we need to leave the hole for the drips below.
+                    // So we draw:
+                    // 1. Top part (0 to y)
+                    // 2. Drip blob (y to y+height)
+                    
+                    ctx.drawImage(
+                        currentScene, 
+                        c.x, 0, COLUMN_WIDTH, c.y, 
+                        c.x, 0, COLUMN_WIDTH, c.y
+                    );
+
+                    // Draw the dripping blob at the bottom
+                    const blobHeight = Math.min(50 + Math.random() * 20, h - c.y);
+                    ctx.drawImage(
+                        currentScene,
+                        c.x, c.y - 5, COLUMN_WIDTH, blobHeight, // Source
+                        c.x + wobble, c.y, COLUMN_WIDTH, blobHeight // Dest
+                    );
+                }
+            });
+
+            ctx.restore();
+
+            // If nothing is melting, draw the full current scene on top
+            if (meltsRemaining === 0) {
+                if (holdCounter <= HOLD_TIME) {
+                    // Just drawing the scene initially
+                    ctx.drawImage(scenes[currentSceneIndex], 0, 0);
+                } else {
+                    // Waiting for melt to start
+                    // We do nothing, background (next scene) is visible underneath but 
+                    // hidden by the "dry" parts of the current scene if we drew them previously.
+                    // But we haven't drawn the current scene yet in this loop if it's waiting.
+                    // So we must draw it now.
+                    ctx.drawImage(scenes[currentSceneIndex], 0, 0);
+                }
+            } else {
+                 // We drew the column tops individually above. 
+                 // We need to fill in the gaps between active columns that are still "dry".
+                 // This is complex to do perfectly without drawing the whole image.
+                 // Simpler approach: Just draw the whole current scene every frame, 
+                 // then draw the melt drips ON TOP.
+                 // Wait, if we draw the whole scene, the melt looks solid.
+                 // The "hole" is created by NOT drawing the bottom of the columns.
+                 
+                 // Let's switch logic:
+                 // 1. Draw Next Scene (done at top).
+                 // 2. Draw Current Scene fully? No.
+                 // 3. Draw Current Scene columns manually.
+                 
+                 // To fix the gaps: We need to fill the space between active columns 
+                 // with the Current Scene.
+                 // This is getting expensive. 
+                 // Optimized approach: 
+                 // Draw Current Scene at 0,0 (covers everything).
+                 // Then, for active columns, we don't need to do anything? 
+                 // No, we need to "cut" holes.
+                 
+                 // Let's use the 'destination-out' trick to cut holes, then refill?
+                 // Too slow.
+                 
+                 // Back to: Draw Current Scene. 
+                 // The visual trick is:
+                 // The "Melt" is an image of the current scene.
+                 // If we draw the current scene, it covers the next scene.
+                 // To "melt", we draw the current scene, but we mask out the bottom 
+                 // of specific columns.
+                 
+                 // We already did that above (drawing 0 to y).
+                 // Now we just need to handle the gaps.
+                 
+                 // For simplicity in this demo: 
+                 // We will just draw the Current Scene fully every frame.
+                 // Then we draw the "Drips" (which are just pixels) on top.
+                 // To make it look like a melt, we need to actually erase the pixels 
+                 // below the drip.
+                 
+                 // Correct Logic for "Doom Melt" in JS:
+                 // 1. Draw Scene B (Next) at 0,0.
+                 // 2. Draw Scene A (Current) at 0,0. (Scene A covers Scene B).
+                 // 3. For each active column:
+                 //    - Create a mask or use composite operations to erase the bottom of the column.
+                 //    - Draw a new "drip" shape (from Scene A) at the bottom.
+                 
+                 // Since we can't easily mask per column without offscreens, 
+                 // let's swap the draw order:
+                 // 1. Draw Scene B (Next).
+                 // 2. Draw Scene A (Current) - but clipped to only the "top" parts.
+                 // 3. Draw the Drips (from Scene A) at the bottom.
+                 
+                 // This is what we started doing. The gaps are the problem.
+                 // We will just draw the Current Scene fully if it's the very first frame of melt?
+                 // No.
+                 
+                 // Let's just draw the Current Scene fully. 
+                 // It's much faster than per-column clipping.
+                 // The "Melt" effect is achieved by drawing the Drips on TOP of the 
+                 // Current Scene? No, that would hide the melt.
+                 
+                 // Okay, let's go with the "Cut Holes" approach using globalCompositeOperation.
+                 
+                 // Reset
+                 ctx.globalCompositeOperation = 'source-over';
+                 
+                 // Draw Next Scene (already done)
+                 
+                 // Draw Current Scene fully
+                 ctx.drawImage(scenes[currentSceneIndex], 0, 0);
+                 
+                 // Now erase the bottoms of the active columns
+                 ctx.globalCompositeOperation = 'destination-out';
+                 cols.forEach(c => {
+                     if (c.active && c.y < h) {
+                         // Erase from y down to h
+                         ctx.fillRect(c.x, c.y, COLUMN_WIDTH, h - c.y);
+                     }
+                 });
+                 
+                 // Now draw the Drips (from Current Scene) into the holes
+                 ctx.globalCompositeOperation = 'source-over'; // Or 'source-in' if we had an alpha mask, but 'source-over' works if we redraw the specific blobs
+                 
+                 cols.forEach(c => {
+                     if (c.active && c.y < h) {
+                         const wobble = Math.sin((c.y + c.wobbleOffset) * 0.1) * 2;
+                         const blobHeight = Math.min(50 + Math.random() * 20, h - c.y);
+                         
+                         ctx.drawImage(
+                             scenes[currentSceneIndex],
+                             c.x, c.y - 5, COLUMN_WIDTH, blobHeight, // Source
+                             c.x + wobble, c.y, COLUMN_WIDTH, blobHeight // Dest
+                         );
+                     }
+                 });
+                 
+                 // Reset compositing
+                 ctx.globalCompositeOperation = 'source-over';
+            }
+
+            // Check if melt is finished
+            if (activeMelts > 0) {
+                if (meltsRemaining === 0) {
+                    // Melt finished, switch scene
+                    showScene((currentSceneIndex + 1) % scenes.length);
+                }
+            }
+
+            frameCount++;
+            requestAnimationFrame(loop);
+        }
+
+        init();
+    </script>
+</body>
+</html>

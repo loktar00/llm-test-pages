@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Evolving Mazectric Maze</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #050505;
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="mazeCanvas"></canvas>
+
+    <script>
+        // --- Configuration ---
+        const CELL_SIZE = 4;
+        const WALK_SPEED = 1.0; // Movement speed
+        const TURN_RADIUS = 0.15; // How fast ants turn
+        const PHEROMONE_DECAY = 0.005; // How fast trails fade
+        const PHEROMONE_GLOW = 0.4; // Intensity of ant trail glow
+        const ANT_SIZE = 2;
+        const MAX_ANTS = 150;
+        
+        // --- Colors ---
+        const COLOR_WALL = '#111111';
+        const COLOR_FLOOR = '#000000';
+        const COLOR_TRAIL_SOURCER = '#00FFFF'; // Cyan
+        const COLOR_TRAIL_DEST = '#FF00FF';    // Magenta
+        const COLOR_ANT = '#FFFFFF';
+
+        // --- Globals ---
+        const canvas = document.getElementById('mazeCanvas');
+        const ctx = canvas.getContext('2d', { alpha: false });
+        let cols, rows;
+        let grid = []; // 0: Wall, 1: Floor
+        let pheromoneGrid = []; // Stores trail intensity
+        let ants = [];
+        let frameCount = 0;
+
+        // --- Initialization ---
+        function init() {
+            resize();
+            window.addEventListener('resize', resize);
+            // Initialize grid with random walls
+            for (let y = 0; y < rows; y++) {
+                let row = [];
+                let pRow = [];
+                for (let x = 0; x < cols; x++) {
+                    // Seed initial openings
+                    const isFloor = Math.random() < 0.4;
+                    row.push(isFloor ? 1 : 0);
+                    pRow.push(0);
+                }
+                grid.push(row);
+                pheromoneGrid.push(pRow);
+            }
+            // Seed some initial walls to create structure
+            seedWalls();
+            
+            // Start Animation
+            requestAnimationFrame(loop);
+        }
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            
+            const newCols = Math.ceil(canvas.width / CELL_SIZE);
+            const newRows = Math.ceil(canvas.height / CELL_SIZE);
+
+            // Save old grid if exists
+            const oldGrid = grid;
+            
+            cols = newCols;
+            rows = newRows;
+            grid = [];
+            pheromoneGrid = [];
+
+            for (let y = 0; y < rows; y++) {
+                let gRow = [];
+                let pRow = [];
+                for (let x = 0; x < cols; x++) {
+                    if (oldGrid && oldGrid[y] && oldGrid[y][x] !== undefined) {
+                        gRow.push(oldGrid[y][x]);
+                    } else {
+                        gRow.push(0); // Default to wall on resize expansion
+                    }
+                    pRow.push(0);
+                }
+                grid.push(gRow);
+                pheromoneGrid.push(pRow);
+            }
+        }
+
+        // --- Maze Generation (Mazectric CA) ---
+        // Rules simplified for 1-bit boolean grid:
+        // A Wall (0) becomes Floor (1) if it has exactly 2 or 3 Floor neighbors.
+        // A Floor (1) stays Floor (1) unless it has 0 or 1 Floor neighbors (becomes Wall).
+        // We apply this to the whole grid, then run a flood fill to keep only reachable areas.
+
+        function updateMaze() {
+            // We only update specific regions periodically to simulate "growing"
+            // but for continuous flow, we update everything with a probability
+            // or simply run the CA every few frames.
+            
+            let nextGrid = new Array(rows).fill(0).map(() => new Array(cols).fill(0));
+            
+            // Apply Mazectric Rules
+            for (let y = 1; y < rows - 1; y++) {
+                for (let x = 1; x < cols - 1; x++) {
+                    let neighbors = countNeighbors(grid, x, y);
+                    
+                    if (grid[y][x] === 0) {
+                        // Wall -> Floor if 2 or 3 neighbors
+                        if (neighbors === 2 || neighbors === 3) {
+                            nextGrid[y][x] = 1;
+                        } else {
+                            nextGrid[y][x] = 0;
+                        }
+                    } else {
+                        // Floor -> Wall if 0 or 1 neighbors (isolated)
+                        if (neighbors === 0 || neighbors === 1) {
+                            nextGrid[y][x] = 0;
+                        } else {
+                            nextGrid[y][x] = 1;
+                        }
+                    }
+                }
+            }
+
+            // Flood Fill to keep only the connected component
+            // Find a starting point (usually top-left area)
+            let startX = 0, startY = 0;
+            // Find first floor
+            for(let r=0; r<rows; r++) {
+                for(let c=0; c<cols; c++) {
+                    if(nextGrid[r][c] === 1) {
+                        startY = r;
+                        startX = c;
+                        r = rows; break;
+                    }
+                }
+            }
+
+            if (startX !== 0 || startY !== 0) {
+                floodFill(grid, startX, startY, 0, 1);
+                // Re-inject the generated structure onto the reachable areas
+                for (let y = 0; y < rows; y++) {
+                    for (let x = 0; x < cols; x++) {
+                        if (grid[y][x] === 1 && nextGrid[y][x] === 1) {
+                            grid[y][x] = 1;
+                        } else {
+                            grid[y][x] = 0;
+                        }
+                    }
+                }
+            } else {
+                // If completely walled off, reseed a hole
+                seedWalls();
+            }
+        }
+
+        function countNeighbors(g, x, y) {
+            let count = 0;
+            for (let i = -1; i <= 1; i++) {
+                for (let j = -1; j <= 1; j++) {
+                    if (i === 0 && j === 0) continue;
+                    if (g[y + i][x + j] === 1) count++;
+                }
+            }
+            return count;
+        }
+
+        function floodFill(g, x, y, newVal, oldVal) {
+            if (x < 0 || x >= cols || y < 0 || y >= rows) return;
+            if (g[y][x] !== oldVal) return;
+
+            g[y][x] = newVal;
+
+            floodFill(g, x + 1, y, newVal, oldVal);
+            floodFill(g, x - 1, y, newVal, oldVal);
+            floodFill(g, x, y + 1, newVal, oldVal);
+            floodFill(g, x, y - 1, newVal, oldVal);
+        }
+
+        function seedWalls() {
+            // Create a few random floor patches to ensure connectivity
+            for(let i=0; i<5; i++) {
+                let rx = Math.floor(Math.random() * (cols - 10)) + 5;
+                let ry = Math.floor(Math.random() * (rows - 10)) + 5;
+                grid[ry][rx] = 1;
+                grid[ry+1][rx] = 1;
+                grid[ry][rx+1] = 1;
+                grid[ry+1][rx+1] = 1;
+            }
+        }
+
+        // --- Ant Simulation ---
+
+        class Ant {
+            constructor() {
+                this.reset();
+            }
+
+            reset() {
+                // Find a random floor tile
+                let x, y;
+                do {
+                    x = Math.floor(Math.random() * cols);
+                    y = Math.floor(Math.random() * rows);
+                } while (grid[y][x] === 0);
+
+                this.x = x;
+                this.y = y;
+                this.tx = x; // Target X
+                this.ty = y; // Target Y
+                this.angle = Math.random() * Math.PI * 2;
+                this.pathfindingTimer = 0;
+                this.type = Math.random() > 0.5 ? 'sourcer' : 'dest'; // 'sourcer': Floor->Wall, 'dest': Wall->Floor
+                this.color = this.type === 'sourcer' ? COLOR_TRAIL_SOURCER : COLOR_TRAIL_DEST;
+                this.trail = []; // Store previous positions for trail drawing
+            }
+
+            update() {
+                // 1. Move
+                // Calculate direction to target
+                const dx = this.tx - this.x;
+                const dy = this.ty - this.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                
+                // Move towards target
+                if (dist > 0.1) {
+                    const targetAngle = Math.atan2(dy, dx);
+                    
+                    // Smooth turning
+                    let diff = targetAngle - this.angle;
+                    while (diff < -Math.PI) diff += Math.PI * 2;
+                    while (diff > Math.PI) diff -= Math.PI * 2;
+                    this.angle += diff * TURN_RADIUS;
+
+                    this.x += Math.cos(this.angle) * WALK_SPEED;
+                    this.y += Math.sin(this.angle) * WALK_SPEED;
+
+                    // Record for trail
+                    this.trail.push({x: this.x, y: this.y});
+                    if(this.trail.length > 10) this.trail.shift();
+                }
+
+                // 2. Snap to Grid Center when close
+                const gx = Math.round(this.x);
+                const gy = Math.round(this.y);
+                if (Math.abs(this.x - gx) < 0.1 && Math.abs(this.y - gy) < 0.1) {
+                    this.x = gx;
+                    this.y = gy;
+                    
+                    // Check if we hit a wall (if sourcer) or floor (if dest) to change target
+                    if (this.type === 'sourcer' && grid[gy][gx] === 0) {
+                        this.changeTarget();
+                    } else if (this.type === 'dest' && grid[gy][gx] === 1) {
+                        this.changeTarget();
+                    }
+                }
+
+                // If we are just wandering without a specific pathfinding goal (or stuck)
+                // we re-evaluate target every few frames or if stuck
+                this.pathfindingTimer++;
+                if (this.pathfindingTimer > 5) {
+                    this.pathfindingTimer = 0;
+                    // Random walk if target reached or simply keep moving
+                    this.changeTarget();
+                }
+
+                // Drop Pheromone
+                const pX = Math.floor(this.x);
+                const pY = Math.floor(this.y);
+                if (pX >= 0 && pX < cols && pY >= 0 && pY < rows) {
+                    pheromoneGrid[pY][pX] = Math.min(1.0, pheromoneGrid[pY][pX] + 0.2);
+                }
+            }
+
+            changeTarget() {
+                // Simple random walk logic: pick a random neighbor floor tile
+                const neighbors = [];
+                const dirs = [
+                    {x:1, y:0}, {x:-1, y:0}, {x:0, y:1}, {x:0, y:-1}
+                ];
+                
+                // Shuffle dirs
+                dirs.sort(() => Math.random() - 0.5);
+
+                for (let d of dirs) {
+                    const nx = this.x + d.x;
+                    const ny = this.y + d.y;
+                    if (nx >= 0 && nx < cols && ny >= 0 && ny < rows) {
+                        if (grid[ny][nx] === 1) {
+                            neighbors.push({x: nx, y: ny});
+                        }
+                    }
+                }
+
+                if (neighbors.length > 0) {
+                    const pick = neighbors[Math.floor(Math.random() * neighbors.length)];
+                    this.tx = pick.x;
+                    this.ty = pick.y;
+                } else {
+                    // No neighbors? Stuck. Find any random floor.
+                    this.reset();
+                }
+            }
+
+            draw(ctx) {
+                // Draw Ant Head
+                ctx.fillStyle = COLOR_ANT;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, ANT_SIZE, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Draw Trail (Glowing Pheromone)
+                if (this.trail.length > 1) {
+                    ctx.beginPath();
+                    ctx.strokeStyle = this.color;
+                    ctx.lineWidth = 1;
+                    ctx.moveTo(this.trail[0].x, this.trail[0].y);
+                    for(let i=1; i<this.trail.length; i++) {
+                        ctx.lineTo(this.trail[i].x, this.trail[i].y);
+                    }
+                    ctx.stroke();
+                }
+            }
+        }
+
+        // --- Main Loop ---
+        function loop() {
+            frameCount++;
+
+            // 1. Update Maze (Evolution)
+            // Run CA every 2 frames to allow visual settling
+            if (frameCount % 2 === 0) {
+                updateMaze();
+            }
+
+            // 2. Update Pheromones (Decay)
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    if (pheromoneGrid[y][x] > 0) {
+                        pheromoneGrid[y][x] -= PHEROMONE_DECAY;
+                        if (pheromoneGrid[y][x] < 0) pheromoneGrid[y][x] = 0;
+                    }
+                }
+            }
+
+            // 3. Manage Ants
+            // Add ants if count is low
+            if (ants.length < MAX_ANTS && Math.random() < 0.1) {
+                ants.push(new Ant());
+            }
+            // Remove ants that might have died (logic inside class handles reset, but we can cap)
+            // Update & Draw Ants
+            ants.forEach(ant => {
+                ant.update();
+                ant.draw(ctx);
+            });
+
+            // 4. Render Scene
+            // Clear with dark background for trail accumulation effect
+            ctx.fillStyle = '#050505';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw Maze
+            // We draw pixels directly for performance
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    if (grid[y][x] === 1) {
+                        ctx.fillStyle = '#1a1a1a'; // Floor
+                        ctx.fillRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+                    }
+                }
+            }
+
+            // Draw Pheromone Trails (Overlay)
+            // Optimization: Only draw if intensity is significant
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    const val = pheromoneGrid[y][x];
+                    if (val > 0.1) {
+                        ctx.fillStyle = `rgba(255, 255, 255, ${val * PHEROMONE_GLOW})`;
+                        // Draw slightly larger than cell for smoothing
+                        ctx.fillRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE + 0.5, CELL_SIZE + 0.5);
+                    }
+                }
+            }
+
+            requestAnimationFrame(loop);
+        }
+
+        // Start
+        init();
+
+    </script>
+</body>
+</html>

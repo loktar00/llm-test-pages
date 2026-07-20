@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DNA Replication</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #050508;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="c"></canvas>
+    <script>
+        const canvas = document.getElementById('c');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let strands = [];
+        let stars = [];
+        const BASE_TYPES = ['A', 'T', 'C', 'G'];
+        const COLORS = {
+            'A': '#ff3333', // Red
+            'T': '#33ff33', // Green
+            'C': '#3333ff', // Blue
+            'G': '#ffff33'  // Yellow
+        };
+        
+        // Config
+        const STRAND_LENGTH = 80;
+        const TUBE_RADIUS = 3;
+        const HELIX_WIDTH = 120;
+        const HELIX_HEIGHT = 15;
+        const ROTATION_SPEED = 0.015;
+        
+        // State
+        let time = 0;
+        let angleOffset = 0;
+        
+        // Replication State
+        let replication = {
+            active: false,
+            startIndex: 0,
+            endZone: 0,
+            progress: 0, // 0 to 1 (0 = unzip, 1 = rebuild complete)
+            speed: 0.03
+        };
+
+        class BasePair {
+            constructor(index) {
+                this.index = index;
+                this.type = BASE_TYPES[Math.floor(Math.random() * 4)];
+                this.x = 0;
+                this.y = 0;
+                this.z = 0;
+                this.scale = 1;
+                this.alpha = 1;
+                this.separation = 0; // 0 = closed, 1 = fully open
+            }
+
+            update(rotationOffset) {
+                const t = this.index * HELIX_HEIGHT;
+                
+                // Calculate base helix position
+                const x = Math.sin(t + rotationOffset) * HELIX_WIDTH;
+                const z = Math.cos(t + rotationOffset) * HELIX_WIDTH;
+                const y = t - (STRAND_LENGTH * HELIX_HEIGHT) / 2;
+
+                this.baseX = x;
+                this.baseY = y;
+                this.baseZ = z;
+            }
+        }
+
+        function init() {
+            resize();
+            createStrands();
+            createStars();
+            window.addEventListener('resize', resize);
+            
+            // Trigger first replication early
+            setTimeout(startReplication, 2000);
+            // Loop replications
+            setInterval(() => {
+                if (!replication.active) {
+                    startReplication();
+                }
+            }, 4000);
+
+            loop();
+        }
+
+        function createStrands() {
+            strands = [];
+            for (let i = 0; i < STRAND_LENGTH; i++) {
+                strands.push(new BasePair(i));
+            }
+        }
+
+        function createStars() {
+            stars = [];
+            for (let i = 0; i < 300; i++) {
+                stars.push({
+                    x: (Math.random() - 0.5) * 2000,
+                    y: (Math.random() - 0.5) * 2000,
+                    z: (Math.random() - 0.5) * 2000,
+                    size: Math.random() * 1.5
+                });
+            }
+        }
+
+        function startReplication() {
+            replication.active = true;
+            replication.startIndex = Math.floor(Math.random() * (STRAND_LENGTH - 20)) + 10;
+            replication.endZone = replication.startIndex + 20 + Math.random() * 10;
+            replication.progress = 0;
+        }
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+        }
+
+        function drawStar(x, y, brightness) {
+            ctx.fillStyle = `rgba(200, 220, 255, ${brightness * 0.6})`;
+            ctx.beginPath();
+            ctx.arc(x, y, 0.5 + brightness, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        function drawGlow(x, y, color, alpha, radius) {
+            ctx.shadowBlur = radius;
+            ctx.shadowColor = color;
+            ctx.fillStyle = color;
+            ctx.globalAlpha = alpha;
+            ctx.beginPath();
+            ctx.arc(x, y, radius * 0.8, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+            ctx.shadowBlur = 0;
+        }
+
+        function loop() {
+            requestAnimationFrame(loop);
+            
+            // Clear
+            ctx.fillStyle = '#050508';
+            ctx.fillRect(0, 0, width, height);
+
+            // Update Logic
+            time += ROTATION_SPEED;
+
+            // Update Replication
+            if (replication.active) {
+                replication.progress += replication.speed;
+                if (replication.progress >= 2) { // 2 = 100% unzip (0.5) + 100% rebuild (1.0)
+                    replication.active = false;
+                    // Reset strands to ensure colors are correct if we randomized during rebuild
+                    createStrands(); 
+                }
+            }
+
+            // Update Strand Math
+            strands.forEach(s => s.update(time));
+
+            // Sort everything for depth sorting
+            const renderList = [];
+            
+            // Add Stars
+            stars.forEach(s => {
+                renderList.push({
+                    type: 'star',
+                    z: s.z,
+                    obj: s
+                });
+            });
+
+            // Add Strands
+            strands.forEach(s => {
+                renderList.push({
+                    type: 'strand',
+                    z: s.baseZ,
+                    obj: s
+                });
+            });
+
+            // Sort back to front
+            renderList.sort((a, b) => a.z - b.z);
+
+            // Render
+            renderList.forEach(item => {
+                if (item.type === 'star') {
+                    // Simple perspective projection for stars
+                    const scale = 800 / (800 + item.obj.z);
+                    const sx = width / 2 + item.obj.x * scale;
+                    const sy = height / 2 + item.obj.y * scale;
+                    const brightness = Math.min(1, scale);
+                    drawStar(sx, sy, brightness);
+                } else {
+                    drawStrandItem(item.obj);
+                }
+            });
+        }
+
+        function drawStrandItem(s) {
+            // Calculate separation factor
+            let separationFactor = 0;
+            if (replication.active) {
+                const dist = Math.abs(s.index - replication.startIndex);
+                if (s.index > replication.startIndex - 10 && s.index < replication.endZone + 10) {
+                    // Simple smooth separation
+                    separationFactor = Math.sin((replication.progress / 2) * Math.PI);
+                }
+            }
+
+            // Z-Depth factor for brightness
+            const depthFactor = (s.baseZ + HELIX_WIDTH) / (HELIX_WIDTH * 2); // 0 to 1
+            const brightness = 0.2 + (depthFactor * 0.8);
+            
+            // 3D projection
+            const scale = 800 / (800 + s.baseZ);
+            const centerX = width / 2;
+            const centerY = height / 2;
+            
+            // Apply separation to baseX
+            const effectiveX = s.baseX + (s.baseX > 0 ? 1 : -1) * HELIX_WIDTH * separationFactor;
+            
+            const x = centerX + effectiveX * scale;
+            const y = centerY + s.baseY * scale;
+            
+            const color = COLORS[s.type];
+            const size = (TUBE_RADIUS * 2.5 * scale) + (depthFactor * 2); // Slight size pop for depth
+            
+            // Draw Rung (Connection)
+            // Only draw rungs if not fully separated
+            if (separationFactor < 0.95) {
+                ctx.beginPath();
+                ctx.strokeStyle = `rgba(255, 255, 255, ${0.3 * depthFactor})`;
+                ctx.lineWidth = 1 * scale;
+                // Rung goes between the two helix points. 
+                // Left helix point is roughly at -X, Right at +X (conceptually)
+                // We need to calculate the "inner" points to connect.
+                const innerX1 = centerX + (s.baseX - (s.baseX > 0 ? HELIX_WIDTH : -HELIX_WIDTH)) * scale;
+                const innerX2 = centerX + (s.baseX + (s.baseX > 0 ? HELIX_WIDTH : -HELIX_WIDTH)) * scale;
+                
+                ctx.moveTo(innerX1, y);
+                ctx.lineTo(innerX2, y);
+                ctx.stroke();
+            }
+
+            // Draw Nuclei (The colored dots)
+            // Strand 1 is at +X (sin), Strand 2 is at -X (sin + PI). 
+            // But our math is sin for both.
+            // Point 1: sin(t). Point 2: sin(t + PI) = -sin(t).
+            // So Point 1 is at s.baseX. Point 2 is at -s.baseX.
+            
+            // We need to separate them visually if not already separated in 3D
+            // We simulate separation by pushing the dots out horizontally
+            
+            // Point 1
+            const p1x = centerX + s.baseX * scale;
+            drawGlow(p1x, y, color, brightness, size);
+            
+            // Point 2 (Opposite side)
+            const p2x = centerX - s.baseX * scale;
+            drawGlow(p2x, y, color, brightness, size);
+
+            // Connecting line between them if close
+            if (separationFactor < 0.1) {
+                ctx.strokeStyle = color;
+                ctx.globalAlpha = brightness * 0.5;
+                ctx.beginPath();
+                ctx.moveTo(p1x, y);
+                ctx.lineTo(p2x, y);
+                ctx.stroke();
+                ctx.globalAlpha = 1;
+            }
+        }
+
+        init();
+    </script>
+</body>
+</html>

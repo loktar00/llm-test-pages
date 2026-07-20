@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hexagonal Fire</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; }
+canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+let W, H;
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', () => { resize(); initGrid(); });
+
+const HEX_RADIUS = 11;
+const SQRT3 = Math.sqrt(3);
+
+let cols, rows;
+let grid = [];
+let sparks = [];
+
+function initGrid() {
+    cols = Math.ceil(W / (HEX_RADIUS * SQRT3)) + 2;
+    rows = Math.ceil(H / (HEX_RADIUS * 1.5)) + 2;
+    grid = new Array(cols * rows);
+    for (let i = 0; i < grid.length; i++) {
+        grid[i] = { temp: 0, maxTemp: 0 };
+    }
+    sparks = [];
+}
+
+function hexKey(col, row) {
+    if (col < 0 || col >= cols || row < 0 || row >= rows) return -1;
+    return row * cols + col;
+}
+
+function getNeighbors(col, row) {
+    const parity = row & 1;
+    const dirs = parity
+        ? [[-1, -1], [0, -1], [-1, 0], [1, 0], [-1, 1], [0, 1]]
+        : [[0, -1], [1, -1], [-1, 0], [1, 0], [0, 1], [1, 1]];
+    const neighbors = [];
+    for (const [dc, dr] of dirs) {
+        const nc = col + dc, nr = row + dr;
+        if (nc >= 0 && nc < cols && nr >= 0 && nr < rows) {
+            neighbors.push(grid[hexKey(nc, nr)]);
+        }
+    }
+    return neighbors;
+}
+
+function getHexCenter(col, row) {
+    const x = HEX_RADIUS * SQRT3 * (col + 0.5 * (row & 1));
+    const y = HEX_RADIUS * 1.5 * row;
+    return [x, y];
+}
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function tempToColor(t, glow) {
+    t = Math.max(0, Math.min(1, t));
+    let r, g, b, a;
+
+    if (t < 0.05) {
+        r = 20 + t * 800;
+        g = 5 + t * 100;
+        b = 2;
+        a = 0.6 + t * 4;
+    } else if (t < 0.15) {
+        r = lerp(60, 180, (t - 0.05) / 0.1);
+        g = lerp(10, 50, (t - 0.05) / 0.1);
+        b = 2;
+        a = 0.8 + t * 2;
+    } else if (t < 0.35) {
+        r = lerp(180, 255, (t - 0.15) / 0.2);
+        g = lerp(50, 180, (t - 0.15) / 0.2);
+        b = lerp(0, 30, (t - 0.15) / 0.2);
+        a = 0.9 + t * 1.5;
+    } else if (t < 0.6) {
+        r = 255;
+        g = lerp(180, 255, (t - 0.35) / 0.25);
+        b = lerp(30, 200, (t - 0.35) / 0.25);
+        a = 1.0;
+    } else {
+        r = 255;
+        g = lerp(255, 255, (t - 0.6) / 0.4);
+        b = lerp(200, 255, (t - 0.6) / 0.4);
+        a = 1.0;
+    }
+
+    if (glow) {
+        const gr = Math.min(255, r * 0.6 + 30);
+        const gg = Math.min(255, g * 0.5 + 10);
+        const gb = Math.min(255, b * 0.4);
+        return { r, g, b, a, gr, gg, gb };
+    }
+
+    return { r: Math.min(255, r), g: Math.min(255, g), b: Math.min(255, b), a: Math.min(1, a) };
+}
+
+class Spark {
+    constructor(x, y) {
+        this.x = x;
+        this.y = y;
+        this.vx = (Math.random() - 0.5) * 2.5;
+        this.vy = -(Math.random() * 2.5 + 1.0);
+        this.life = 1.0;
+        this.decay = 0.008 + Math.random() * 0.015;
+        this.size = 1.5 + Math.random() * 3;
+        this.windOffset = Math.random() * Math.PI * 2;
+    }
+    update(wind) {
+        this.vy -= 0.02;
+        this.vx += wind * 0.03 + Math.sin(this.windOffset) * 0.05;
+        this.vy += Math.sin(this.windOffset + performance.now() * 0.003) * 0.01;
+        this.vx *= 0.99;
+        this.vy *= 0.99;
+        this.x += this.vx;
+        this.y += this.vy;
+        this.life -= this.decay;
+        return this.life > 0;
+    }
+}
+
+let time = 0;
+let windAngle = 0;
+
+function updateFire() {
+    windAngle += 0.008;
+    const wind = Math.sin(windAngle) * 0.6;
+
+    // Heat bottom rows
+    for (let col = 0; col < cols; col++) {
+        for (let row = rows - 1; row >= rows - 6; row--) {
+            if (col < 0 || col >= cols || row < 0 || row >= rows) continue;
+            const cell = grid[hexKey(col, row)];
+            const baseHeat = 0.85 + Math.sin(col * 0.8 + time * 3) * 0.1 + Math.sin(row * 0.3 + time * 5) * 0.05;
+            cell.maxTemp = baseHeat;
+            cell.temp = Math.min(cell.maxTemp, cell.temp + (cell.maxTemp - cell.temp) * 0.3 + Math.random() * 0.02);
+
+            if (Math.random() < 0.15 && cell.temp > 0.3) {
+                const [hx, hy] = getHexCenter(col, row);
+                sparks.push(new Spark(hx + W * 0.5, hy + H * 0.5));
+            }
+        }
+    }
+
+    // Propagate heat upward
+    for (let row = rows - 7; row >= 0; row--) {
+        for (let col = 0; col < cols; col++) {
+            const cell = grid[hexKey(col, row)];
+            const neighbors = getNeighbors(col, row);
+            let heatFromBelow = 0;
+            let neighborCount = 0;
+
+            for (const n of neighbors) {
+                if (n.row !== undefined && n.col !== undefined) {
+                    // We need to track row/col, let me fix that
+                }
+            }
+
+            // Simpler approach: use the cell array directly
+            let totalIncoming = 0;
+            let count = 0;
+            const parity = row & 1;
+            const dirs = parity
+                ? [[-1, -1], [0, -1], [-1, 0], [1, 0], [-1, 1], [0, 1]]
+                : [[0, -1], [1, -1], [-1, 0], [1, 0], [0, 1], [1, 1]];
+
+            for (const [dc, dr] of dirs) {
+                const nc = col + dc, nr = row + dr;
+                if (nc >= 0 && nc < cols && nr >= 0 && nr < rows) {
+                    const nCell = grid[hexKey(nc, nr)];
+                    if (nCell.temp > cell.temp) {
+                        totalIncoming += nCell.temp;
+                        count++;
+                    }
+                }
+            }
+
+            if (count > 0) {
+                const avgTemp = totalIncoming / count;
+                const rise = (avgTemp - cell.temp) * 0.15;
+
+                // Wind bias: push heat to the side wind is pushing toward
+                const windPush = wind * 0.03 * (1 - cell.temp);
+                const flicker = (Math.random() - 0.5) * 0.04 * (1 + cell.temp * 2);
+                const cool = -0.008 - cell.temp * 0.005; // natural cooling
+
+                cell.temp = Math.max(0, Math.min(1, cell.temp + rise + windPush + flicker + cool));
+            } else {
+                cell.temp = Math.max(0, cell.temp - 0.01 - cell.temp * 0.01);
+            }
+        }
+    }
+
+    // Update sparks
+    for (let i = sparks.length - 1; i >= 0; i--) {
+        if (!sparks[i].update(wind)) {
+            sparks.splice(i, 1);
+        }
+    }
+
+    // Cap sparks
+    if (sparks.length > 300) sparks.splice(0, sparks.length - 300);
+
+    time += 0.016;
+}
+
+function drawHex(cx, cy, radius, fillStyle, lineWidth, strokeStyle) {
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) {
+        const angle = Math.PI / 180 * (60 * i - 30);
+        const x = cx + radius * Math.cos(angle);
+        const y = cy + radius * Math.sin(angle);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    if (fillStyle) {
+        ctx.fillStyle = fillStyle;
+        ctx.fill();
+    }
+    if (lineWidth && strokeStyle) {
+        ctx.strokeStyle = strokeStyle;
+        ctx.lineWidth = lineWidth;
+        ctx.stroke();
+    }
+}
+
+function render() {
+    ctx.fillStyle = '#050508';
+    ctx.fillRect(0, 0, W, H);
+
+    const offsetX = W * 0.5;
+    const offsetY = H * 0.5;
+
+    // Draw ambient glow at bottom
+    const glowGrad = ctx.createRadialGradient(offsetX, H * 0.75, 0, offsetX, H * 0.75, H * 0.6);
+    glowGrad.addColorStop(0, 'rgba(180, 60, 10, 0.15)');
+    glowGrad.addColorStop(0.5, 'rgba(100, 20, 5, 0.05)');
+    glowGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    ctx.fillStyle = glowGrad;
+    ctx.fillRect(0, 0, W, H);
+
+    // Draw hex cells
+    const drawRadius = HEX_RADIUS - 0.5;
+
+    for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+            const cell = grid[hexKey(col, row)];
+            if (cell.temp < 0.02) continue;
+
+            const [hx, hy] = getHexCenter(col, row);
+            const x = hx + offsetX;
+            const y = hy + offsetY;
+
+            const color = tempToColor(cell.temp, true);
+
+            // Outer glow for hot cells
+            if (cell.temp > 0.2) {
+                const glowSize = drawRadius * (1 + cell.temp * 1.5);
+                const grad = ctx.createRadialGradient(x, y, drawRadius * 0.3, x, y, glowSize);
+                grad.addColorStop(0, `rgba(${color.r},${color.g},${color.b},${cell.temp * 0.3})`);
+                grad.addColorStop(1, `rgba(${color.r},${color.g},${color.b},0)`);
+                ctx.fillStyle = grad;
+                ctx.beginPath();
+                ctx.arc(x, y, glowSize, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            drawHex(x, y, drawRadius,
+                `rgba(${Math.floor(color.r)},${Math.floor(color.g)},${Math.floor(color.b)},${color.a.toFixed(2)})`);
+        }
+    }
+
+    // Draw sparks
+    for (const spark of sparks) {
+        const x = spark.x + offsetX;
+        const y = spark.y + offsetY;
+        const alpha = spark.life;
+        const s = spark.size * (0.5 + spark.life * 0.5);
+
+        const sparkColor = spark.life > 0.5
+            ? `rgba(255,255,${Math.floor(200 + spark.life * 55)},${alpha.toFixed(2)})`
+            : `rgba(255,${Math.floor(150 + spark.life * 105)},${Math.floor(spark.life * 100)},${alpha.toFixed(2)})`;
+
+        ctx.fillStyle = sparkColor;
+        ctx.beginPath();
+        ctx.arc(x, y, s, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Spark glow
+        if (spark.life > 0.3) {
+            const sg = ctx.createRadialGradient(x, y, 0, x, y, s * 4);
+            sg.addColorStop(0, sparkColor);
+            sg.addColorStop(1, 'rgba(255,150,50,0)');
+            ctx.fillStyle = sg;
+            ctx.beginPath();
+            ctx.arc(x, y, s * 4, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+}
+
+function initGrid() {
+    cols = Math.ceil(W / (HEX_RADIUS * SQRT3)) + 2;
+    rows = Math.ceil(H / (HEX_RADIUS * 1.5)) + 2;
+    grid = new Array(cols * rows);
+    for (let i = 0; i < grid.length; i++) {
+        grid[i] = { temp: 0 };
+    }
+    sparks = [];
+    time = 0;
+    windAngle = 0;
+}
+
+function loop() {
+    updateFire();
+    render();
+    requestAnimationFrame(loop);
+}
+
+initGrid();
+loop();
+</script>
+</body>
+</html>

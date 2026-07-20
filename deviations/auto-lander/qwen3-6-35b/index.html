@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Autonomous Lunar Lander</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #050505;
+            font-family: 'Courier New', Courier, monospace;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        
+        // Physics Constants
+        const GRAVITY = 0.04;
+        const MAX_THRUST = 0.09;
+        const ROTATION_SPEED = 0.04;
+        const FUEL_CONSUMPTION = 0.3;
+        const LAND_THRESHOLD = 2.0; // Max vertical speed to survive
+        const TILT_THRESHOLD = 0.15; // Max tilt (radians)
+        const CRASH_THRESHOLD = 4.5; // Speed above which impact is catastrophic
+
+        // Game State
+        let stars = [];
+        let terrain = [];
+        let particles = [];
+        let cycleTimer = 0;
+        const CYCLE_DURATION = 300; // Frames to wait before lifting off
+
+        // Lander State
+        const lander = {
+            x: 0, y: 0,
+            vx: 0, vy: 0,
+            angle: -Math.PI / 2, // Pointing up
+            fuel: 100,
+            thrusting: false,
+            landed: false,
+            crashed: false,
+            width: 20,
+            height: 24
+        };
+
+        // Platform State
+        const pad = {
+            x: 0,
+            width: 120,
+            height: 10
+        };
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            initStars();
+            resetGame();
+        }
+
+        function initStars() {
+            stars = [];
+            for(let i=0; i<200; i++) {
+                stars.push({
+                    x: Math.random() * width,
+                    y: Math.random() * height,
+                    size: Math.random() * 1.5,
+                    alpha: Math.random()
+                });
+            }
+        }
+
+        function generateTerrain() {
+            terrain = [];
+            const segments = 50; // Number of polygons across screen
+            const segWidth = width / segments;
+            
+            let y = height * 0.7;
+            let slope = 0;
+            
+            for (let i = 0; i <= segments; i++) {
+                // Create some noise
+                if (Math.random() < 0.2) {
+                    slope += (Math.random() - 0.5) * 2;
+                    slope = Math.max(-2, Math.min(2, slope));
+                }
+                
+                y += slope;
+                
+                // Clamp height somewhat, but keep it interesting
+                if (y < height * 0.2) { y = height * 0.2; slope += 0.5; }
+                if (y > height * 0.9) { y = height * 0.9; slope -= 0.5; }
+                
+                terrain.push({ x: i * segWidth, y: y });
+            }
+
+            // Generate a landing pad
+            // Find a relatively flat section or force one
+            const padIndex = Math.floor(segments * (0.2 + Math.random() * 0.6)); // Somewhere in middle
+            const padXStart = terrain[padIndex].x;
+            pad.x = padXStart;
+            pad.width = 100 + Math.random() * 40;
+
+            // Flatten terrain under pad
+            const padSegments = Math.ceil(pad.width / segWidth);
+            const padY = terrain[padIndex].y;
+            
+            for (let i = 0; i < padSegments; i++) {
+                if (padIndex + i < terrain.length) {
+                    terrain[padIndex + i].y = padY;
+                }
+            }
+        }
+
+        function resetGame() {
+            generateTerrain();
+            
+            // Start at top center
+            lander.x = width / 2;
+            lander.y = 50;
+            lander.vx = (Math.random() - 0.5) * 1;
+            lander.vy = (Math.random() - 0.5) * 1;
+            lander.angle = -Math.PI / 2;
+            lander.fuel = 100;
+            lander.thrusting = false;
+            lander.landed = false;
+            lander.crashed = false;
+            particles = [];
+        }
+
+        class Particle {
+            constructor(x, y, angle, speed, color, life, size) {
+                this.x = x;
+                this.y = y;
+                const spread = (Math.random() - 0.5) * 0.5;
+                this.vx = Math.cos(angle + spread) * speed;
+                this.vy = Math.sin(angle + spread) * speed;
+                this.life = life;
+                this.maxLife = life;
+                this.color = color;
+                this.size = size;
+                this.gravity = 0.02;
+            }
+
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.vy += this.gravity;
+                this.life--;
+                
+                // Dust collision
+                const groundY = getGroundAt(this.x);
+                if (this.y > groundY) {
+                    this.y = groundY;
+                    this.vx *= 0.5;
+                    this.life *= 0.8; // Die faster on ground
+                }
+            }
+
+            draw() {
+                const alpha = this.life / this.maxLife;
+                ctx.globalAlpha = alpha;
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size * alpha, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.globalAlpha = 1;
+            }
+        }
+
+        function getGroundAt(x) {
+            // Find segment
+            const segWidth = width / (terrain.length - 1);
+            const index = Math.floor(x / segWidth);
+            if (index < 0 || index >= terrain.length - 1) return height; // Out of bounds
+
+            const p1 = terrain[index];
+            const p2 = terrain[index + 1];
+            const t = (x - p1.x) / (p2.x - p1.x);
+            return p1.y + (p2.y - p1.y) * t;
+        }
+
+        function isOnPad(x) {
+            return x >= pad.x && x <= pad.x + pad.width;
+        }
+
+        function update() {
+            // 1. Physics
+            if (!lander.crashed) {
+                
+                // AI Logic
+                let targetThrust = 0;
+                let targetAngle = lander.angle;
+                
+                if (!lander.landed) {
+                    // Target: Center of pad
+                    const targetX = pad.x + pad.width / 2;
+                    // Target Y: Pad surface - offset
+                    const groundY = getGroundAt(lander.x);
+                    const targetY = groundY - 100; // Aim slightly above ground
+
+                    // Calculate relative position
+                    const relX = targetX - lander.x;
+                    const relY = targetY - lander.y;
+                    
+                    // Calculate velocity needed to stop
+                    // Simple PID-like approach
+                    const dist = Math.sqrt(relX*relX + relY*relY);
+                    
+                    if (dist > 0) {
+                        // Rotate towards target
+                        const desiredAngle = Math.atan2(relY, relX);
+                        let angleDiff = desiredAngle - lander.angle;
+                        
+                        // Normalize angle
+                        while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+                        while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+                        
+                        // Rotate
+                        if (Math.abs(angleDiff) > 0.01) {
+                            targetAngle += Math.sign(angleDiff) * ROTATION_SPEED;
+                        } else {
+                            targetAngle = desiredAngle;
+                        }
+
+                        // Thrust logic:
+                        // We need to counteract gravity and decelerate
+                        // If falling fast, thrust up.
+                        // If moving sideways, thrust sideways.
+                        
+                        // Desired acceleration vector (simplified)
+                        let thrustForce = 0;
+                        
+                        // Vertical component (fighting gravity + slowing down)
+                        if (lander.vy > -0.5) { // Falling or slow up
+                            thrustForce += GRAVITY * 1.5; // Overcompensate gravity slightly
+                        }
+                        
+                        // Horizontal component (braking)
+                        if (Math.abs(lander.vx) > 0.1) {
+                             thrustForce += Math.abs(lander.vx) * 0.5;
+                        }
+
+                        // If close to pad, reduce thrust gently
+                        if (dist < 200) {
+                            thrustForce *= 0.8;
+                        }
+
+                        // Apply thrust force in the direction of targetAngle
+                        // But we clamp max thrust
+                        targetThrust = Math.min(MAX_THRUST, thrustForce);
+                    }
+                } else {
+                    // We are landed, wait or prepare for next cycle
+                    // Drift slightly if wind (none yet), just stay stable
+                }
+
+                // Apply Thrust
+                lander.thrusting = targetThrust > 0.001;
+                if (lander.fuel > 0 && lander.thrusting) {
+                    lander.vx += Math.cos(lander.angle) * targetThrust;
+                    lander.vy += Math.sin(lander.angle) * targetThrust;
+                    lander.fuel -= FUEL_CONSUMPTION;
+                    
+                    // Spawn Particles
+                    const exhaustX = lander.x - Math.cos(lander.angle) * 12;
+                    const exhaustY = lander.y - Math.sin(lander.angle) * 12;
+                    
+                    // Main flame
+                    particles.push(new Particle(
+                        exhaustX, 
+                        exhaustY, 
+                        lander.angle + Math.PI + (Math.random()-0.5)*0.2, 
+                        2 + Math.random() * 3, 
+                        `hsl(${30 + Math.random()*30}, 100%, 70%)`, 
+                        20 + Math.random() * 10, 
+                        3
+                    ));
+                    
+                    // Sparks
+                    if (Math.random() > 0.5) {
+                        particles.push(new Particle(
+                            exhaustX, 
+                            exhaustY, 
+                            lander.angle + Math.PI + (Math.random()-0.5)*0.5, 
+                            1 + Math.random() * 2, 
+                            '#ffffff', 
+                            10 + Math.random() * 5, 
+                            1
+                        ));
+                    }
+                }
+
+                // Apply Gravity
+                lander.vy += GRAVITY;
+
+                // Update Position
+                lander.x += lander.vx;
+                lander.y += lander.vy;
+
+                // Collision Detection
+                const groundY = getGroundAt(lander.x);
+                
+                // Check feet position
+                // Feet are roughly 10px below center
+                const feetY = lander.y + 10;
+
+                if (feetY >= groundY) {
+                    // Hit ground
+                    if (lander.landed) {
+                        // Already landed, reset (cycle)
+                        lander.landed = false;
+                        resetGame();
+                        return;
+                    }
+
+                    // Check Crash
+                    // 1. Vertical Speed
+                    if (lander.vy > LAND_THRESHOLD) {
+                        handleCrash("TOO FAST");
+                        return;
+                    }
+                    // 2. Tilt
+                    // Angle is relative to 0 (right). Up is -PI/2.
+                    // Check deviation from -PI/2
+                    let deviation = Math.abs(lander.angle - (-Math.PI/2));
+                    if (deviation > TILT_THRESHOLD) {
+                        handleCrash("BAD ANGLE");
+                        return;
+                    }
+
+                    // Success
+                    lander.landed = true;
+                    lander.x = lander.x; // keep x
+                    lander.y = groundY - 10; // Snap to top
+                    lander.vx = 0;
+                    lander.vy = 0;
+                    lander.angle = -Math.PI / 2; // Level out
+                    
+                    // Landing particles (Dust)
+                    for(let i=0; i<20; i++) {
+                        particles.push(new Particle(
+                            lander.x, groundY, 
+                            Math.PI/2 + (Math.random()-0.5), // Upwards
+                            Math.random() * 2, 
+                            '#aaa', 
+                            30 + Math.random() * 30, 
+                            2 + Math.random() * 2
+                        ));
+                    }
+                }
+            }
+
+            // 2. Update Particles
+            for (let i = particles.length - 1; i >= 0; i--) {
+                particles[i].update();
+                if (particles[i].life <= 0) {
+                    particles.splice(i, 1);
+                }
+            }
+        }
+
+        function handleCrash(reason) {
+            lander.crashed = true;
+            // Explosion particles
+            for(let i=0; i<50; i++) {
+                particles.push(new Particle(
+                    lander.x, lander.y, 
+                    Math.random() * Math.PI * 2, 
+                    Math.random() * 5, 
+                    Math.random() > 0.5 ? '#ffaa00' : '#ff5500', 
+                    40 + Math.random() * 40, 
+                    2 + Math.random() * 4
+                ));
+            }
+            
+            // Regolith explosion
+             for(let i=0; i<30; i++) {
+                particles.push(new Particle(
+                    lander.x, getGroundAt(lander.x), 
+                    Math.random() * Math.PI * 2, 
+                    Math.random() * 3, 
+                    '#888', 
+                    60, 
+                    3 + Math.random() * 3
+                ));
+            }
+
+            setTimeout(() => {
+                resetGame();
+            }, 1500);
+        }
+
+        function draw() {
+            // Background
+            ctx.fillStyle = '#050505';
+            ctx.fillRect(0, 0, width, height);
+
+            // Stars
+            ctx.fillStyle = '#ffffff';
+            stars.forEach(star => {
+                ctx.globalAlpha = star.alpha;
+                ctx.beginPath();
+                ctx.arc(star.x, star.y, star.size, 0, Math.PI*2);
+                ctx.fill();
+            });
+            ctx.globalAlpha = 1;
+
+            // Terrain
+            ctx.beginPath();
+            ctx.moveTo(0, height);
+            ctx.lineTo(terrain[0].x, terrain[0].y);
+            for (let i = 1; i < terrain.length; i++) {
+                ctx.lineTo(terrain[i].x, terrain[i].y);
+            }
+            ctx.lineTo(width, height);
+            ctx.closePath();
+            ctx.fillStyle = '#1a1a1a';
+            ctx.fill();
+            
+            // Draw Pad Highlight
+            const padLeft = pad.x;
+            const padRight = pad.x + pad.width;
+            const padY = terrain[Math.floor(padLeft / (width / (terrain.length-1)))].y;
+            
+            ctx.strokeStyle = '#44ff44';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(padLeft, padY);
+            ctx.lineTo(padRight, padY);
+            ctx.stroke();
+
+            // Particles (Lighting layer)
+            // We draw particles twice: once for the core, once for the glow
+            // But for performance and simplicity in this constraint, we'll use composite operations
+            
+            ctx.globalCompositeOperation = 'lighter';
+            particles.forEach(p => {
+                if (p.color.includes('ff') || p.color.includes('aa')) { // Fire
+                    const alpha = p.life / p.maxLife;
+                    const radius = p.size * 2; // Glow size
+                    const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, radius);
+                    grad.addColorStop(0, p.color);
+                    grad.addColorStop(1, 'transparent');
+                    ctx.fillStyle = grad;
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, radius, 0, Math.PI*2);
+                    ctx.fill();
+                }
+            });
+            ctx.globalCompositeOperation = 'source-over';
+
+            // Render standard particles
+            particles.forEach(p => p.draw());
+
+            // Lander
+            if (!lander.crashed) {
+                ctx.save();
+                ctx.translate(lander.x, lander.y);
+                ctx.rotate(lander.angle - (-Math.PI/2)); // Adjust so 0 is "up" visually relative to drawing
+                
+                // Draw Ship
+                ctx.fillStyle = '#eeeeee';
+                ctx.beginPath();
+                ctx.moveTo(0, -lander.height/2); // Nose
+                ctx.lineTo(lander.width/2, lander.height/2); // Right leg
+                ctx.lineTo(0, lander.height/4); // Engine center
+                ctx.lineTo(-lander.width/2, lander.height/2); // Left leg
+                ctx.closePath();
+                ctx.fill();
+
+                // Engine Flame (Visual only)
+                if (lander.thrusting) {
+                    ctx.fillStyle = `rgba(255, 200, 50, ${0.5 + Math.random()*0.5})`;
+                    ctx.beginPath();
+                    ctx.moveTo(-5, lander.height/2);
+                    ctx.lineTo(0, lander.height/2 + 15 + Math.random()*10);
+                    ctx.lineTo(5, lander.height/2);
+                    ctx.fill();
+                }
+
+                ctx.restore();
+            }
+
+            // HUD
+            drawHUD();
+        }
+
+        function drawHUD() {
+            ctx.fillStyle = '#00ff00';
+            ctx.font = '14px monospace';
+            
+            const hudX = 20;
+            const hudY = 20;
+
+            ctx.fillText("ALTITUDE: " + Math.max(0, Math.floor(getGroundAt(lander.x) - lander.y)).toString().padStart(4, '0'), hudX, hudY + 10);
+            ctx.fillText("VELOCITY: " + lander.vy.toFixed(2), hudX, hudY + 30);
+            
+            // Fuel Bar
+            ctx.fillText("FUEL: ", hudX, hudY + 60);
+            ctx.strokeStyle = '#00ff00';
+            ctx.strokeRect(hudX + 50, hudY + 48, 100, 10);
+            ctx.fillStyle = lander.fuel < 20 ? '#ff0000' : '#00ff00';
+            ctx.fillRect(hudX + 52, hudY + 50, lander.fuel, 6);
+
+            // Status
+            if (lander.landed) {
+                ctx.fillStyle = '#00ff00';
+                ctx.font = '24px monospace';
+                ctx.textAlign = 'center';
+                ctx.fillText("LANDED", width/2, height/2);
+                ctx.font = '14px monospace';
+                ctx.fillText("Preparing next cycle...", width/2, height/2 + 20);
+                ctx.textAlign = 'left';
+            }
+
+            if (lander.crashed) {
+                ctx.fillStyle = '#ff0000';
+                ctx.font = '24px monospace';
+                ctx.textAlign = 'center';
+                ctx.fillText("CRASHED", width/2, height/2);
+                ctx.textAlign = 'left';
+            }
+        }
+
+        window.addEventListener('resize', resize);
+        resize();
+
+        function loop() {
+            update();
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        loop();
+
+    </script>
+</body>
+</html>

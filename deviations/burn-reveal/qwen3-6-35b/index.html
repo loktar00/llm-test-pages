@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Burn Away Reveal</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <script>
+        /**
+         * Configuration and Constants
+         */
+        const CONFIG = {
+            burnSpeed: 2.5,       // Pixels per frame
+            burnNoiseScale: 0.04, // How "jagged" the edge is (lower is smoother)
+            burnNoiseAmp: 6,      // How much the radius varies
+            sparkCount: 12,       // Particles per frame
+            charDecayRate: 0.02,  // Speed char fades
+            cycleDuration: 400,   // Frames between burns
+            layers: 5             // Total layers to cycle through
+        };
+
+        /**
+         * Simplex Noise Implementation
+         * Generates smooth random values for the burn edge
+         */
+        const Noise = (() => {
+            const p = new Uint8Array(512);
+            const permutation = [151,160,137,91,90,15,131,13,201,95,96,53,194,233,7,225,140,36,103,30,69,142,8,99,37,240,21,10,23,190,6,148,247,120,234,75,0,26,197,62,94,252,219,203,117,35,11,32,57,177,33,88,237,149,56,87,174,20,125,136,171,168,68,175,74,165,71,134,139,48,27,166,77,146,158,231,83,111,229,122,60,211,133,230,220,105,92,41,55,46,245,40,244,102,143,54,65,25,63,161,1,216,80,73,209,76,132,187,208,89,18,169,200,196,135,130,116,188,159,86,164,100,109,198,173,186,3,64,52,217,226,250,124,123,5,202,38,147,118,126,255,82,85,212,207,206,59,227,47,16,58,17,182,189,28,42,223,183,170,213,119,248,152,2,44,154,163,70,221,153,101,155,167,43,172,9,129,22,39,253,19,98,108,110,79,113,224,232,178,185,112,104,218,246,97,228,251,34,242,193,238,210,144,12,191,179,162,241,81,51,145,235,249,14,239,107,49,192,214,31,181,199,106,157,184,84,204,176,115,121,50,45,127,4,150,254,138,236,205,93,222,114,67,29,24,72,243,141,128,195,78,66,215,61,156,180];
+            for (let i = 0; i < 256; i++) p[i] = p[i + 256] = permutation[i];
+
+            function fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+            function lerp(t, a, b) { return a + t * (b - a); }
+            function grad(hash, x, y, z) {
+                const h = hash & 15;
+                const u = h < 8 ? x : y, v = h < 4 ? y : h === 12 || h === 14 ? x : z;
+                return ((h & 1) === 0 ? u : -u) + ((h & 2) === 0 ? v : -v);
+            }
+
+            return {
+                perlin3: function(x, y, z) {
+                    const X = Math.floor(x) & 255, Y = Math.floor(y) & 255, Z = Math.floor(z) & 255;
+                    x -= Math.floor(x); y -= Math.floor(y); z -= Math.floor(z);
+                    const u = fade(x), v = fade(y), w = fade(z);
+                    const A = p[X] + Y, AA = p[A] + Z, AB = p[A + 1] + Z, B = p[X + 1] + Y, BA = p[B] + Z, BB = p[B + 1] + Z;
+                    return lerp(w, lerp(v, lerp(u, grad(p[AA], x, y, z), grad(p[BA], x - 1, y, z)),
+                                   lerp(u, grad(p[AB], x, y - 1, z), grad(p[BB], x - 1, y - 1, z))),
+                                   lerp(v, lerp(u, grad(p[AA + 1], x, y, z - 1), grad(p[BA + 1], x - 1, y, z - 1)),
+                                   lerp(u, grad(p[AB + 1], x, y - 1, z - 1), grad(p[BB + 1], x - 1, y - 1, z - 1))));
+                }
+            };
+        })();
+
+        /**
+         * Main Application Logic
+         */
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d', { alpha: false });
+        
+        let width, height;
+        let layers = [];
+        let currentLayerIndex = 0;
+        let nextLayerIndex = 0;
+        let burnCenter = { x: 0, y: 0 };
+        let burnRadius = 0;
+        let frameCount = 0;
+        let isBurning = false;
+        let sparks = [];
+        let baseTime = 0;
+
+        // Offscreen canvas for char layer
+        let charCanvas, charCtx;
+
+        function init() {
+            resize();
+            window.addEventListener('resize', resize);
+            
+            // Create char layer
+            charCanvas = document.createElement('canvas');
+            charCtx = charCanvas.getContext('2d');
+            charCtx.fillStyle = 'rgb(15, 10, 8)';
+            charCtx.fillRect(0, 0, width, height);
+
+            // Initial pattern
+            generateLayer(currentLayerIndex);
+
+            requestAnimationFrame(loop);
+        }
+
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            charCanvas.width = width;
+            charCanvas.height = height;
+
+            // Regenerate all layers on resize
+            layers = [];
+            for (let i = 0; i < CONFIG.layers; i++) {
+                generateLayer(i);
+            }
+            currentLayerIndex = 0;
+        }
+
+        function generateLayer(index) {
+            // Create a temporary canvas to store the pattern
+            const c = document.createElement('canvas');
+            c.width = width;
+            c.height = height;
+            const pCtx = c.getContext('2d');
+
+            // Fill background
+            pCtx.fillStyle = '#1a1a1a';
+            pCtx.fillRect(0, 0, width, height);
+
+            // Procedural Generation based on index
+            // Using a pseudo-random seed based on index
+            const seed = index * 12345;
+            
+            // Draw geometric/abstract shapes
+            const numShapes = 20 + (index * 5);
+            pCtx.globalCompositeOperation = 'lighter';
+            
+            for (let i = 0; i < numShapes; i++) {
+                const x = (Noise.perlin3(seed + i, 0, 0) * 0.5 + 0.5) * width;
+                const y = (Noise.perlin3(0, seed + i, 0) * 0.5 + 0.5) * height;
+                const size = 20 + Math.abs(Noise.perlin3(seed + i, seed + i, 0) * 200);
+                
+                const hue = (index * 50 + i * 10) % 360;
+                pCtx.fillStyle = `hsla(${hue}, 70%, 50%, 0.6)`;
+                pCtx.beginPath();
+                
+                // Random shapes
+                if (i % 3 === 0) {
+                    pCtx.arc(x, y, size, 0, Math.PI * 2);
+                } else if (i % 3 === 1) {
+                    pCtx.rect(x - size, y - size, size * 2, size * 2);
+                } else {
+                    pCtx.moveTo(x, y - size);
+                    pCtx.lineTo(x + size, y + size);
+                    pCtx.lineTo(x - size, y + size);
+                }
+                pCtx.fill();
+            }
+
+            // Grid lines
+            pCtx.strokeStyle = `rgba(255, 255, 255, 0.1)`;
+            pCtx.lineWidth = 2;
+            const spacing = 50 + (index * 10);
+            pCtx.beginPath();
+            for(let x=0; x<width; x+=spacing) { pCtx.moveTo(x,0); pCtx.lineTo(x,height); }
+            for(let y=0; y<height; y+=spacing) { pCtx.moveTo(0,y); pCtx.lineTo(width,y); }
+            pCtx.stroke();
+
+            layers.push(c);
+        }
+
+        function triggerBurn() {
+            isBurning = true;
+            // Random start position
+            burnCenter.x = Math.random() * width;
+            burnCenter.y = Math.random() * height;
+            burnRadius = 0;
+            sparks = [];
+        }
+
+        function createSpark(x, y, angle, speed) {
+            sparks.push({
+                x: x,
+                y: y,
+                vx: Math.cos(angle) * speed + (Math.random() - 0.5),
+                vy: Math.sin(angle) * speed + (Math.random() - 0.5),
+                life: 1.0,
+                decay: 0.02 + Math.random() * 0.05,
+                size: 1 + Math.random() * 2
+            });
+        }
+
+        function update() {
+            frameCount++;
+
+            if (!isBurning) {
+                if (frameCount % CONFIG.cycleDuration === 0) {
+                    // Prepare next layer
+                    nextLayerIndex = (currentLayerIndex + 1) % CONFIG.layers;
+                    triggerBurn();
+                }
+            } else {
+                // Grow the burn
+                burnRadius += CONFIG.burnSpeed;
+
+                // Generate Sparks along the edge
+                if (frameCount % 2 === 0) {
+                    for (let i = 0; i < CONFIG.sparkCount; i++) {
+                        const angle = Math.random() * Math.PI * 2;
+                        // Noise to make the radius irregular
+                        const noiseVal = Noise.perlin3(Math.cos(angle)*5, Math.sin(angle)*5, frameCount * 0.05);
+                        const r = burnRadius + (noiseVal * CONFIG.burnNoiseAmp);
+                        
+                        const sx = burnCenter.x + Math.cos(angle) * r;
+                        const sy = burnCenter.y + Math.sin(angle) * r;
+
+                        createSpark(sx, sy, angle + (Math.random()-0.5), 1 + Math.random() * 3);
+                    }
+                }
+
+                // Execute Burn
+                executeBurnEffect(burnCenter.x, burnCenter.y, burnRadius);
+
+                // Check if burn is complete (covers screen)
+                const maxDist = Math.sqrt(width*width + height*height) / 2 + 100;
+                if (burnRadius > maxDist) {
+                    // Burn finished, reset
+                    isBurning = false;
+                    currentLayerIndex = nextLayerIndex;
+                    
+                    // Clear char layer
+                    charCtx.fillStyle = 'rgb(15, 10, 8)';
+                    charCtx.fillRect(0, 0, width, height);
+                    
+                    // Reset sparks
+                    sparks = [];
+                }
+            }
+
+            // Update Sparks
+            for (let i = sparks.length - 1; i >= 0; i--) {
+                let s = sparks[i];
+                s.x += s.vx;
+                s.y += s.vy;
+                s.vy += 0.05; // Gravity
+                s.life -= s.decay;
+                if (s.life <= 0) sparks.splice(i, 1);
+            }
+        }
+
+        function executeBurnEffect(cx, cy, r) {
+            // We need to draw the "Burn" on top of the current visible layer.
+            // The "Burn" consists of:
+            // 1. A Glow (Radial Gradient)
+            // 2. A Char Mask (Erasing the content)
+            
+            ctx.save();
+            
+            // 1. Draw Glow
+            // We draw a ring at the radius r.
+            ctx.beginPath();
+            ctx.arc(cx, cy, r, 0, Math.PI * 2);
+            ctx.lineWidth = 15; // Width of the burning edge
+            
+            // Gradient for the fire
+            const grad = ctx.createRadialGradient(cx, cy, r - 10, cx, cy, r + 20);
+            grad.addColorStop(0, 'rgba(255, 255, 200, 1)'); // White hot center
+            grad.addColorStop(0.2, 'rgba(255, 150, 50, 0.8)'); // Orange
+            grad.addColorStop(0.5, 'rgba(255, 50, 0, 0.4)'); // Red
+            grad.addColorStop(1, 'rgba(0, 0, 0, 0)'); // Fade out
+            
+            ctx.strokeStyle = grad;
+            ctx.lineCap = 'round';
+            ctx.stroke();
+            
+            // 2. Char Effect
+            // We draw onto the charCanvas. The charCanvas sits BETWEEN the background
+            // and the content. So drawing on it hides content.
+            
+            // We use a noise mask to make the edge irregular
+            // Since we can't easily loop pixels in JS efficiently for a whole screen,
+            // we will draw small jagged segments along the radius.
+            
+            charCtx.beginPath();
+            // Start at a random angle
+            const startAngle = Math.random() * Math.PI * 2;
+            const step = 0.05; // Resolution of the ring
+            
+            for (let a = 0; a < Math.PI * 2; a += step) {
+                const noise = Noise.perlin3(Math.cos(a+startAngle)*10, Math.sin(a+startAngle)*10, frameCount * 0.02);
+                const currentR = r + (noise * CONFIG.burnNoiseAmp);
+                
+                // Draw a jagged segment
+                const x1 = cx + Math.cos(a) * currentR;
+                const y1 = cy + Math.sin(a) * currentR;
+                const x2 = cx + Math.cos(a+step) * currentR;
+                const y2 = cy + Math.sin(a+step) * currentR;
+                
+                // Add some depth (inner char)
+                const innerR = currentR - (Math.random() * 10);
+                const ix1 = cx + Math.cos(a) * innerR;
+                const iy1 = cy + Math.sin(a) * innerR;
+                
+                charCtx.moveTo(x1, y1);
+                charCtx.lineTo(x2, y2);
+                charCtx.lineTo(ix1, iy1); // Taper inwards
+            }
+            
+            charCtx.lineWidth = 10; // Char thickness
+            charCtx.strokeStyle = '#000';
+            charCtx.stroke();
+            
+            // Add glowing embers to the char canvas too
+            charCtx.fillStyle = 'rgba(255, 100, 0, 0.5)';
+            for(let k=0; k<5; k++) {
+                const a = Math.random() * Math.PI * 2;
+                const n = Noise.perlin3(Math.cos(a)*10, Math.sin(a)*10, frameCount * 0.02);
+                const rr = r + (n * CONFIG.burnNoiseAmp);
+                charCtx.beginPath();
+                charCtx.arc(cx + Math.cos(a)*rr, cy + Math.sin(a)*rr, 2 + Math.random()*3, 0, Math.PI*2);
+                charCtx.fill();
+            }
+
+            ctx.restore();
+        }
+
+        function draw() {
+            // 1. Draw Background
+            ctx.fillStyle = '#050505';
+            ctx.fillRect(0, 0, width, height);
+
+            // 2. Draw Layers (Bottom up)
+            // We draw the 'current' layer. 
+            // But before drawing the content, we draw the char layer on top of it to hide the burnt parts.
+            
+            const currentLayer = layers[currentLayerIndex];
+            
+            // Draw the raw layer content
+            ctx.drawImage(currentLayer, 0, 0);
+
+            // Draw the "Burnt" residue on top of the content
+            // This masks the content
+            ctx.drawImage(charCanvas, 0, 0);
+
+            // 3. Draw Sparks (Particles)
+            for (let s of sparks) {
+                ctx.fillStyle = `rgba(255, ${150 + Math.random()*100}, 0, ${s.life})`;
+                ctx.beginPath();
+                ctx.arc(s.x, s.y, s.size * s.life, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        function loop() {
+            update();
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        // Start
+        init();
+
+    </script>
+</body>
+</html>

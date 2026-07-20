@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Self-Playing Match-3</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #121212;
+            overflow: hidden;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+
+        canvas {
+            box-shadow: 0 0 50px rgba(0, 0, 0, 0.5);
+            border-radius: 12px;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            right: 40px;
+            text-align: right;
+            pointer-events: none;
+        }
+
+        .score-label {
+            color: #888;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+
+        .score-value {
+            color: #fff;
+            font-size: 48px;
+            font-weight: 700;
+            text-shadow: 0 0 20px rgba(255, 255, 255, 0.3);
+        }
+
+        .combo-text {
+            color: #ffd700;
+            font-size: 24px;
+            font-weight: bold;
+            opacity: 0;
+            transition: opacity 0.2s, transform 0.2s;
+            transform: translateY(10px);
+        }
+        
+        .combo-text.active {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div class="score-label">Score</div>
+        <div class="score-value" id="scoreDisplay">0</div>
+        <div class="combo-text" id="comboDisplay">Combo x1</div>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+<script>
+/**
+ * CONFIGURATION & CONSTANTS
+ */
+const COLS = 8;
+const ROWS = 8;
+const GEM_SIZE = 60; // px
+const GEM_GAP = 4;
+const BOARD_PADDING = 20;
+const ANIM_SPEED = 0.15; // Lerp factor (0 to 1)
+const SWAP_DURATION = 15; // frames
+const POP_DURATION = 15; // frames
+const FALL_SPEED = 0.2;
+
+// Gem Types (Colors)
+const GEMS = [
+    { color: '#FF4D4D', glow: '#ff0000', shape: 'square' },    // Red
+    { color: '#4DFF4D', glow: '#00ff00', shape: 'triangle' },  // Green
+    { color: '#4D4DFF', glow: '#0000ff', shape: 'circle' },    // Blue
+    { color: '#FFFF4D', glow: '#ffff00', shape: 'diamond' },   // Yellow
+    { color: '#FF4DFF', glow: '#ff00ff', shape: 'hexagon' },   // Purple
+    { color: '#4DFFFF', glow: '#00ffff', shape: 'star' }       // Cyan
+];
+
+const CANVAS_WIDTH = (COLS * (GEM_SIZE + GEM_GAP)) + (BOARD_PADDING * 2);
+const CANVAS_HEIGHT = (ROWS * (GEM_SIZE + GEM_GAP)) + (BOARD_PADDING * 2);
+
+/**
+ * UTILITIES
+ */
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const scoreEl = document.getElementById('scoreDisplay');
+const comboEl = document.getElementById('comboDisplay');
+
+// Handle High DPI
+const dpr = window.devicePixelRatio || 1;
+canvas.width = CANVAS_WIDTH * dpr;
+canvas.height = CANVAS_HEIGHT * dpr;
+canvas.style.width = `${CANVAS_WIDTH}px`;
+canvas.style.height = `${CANVAS_HEIGHT}px`;
+ctx.scale(dpr, dpr);
+
+// Smooth Lerp
+const lerp = (start, end, t) => start * (1 - t) + end * t;
+
+/**
+ * CLASSES
+ */
+
+class Particle {
+    constructor(x, y, color) {
+        this.x = x;
+        this.y = y;
+        this.vx = (Math.random() - 0.5) * 10;
+        this.vy = (Math.random() - 0.5) * 10;
+        this.life = 1.0;
+        this.decay = Math.random() * 0.03 + 0.02;
+        this.size = Math.random() * 5 + 2;
+        this.color = color;
+    }
+
+    update() {
+        this.x += this.vx;
+        this.y += this.vy;
+        this.vy += 0.5; // gravity
+        this.life -= this.decay;
+    }
+
+    draw(ctx) {
+        ctx.globalAlpha = Math.max(0, this.life);
+        ctx.fillStyle = this.color;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1.0;
+    }
+}
+
+class Gem {
+    constructor(c, r, typeIdx) {
+        this.c = c; // Logical Column
+        this.r = r; // Logical Row
+        this.type = typeIdx;
+        
+        // Visual Coordinates (for animation)
+        // Start above board for initial spawn
+        this.x = c * (GEM_SIZE + GEM_GAP) + BOARD_PADDING; 
+        this.y = -100 - (Math.random() * 200); 
+        
+        // Target coordinates
+        this.targetX = this.x;
+        this.targetY = r * (GEM_SIZE + GEM_GAP) + BOARD_PADDING;
+
+        // Animation State
+        this.scale = 1;
+        this.rotation = 0;
+        this.popping = false;
+    }
+
+    update() {
+        // Smooth movement to target
+        this.x = lerp(this.x, this.targetX, ANIM_SPEED);
+        this.y = lerp(this.y, this.targetY, ANIM_SPEED);
+
+        // Snap if close
+        if (Math.abs(this.x - this.targetX) < 0.5) this.x = this.targetX;
+        if (Math.abs(this.y - this.targetY) < 0.5) this.y = this.targetY;
+
+        // Pop effect
+        if (this.popping) {
+            this.scale -= 0.1;
+            this.rotation += 0.2;
+            if (this.scale <= 0) return false; // Dead
+        }
+
+        return true; // Alive
+    }
+
+    draw(ctx) {
+        if (this.scale <= 0) return;
+
+        const cx = this.x + GEM_SIZE / 2;
+        const cy = this.y + GEM_SIZE / 2;
+
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(this.rotation);
+        ctx.scale(this.scale, this.scale);
+
+        const gemDef = GEMS[this.type];
+        
+        // Glow
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = gemDef.glow;
+
+        ctx.fillStyle = gemDef.color;
+        
+        // Draw Shapes
+        ctx.beginPath();
+        const s = GEM_SIZE / 2 - 4;
+        
+        if (gemDef.shape === 'square') {
+            ctx.roundRect(-s, -s, s*2, s*2, 8);
+        } else if (gemDef.shape === 'circle') {
+            ctx.arc(0, 0, s, 0, Math.PI * 2);
+        } else if (gemDef.shape === 'diamond') {
+            ctx.moveTo(0, -s);
+            ctx.lineTo(s, 0);
+            ctx.lineTo(0, s);
+            ctx.lineTo(-s, 0);
+        } else if (gemDef.shape === 'triangle') {
+            ctx.moveTo(0, -s);
+            ctx.lineTo(s, s);
+            ctx.lineTo(-s, s);
+        } else if (gemDef.shape === 'hexagon') {
+            for (let i = 0; i < 6; i++) {
+                ctx.lineTo(s * Math.cos(i * Math.PI / 3), s * Math.sin(i * Math.PI / 3));
+            }
+        } else if (gemDef.shape === 'star') {
+             for (let i = 0; i < 5; i++) {
+                ctx.lineTo(Math.cos((18 + i * 72) * Math.PI / 180) * s,
+                           -Math.sin((18 + i * 72) * Math.PI / 180) * s);
+                ctx.lineTo(Math.cos((54 + i * 72) * Math.PI / 180) * (s/2),
+                           -Math.sin((54 + i * 72) * Math.PI / 180) * (s/2));
+            }
+        }
+
+        ctx.closePath();
+        ctx.fill();
+        
+        // Shine
+        ctx.fillStyle = 'rgba(255,255,255,0.3)';
+        ctx.beginPath();
+        ctx.arc(-s/3, -s/3, s/4, 0, Math.PI*2);
+        ctx.fill();
+
+        ctx.restore();
+    }
+}
+
+/**
+ * GAME ENGINE
+ */
+
+let board = []; // 2D array of Gem objects or null
+let particles = [];
+let score = 0;
+let comboCount = 0;
+let state = 'IDLE'; // IDLE, SWAPPING, POPPING, FALLING, GAMEOVER
+let animFrame = 0;
+let swapPair = null; // { g1, g2, progress }
+let poppingGems = []; // Array of { gem, timer }
+let pendingSpawn = []; // Gems to insert during fall
+
+// Initialize
+function init() {
+    for (let c = 0; c < COLS; c++) {
+        board[c] = [];
+        for (let r = 0; r < ROWS; r++) {
+            createGem(c, r);
+        }
+    }
+    // Resolve initial matches without score
+    resolveMatches(false);
+}
+
+function createGem(c, r) {
+    let type;
+    // Simple logic to avoid initial matches
+    do {
+        type = Math.floor(Math.random() * GEMS.length);
+    } while (
+        (c >= 2 && board[c-1][r].type === type && board[c-2][r].type === type) ||
+        (r >= 2 && board[c][r-1].type === type && board[c][r-2].type === type)
+    );
+    const gem = new Gem(c, r, type);
+    // Initial animation: drop from high up
+    gem.y = -GEM_SIZE * 5; 
+    board[c][r] = gem;
+}
+
+// --- MATCH LOGIC ---
+
+function findMatches() {
+    let matches = [];
+    
+    // Horizontal
+    for (let r = 0; r < ROWS; r++) {
+        let matchLen = 1;
+        for (let c = 0; c < COLS; c++) {
+            let isMatchEnd = (c === COLS - 1) || (board[c][r].type !== board[c+1][r].type);
+            if (board[c][r].type === board[c-1]?.[r].type) {
+                matchLen++;
+            } else {
+                matchLen = 1;
+            }
+
+            if (isMatchEnd && matchLen >= 3) {
+                for (let i = 0; i < matchLen; i++) {
+                    matches.push(board[c - i][r]);
+                }
+            }
+        }
+    }
+
+    // Vertical
+    for (let c = 0; c < COLS; c++) {
+        let matchLen = 1;
+        for (let r = 0; r < ROWS; r++) {
+            let isMatchEnd = (r === ROWS - 1) || (board[c][r].type !== board[c][r+1].type);
+            if (board[c][r].type === board[c][r-1]?.type) {
+                matchLen++;
+            } else {
+                matchLen = 1;
+            }
+
+            if (isMatchEnd && matchLen >= 3) {
+                for (let i = 0; i < matchLen; i++) {
+                    matches.push(board[c][r - i]);
+                }
+            }
+        }
+    }
+    
+    // Unique set
+    return [...new Set(matches)];
+}
+
+// --- AI LOGIC ---
+
+function findBestMove() {
+    let bestScore = -1;
+    let move = null;
+    let gems = [];
+
+    // Collect live gems
+    for(let c=0; c<COLS; c++) {
+        for(let r=0; r<ROWS; r++) {
+            if(board[c][r]) gems.push(board[c][r]);
+        }
+    }
+
+    // Check neighbors
+    for (let i = 0; i < gems.length; i++) {
+        let g1 = gems[i];
+        let neighbors = [];
+        
+        // Check 4 directions
+        if (g1.c > 0) neighbors.push(board[g1.c - 1][g1.r]);
+        if (g1.c < COLS - 1) neighbors.push(board[g1.c + 1][g1.r]);
+        if (g1.r > 0) neighbors.push(board[g1.c][g1.r - 1]);
+        if (g1.r < ROWS - 1) neighbors.push(board[g1.c][g1.r + 1]);
+
+        for (let g2 of neighbors) {
+            if (!g2) continue;
+
+            // Simulate Swap
+            swapTiles(g1, g2, true); // true = silent mode (no animations)
+            
+            let matches = findMatches();
+            if (matches.length >= 3) {
+                // Calculate score potential (prefer larger matches)
+                let potential = matches.length * 10;
+                if (potential > bestScore) {
+                    bestScore = potential;
+                    move = { g1, g2 };
+                }
+            }
+
+            // Undo Swap
+            swapTiles(g1, g2, true);
+        }
+    }
+    return move;
+}
+
+// Helper for AI simulation and real swaps
+function swapTiles(g1, g2, silent = false) {
+    // Swap in board array
+    let tempType = g1.type;
+    g1.type = g2.type;
+    g2.type = tempType;
+
+    // Swap logical coordinates
+    let tempC = g1.c;
+    let tempR = g1.r;
+    g1.c = g2.c;
+    g1.r = g2.r;
+    g2.c = tempC;
+    g2.r = tempR;
+
+    // Update targets
+    g1.targetX = g1.c * (GEM_SIZE + GEM_GAP) + BOARD_PADDING;
+    g1.targetY = g1.r * (GEM_SIZE + GEM_GAP) + BOARD_PADDING;
+    g2.targetX = g2.c * (GEM_SIZE + GEM_GAP) + BOARD_PADDING;
+    g2.targetY = g2.r * (GEM_SIZE + GEM_GAP) + BOARD_PADDING;
+}
+
+
+// --- GAME LOOP STATES ---
+
+function update() {
+    // Update Gems
+    for (let c = 0; c < COLS; c++) {
+        for (let r = 0; r < ROWS; r++) {
+            let g = board[c][r];
+            if (g) {
+                let isAlive = g.update();
+                if (!isAlive && g.popping) {
+                    // Gem actually removed
+                    board[c][r] = null;
+                }
+            }
+        }
+    }
+
+    // Update Particles
+    for (let i = particles.length - 1; i >= 0; i--) {
+        particles[i].update();
+        if (particles[i].life <= 0) particles.splice(i, 1);
+    }
+
+    // --- STATE MACHINE ---
+
+    if (state === 'IDLE') {
+        // Wait for animations to finish
+        let moving = false;
+        for(let c=0; c<COLS; c++) {
+            for(let r=0; r<ROWS; r++) {
+                if(board[c][r] && Math.abs(board[c][r].x - board[c][r].targetX) > 1) moving = true;
+            }
+        }
+
+        if (!moving) {
+            let matches = findMatches();
+            if (matches.length > 0) {
+                comboCount++;
+                state = 'POPPING';
+                score += matches.length * 10 * comboCount;
+                updateScore();
+            } else {
+                // No matches, AI moves
+                let move = findBestMove();
+                if (move) {
+                    state = 'SWAPPING';
+                    swapPair = {
+                        g1: move.g1,
+                        g2: move.g2,
+                        progress: 0,
+                        startX1: move.g1.x, startY1: move.g1.y,
+                        startX2: move.g2.x, startY2: move.g2.y
+                    };
+                    // Instantly swap logicals for the animation visual
+                    swapTiles(move.g1, move.g2);
+                } else {
+                    // Should not happen in infinite player
+                    comboCount = 0; // Reset combo
+                }
+            }
+        }
+    } 
+    else if (state === 'SWAPPING') {
+        swapPair.progress += 1 / SWAP_DURATION;
+        if (swapPair.progress >= 1) {
+            state = 'IDLE';
+        }
+    }
+    else if (state === 'POPPING') {
+        let matches = findMatches();
+        if (matches.length > 0) {
+            // Remove gems and spawn particles
+            matches.forEach(g => {
+                if (g) {
+                    g.popping = true;
+                    // Spawn particles at gem center
+                    for(let i=0; i<5; i++) {
+                        particles.push(new Particle(g.x + GEM_SIZE/2, g.y + GEM_SIZE/2, GEMS[g.type].color));
+                    }
+                }
+            });
+            
+            // Wait for pop animation
+            let allDead = matches.every(g => !g || g.scale <= 0);
+            if (allDead) {
+                state = 'FALLING';
+            }
+        } else {
+            state = 'IDLE';
+        }
+    }
+    else if (state === 'FALLING') {
+        // Logic: Gravity + Refill
+        let moved = false;
+
+        // 1. Shift existing gems down
+        for (let c = 0; c < COLS; c++) {
+            let writeR = ROWS - 1;
+            for (let r = ROWS - 1; r >= 0; r--) {
+                if (board[c][r] !== null) {
+                    if (r !== writeR) {
+                        board[c][writeR] = board[c][r];
+                        board[c][writeR].r = writeR;
+                        board[c][writeR].targetY = writeR * (GEM_SIZE + GEM_GAP) + BOARD_PADDING;
+                        board[c][r] = null;
+                        moved = true;
+                    }
+                    writeR--;
+                }
+            }
+            // 2. Fill empty spaces at top
+            while (writeR >= 0) {
+                let type = Math.floor(Math.random() * GEMS.length);
+                let g = new Gem(c, writeR, type);
+                // Start slightly above visible area relative to where it should land to prevent gaps
+                g.y = (writeR + 1) * (GEM_SIZE + GEM_GAP) + BOARD_PADDING - (GEM_SIZE * 3 * Math.random());
+                g.targetY = writeR * (GEM_SIZE + GEM_GAP) + BOARD_PADDING;
+                board[c][writeR] = g;
+                writeR--;
+                moved = true;
+            }
+        }
+
+        if (!moved) state = 'IDLE';
+    }
+}
+
+function draw() {
+    // Clear
+    ctx.fillStyle = '#121212';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Draw Board Background
+    ctx.fillStyle = '#1e1e1e';
+    ctx.shadowBlur = 10;
+    ctx.shadowColor = '#000';
+    ctx.beginPath();
+    let bW = COLS * (GEM_SIZE + GEM_GAP) + BOARD_PADDING * 2;
+    let bH = ROWS * (GEM_SIZE + GEM_GAP) + BOARD_PADDING * 2;
+    ctx.roundRect(0, 0, bW, bH, 10);
+    ctx.fill();
+
+    // Draw Grid (subtle)
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 2;
+    for(let c=0; c<COLS; c++) {
+        for(let r=0; r<ROWS; r++) {
+            let x = c * (GEM_SIZE + GEM_GAP) + BOARD

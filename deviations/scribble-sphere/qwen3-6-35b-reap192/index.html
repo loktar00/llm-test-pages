@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Scribble Ball</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #050505;
+            color: #888;
+            font-family: monospace;
+        }
+        canvas {
+            display: block;
+        }
+        #ui {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            pointer-events: none;
+            opacity: 0.6;
+        }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <span id="status">Generating...</span>
+    </div>
+    <canvas id="canvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const statusEl = document.getElementById('status');
+
+        let width, height;
+        let points = [];
+        let maxPoints = 8000;
+        
+        // Physics / Animation Config
+        const CONFIG = {
+            speed: 0.04,
+            radius: 200,
+            fov: 600,
+            rotationSpeed: 0.005,
+            density: 1.5, // How tightly the scribble wraps
+            phaseDuration: 300, // Frames per phase
+            lineWidthBase: 1.5,
+            color: { r: 0, g: 180, b: 255 }
+        };
+
+        let frameCount = 0;
+        let rotationX = 0;
+        let rotationY = 0;
+        let rotationZ = 0;
+
+        // Resize handling
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // 3D Point Class
+        class Point {
+            constructor(x, y, z) {
+                this.x = x;
+                this.y = y;
+                this.z = z;
+                this.screenX = 0;
+                this.screenY = 0;
+                this.scale = 0;
+                this.alpha = 0;
+            }
+        }
+
+        // Generate the Sphere Path (Fibonacci Sphere with perturbation)
+        function generatePath() {
+            points = [];
+            const goldenRatio = (1 + Math.sqrt(5)) / 2;
+            
+            // We want thousands of points. 
+            // To make it a "scribble", we need to jitter the standard Fibonacci distribution.
+            
+            for (let i = 0; i < maxPoints; i++) {
+                const theta = 2 * Math.PI * i / goldenRatio;
+                const phi = Math.acos(1 - 2 * (i + 0.5) / maxPoints);
+                
+                let x = Math.sin(phi) * Math.cos(theta);
+                let y = Math.sin(phi) * Math.sin(theta);
+                let z = Math.cos(phi);
+
+                // Jitter for the "scribble" look
+                // The jitter scale should be proportional to the local point density
+                // but we simulate it by adding noise to the radius/vector
+                const noise = (Math.random() - 0.5) * CONFIG.density; 
+                
+                // Apply jitter to make it look like a ball of yarn
+                // We push/pull the radius slightly
+                const jitterRadius = 1 + noise / CONFIG.radius;
+                
+                points.push(new Point(
+                    x * CONFIG.radius * jitterRadius,
+                    y * CONFIG.radius * jitterRadius,
+                    z * CONFIG.radius * jitterRadius
+                ));
+            }
+        }
+
+        // Projection Logic
+        function project(p) {
+            // 1. Rotate
+            // Rotation around Y
+            let x1 = p.x * Math.cos(rotationY) - p.z * Math.sin(rotationY);
+            let z1 = p.x * Math.sin(rotationY) + p.z * Math.cos(rotationY);
+            let y1 = p.y;
+
+            // Rotation around X
+            let y2 = y1 * Math.cos(rotationX) - z1 * Math.sin(rotationX);
+            let z2 = y1 * Math.sin(rotationX) + z1 * Math.cos(rotationX);
+            let x2 = x1;
+
+            // Rotation around Z (slow tumble)
+            let x3 = x2 * Math.cos(rotationZ) - y2 * Math.sin(rotationZ);
+            let y3 = x2 * Math.sin(rotationZ) + y2 * Math.cos(rotationZ);
+            
+            // Update point data
+            p.x = x3;
+            p.y = y3;
+            p.z = z2;
+
+            // 2. Perspective Projection
+            // Standard perspective divide
+            // Add a Z-offset to ensure points don't clip at z=0
+            const cameraZ = CONFIG.fov;
+            const scale = CONFIG.fov / (CONFIG.fov + p.z + CONFIG.radius); // Simplified depth scaling
+            
+            // Actually, standard perspective: scale = fov / (fov + z)
+            // Here z is relative to camera. Our object is at origin.
+            // To prevent division by zero or negative (behind camera), we offset z.
+            // But since we rotate the whole sphere, z fluctuates.
+            // Let's keep it simple: Project onto screen plane.
+            
+            const perspective = CONFIG.fov / (CONFIG.fov - p.z);
+            
+            p.screenX = (p.x * perspective) + (width / 2);
+            p.screenY = (p.y * perspective) + (height / 2);
+            p.scale = perspective;
+        }
+
+        function draw() {
+            // Clear screen with slight trail effect? 
+            // No, let's just clear for crisp lines.
+            ctx.fillStyle = '#050505';
+            ctx.fillRect(0, 0, width, height);
+
+            ctx.beginPath();
+
+            let drawCount = 0;
+            
+            // Determine how many points to draw based on Phase
+            // 0-100: Growing
+            // 100-200: Full
+            // 200-300: Shrinking
+            const cyclePos = frameCount % CONFIG.phaseDuration;
+            let pointsToDraw = 0;
+
+            if (cyclePos < 100) {
+                // Grow: 0 to max
+                pointsToDraw = (cyclePos / 100) * maxPoints;
+                statusEl.innerText = `Constructing ${Math.floor((cyclePos/100)*100)}%`;
+            } else if (cyclePos < 200) {
+                // Hold
+                pointsToDraw = maxPoints;
+                statusEl.innerText = "Stable";
+            } else {
+                // Shrink: max to 0
+                pointsToDraw = ((CONFIG.phaseDuration - cyclePos) / 100) * maxPoints;
+                statusEl.innerText = `Dissolving ${Math.floor(((CONFIG.phaseDuration - cyclePos)/100)*100)}%`;
+            }
+
+            pointsToDraw = Math.floor(pointsToDraw);
+            if (pointsToDraw < 2) pointsToDraw = 0;
+
+            // Draw the polyline
+            // We iterate through the points array, but only draw up to pointsToDraw
+            // To make it a single continuous line, we must start the path at index 0
+            // and continue until the limit.
+            
+            if (pointsToDraw > 0) {
+                // Initial point needs to be movedTo
+                // We project the first point first
+                project(points[0]);
+                ctx.moveTo(points[0].screenX, points[0].screenY);
+
+                for (let i = 1; i < pointsToDraw; i++) {
+                    const p = points[i];
+                    project(p);
+
+                    // Depth Cuing
+                    // z ranges roughly from -radius to +radius.
+                    // scale ranges from fov/(fov-radius) to fov/(fov+radius)
+                    // We map scale to line width and opacity.
+                    
+                    // Normalize scale roughly between 0.5 and 1.2
+                    const depthFactor = (p.scale - 0.6) * 2.0; // Arbitrary scaling for visual effect
+                    
+                    // Width: 0.5 to 4.0
+                    const w = CONFIG.lineWidthBase * p.scale * 1.5;
+                    
+                    // Alpha: 0.1 to 1.0
+                    // Closer points (higher scale) are more opaque
+                    const alpha = Math.min(1, Math.max(0, (p.scale - 0.7) * 1.5));
+
+                    if (i > 1) {
+                        // Set styles inside loop for dynamic properties per segment?
+                        // Canvas allows setting strokeStyle per segment, but it's expensive.
+                        // Optimization: Batch segments by similar depth?
+                        // Given 8000 segments is manageable for modern JS, let's do per-segment 
+                        // but minimize state changes.
+                        
+                        // Actually, drawing a single path with one style is fastest.
+                        // But we want depth cueing.
+                        // Let's draw the whole line with base style, 
+                        // and maybe we can't easily do per-point width in a single path object.
+                        // However, we can iterate and begin new subpaths? No, that breaks continuity.
+                        
+                        // Compromise: Draw as one path, use global alpha/width for a "glow" effect?
+                        // Or, draw segments individually. 8000 draw calls is fine.
+                    }
+
+                    // Optimization:
+                    // If alpha is too low, don't draw? 
+                    // But it's a continuous line, so we can't break it easily without gaps.
+                    
+                    ctx.lineTo(p.screenX, p.screenY);
+                }
+            }
+
+            // Apply Styles
+            // Since we want depth cueing, we can't do it easily on a single <path>.
+            // We have to draw segments.
+            // Let's redo the loop logic above to draw segments instead of one path.
+            
+            ctx.resetTransform();
+            ctx.translate(width/2, height/2);
+            
+            // Re-do loop for segments
+            if (pointsToDraw > 1) {
+                // Pre-calculate projections for all visible points to avoid doing it twice
+                // (Actually project modifies p, so we can't do it twice easily without storing).
+                // Let's just project and draw in one pass.
+                
+                // Optimization: Group by opacity bands to reduce style changes?
+                // Simple approach:
+                
+                let lastP = points[0];
+                project(lastP);
+
+                // Start first segment
+                ctx.beginPath();
+                ctx.moveTo(lastP.screenX, lastP.screenY);
+                
+                // Calculate initial styles
+                let currentAlpha = Math.min(1, (lastP.scale - 0.6) * 1.5);
+                let currentW = CONFIG.lineWidthBase * lastP.scale * 1.5;
+                
+                if (currentAlpha > 0.05) {
+                    ctx.strokeStyle = `rgba(${CONFIG.color.r}, ${CONFIG.color.g}, ${CONFIG.color.b}, ${currentAlpha})`;
+                    ctx.lineWidth = currentW;
+                    ctx.lineCap = 'round';
+                    ctx.lineJoin = 'round';
+
+                    for (let i = 1; i < pointsToDraw; i++) {
+                        const p = points[i];
+                        project(p);
+
+                        // Check if style needs update
+                        // Floating point comparison or threshold
+                        const newAlpha = Math.min(1, (p.scale - 0.6) * 1.5);
+                        const newW = CONFIG.lineWidthBase * p.scale * 1.5;
+
+                        if (Math.abs(newAlpha - currentAlpha) > 0.05 || Math.abs(newW - currentW) > 0.1) {
+                            ctx.stroke();
+                            ctx.beginPath();
+                            ctx.moveTo(lastP.screenX, lastP.screenY);
+                            
+                            currentAlpha = newAlpha;
+                            currentW = newW;
+                            ctx.strokeStyle = `rgba(${CONFIG.color.r}, ${CONFIG.color.g}, ${CONFIG.color.b}, ${currentAlpha})`;
+                            ctx.lineWidth = currentW;
+                        } else {
+                            ctx.lineTo(p.screenX, p.screenY);
+                        }
+
+                        lastP = p;
+                    }
+                    ctx.stroke();
+                }
+            }
+            
+            ctx.resetTransform();
+        }
+
+        function animate() {
+            frameCount++;
+            
+            // Update Rotation
+            rotationY += CONFIG.rotationSpeed;
+            rotationX += CONFIG.rotationSpeed * 0.5;
+            rotationZ += CONFIG.rotationSpeed * 0.2;
+
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        // Init
+        generatePath();
+        animate();
+
+    </script>
+</body>
+</html>

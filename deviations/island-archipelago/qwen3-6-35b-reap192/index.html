@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Procedural Archipelago</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="world"></canvas>
+    <script>
+        const canvas = document.getElementById('world');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        const SCALE = 0.05; // Noise scale
+        const AMPLITUDE = 1.0; // Max height
+        
+        // World State
+        const islands = [];
+        const ships = [];
+        const particles = []; // For wakes
+        
+        // Time & Cycle
+        let globalTime = 0;
+        let dayCycle = 0;
+        const RISE_SPEED = 0.002;
+
+        // Configuration
+        const ISLAND_COUNT = 12;
+        
+        // Simple Noise Implementation (Value Noise + Interpolation)
+        const perm = new Uint8Array(512);
+        const p = new Uint8Array(256);
+        for(let i=0; i<256; i++) p[i] = Math.random() * 255;
+        for(let i=0; i<512; i++) perm[i] = p[i & 255];
+
+        function fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+        function lerp(t, a, b) { return a + t * (b - a); }
+        function grad(hash, x, y) {
+            const h = hash & 15;
+            const u = h < 8 ? x : y;
+            const v = h < 4 ? y : h === 12 || h === 14 ? x : 0;
+            return ((h & 1) ? -u : u) + ((h & 2) ? -v : v);
+        }
+
+        function noise(x, y) {
+            const X = Math.floor(x) & 255;
+            const Y = Math.floor(y) & 255;
+            x -= Math.floor(x);
+            y -= Math.floor(y);
+            const u = fade(x);
+            const v = fade(y);
+            const A = perm[X] + Y;
+            const B = perm[X + 1] + Y;
+            return lerp(v, 
+                lerp(u, grad(perm[A], x, y), grad(perm[B], x - 1, y)),
+                lerp(u, grad(perm[A + 1], x, y - 1), grad(perm[B + 1], x - 1, y - 1))
+            );
+        }
+
+        // Fractal Brownian Motion for heightmap
+        function fbm(x, y, octaves = 4) {
+            let value = 0;
+            let amplitude = 1;
+            let frequency = 1;
+            let maxValue = 0;
+            for(let i=0; i<octaves; i++) {
+                value += amplitude * noise(x * frequency, y * frequency);
+                maxValue += amplitude;
+                amplitude *= 0.5;
+                frequency *= 2;
+            }
+            return value / maxValue;
+        }
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            initWorld();
+        }
+
+        class Island {
+            constructor(x, y, radius) {
+                this.x = x;
+                this.y = y;
+                this.radius = radius;
+                this.noiseOffsetX = Math.random() * 1000;
+                this.noiseOffsetY = Math.random() * 1000;
+                this.riseProgress = 0; // 0 to 1
+                this.id = Math.random(); // Unique id for noise
+            }
+
+            update() {
+                if (this.riseProgress < 1) {
+                    this.riseProgress += RISE_SPEED;
+                    if (this.riseProgress > 1) this.riseProgress = 1;
+                }
+            }
+
+            getHeightMap(nx, ny) {
+                const scale = 3.0 / this.radius;
+                // Base noise
+                let h = fbm(this.noiseOffsetX + nx * scale, this.noiseOffsetY + ny * scale, 6);
+                
+                // Radial falloff to keep island contained
+                const dx = nx - this.x;
+                const dy = ny - this.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                const radial = Math.max(0, 1 - (dist / (this.radius * 1.2)));
+                const falloff = Math.pow(radial, 2); // Soft edges
+
+                // Shape noise
+                const shape = fbm(this.noiseOffsetX + nx * 0.5, this.noiseOffsetY + ny * 0.5, 3) * 0.3;
+
+                return (h + shape) * falloff;
+            }
+
+            draw(ctx, dayColor, dayTint) {
+                if (this.riseProgress <= 0.01) return;
+
+                const drawRange = this.radius * 1.5;
+                const step = 12; // Grid resolution
+
+                // Draw from top to bottom (Snow -> Mountain -> Grass -> Sand -> Water)
+                // We use a simple grid scan or just iterate pixels if we want extreme detail.
+                // For performance in JS, we use a coarse grid and draw rects, but optimized:
+                // We will draw the island as a series of horizontal slices or just iterate pixels
+                // since modern JS engines handle pixel manipulation well.
+                
+                // Optimization: Draw to offscreen canvas? No, just direct pixel manipulation.
+                const startX = Math.max(0, Math.floor(this.x - drawRange));
+                const endX = Math.min(width, Math.ceil(this.x + drawRange));
+                const startY = Math.max(0, Math.floor(this.y - drawRange));
+                const endY = Math.min(height, Math.ceil(this.y + drawRange));
+
+                // Precompute Math stuff
+                const sinRise = Math.sin(this.riseProgress * Math.PI); // 0 at 0, 1 at 1
+                
+                // We need to draw the "wet" parts (sand) first, then grass, etc?
+                // Actually, just iterate all pixels in range and set color based on height.
+                
+                // However, to get the "rising" effect (water rising over land), we need to check 
+                // if (height < currentSeaLevel * riseFactor).
+                
+                // Since we need to draw "above" water, and islands are opaque:
+                // We can draw the island layer by layer.
+                
+                // Let's iterate pixels for crisp shoreline
+                const imgData = ctx.getImageData(startX, startY, endX - startX, endY - startY);
+                const data = imgData.data;
+                const w = endX - startX;
+
+                const sandLevel = 0.08;
+                const grassLevel = 0.35;
+                const mountainLevel = 0.60;
+                const snowLevel = 0.78;
+
+                // Colors (R, G, B)
+                const deepSea = [10, 20, 60];
+                const shallowSea = [20, 50, 100];
+                const sandCol = [230, 210, 180];
+                const grassCol = [80, 160, 50];
+                const rockCol = [100, 100, 100];
+                const snowCol = [240, 245, 255];
+
+                for (let y = startY; y < endY; y++) {
+                    for (let x = startX; x < endX; x++) {
+                        const h = this.getHeightMap(x, y);
+                        
+                        // If island hasn't risen enough to cover this point
+                        if (h * this.riseProgress < 0.005) continue;
+
+                        // Apply rising tide logic
+                        // The water effectively goes down as island goes up? 
+                        // Or water stays and island emerges. Let's do island emerges.
+                        // Effective height relative to "sea"
+                        
+                        let color = [0,0,0];
+                        const idx = ((y - startY) * w + (x - startX)) * 4;
+
+                        // Determine color based on height
+                        if (h < sandLevel) {
+                            // Beach transition
+                            // If below sand but above water line
+                            color = sandCol;
+                            // Add foam tint
+                            color[0] += Math.sin(globalTime * 3 + x * 0.1) * 10;
+                        } else if (h < grassLevel) {
+                            color = grassCol;
+                        } else if (h < mountainLevel) {
+                            color = rockCol;
+                        } else if (h < snowLevel) {
+                            color = snowCol;
+                        } else {
+                            color = [255, 255, 255]; // Peak
+                        }
+
+                        // Apply Day Tint
+                        color[0] = color[0] + (dayColor[0] - 128) * 0.5;
+                        color[1] = color[1] + (dayColor[1] - 128) * 0.5;
+                        color[2] = color[2] + (dayColor[2] - 128) * 0.5;
+
+                        // Lighting (Pseudo 3D)
+                        // Simple normal approximation
+                        const hL = this.getHeightMap(x - 1, y);
+                        const hR = this.getHeightMap(x + 1, y);
+                        const hU = this.getHeightMap(x, y - 1);
+                        const hD = this.getHeightMap(x, y + 1);
+                        const diff = (hL + hR + hU + hD) / 4;
+                        const brightness = 1 - (h * 0.5); // Higher = darker
+                        const slopeShade = 1 - Math.abs(diff - h) * 2;
+                        
+                        const finalBright = Math.max(0.3, Math.min(1.2, brightness * slopeShade));
+
+                        data[idx] = Math.min(255, Math.max(0, color[0] * finalBright));
+                        data[idx+1] = Math.min(255, Math.max(0, color[1] * finalBright));
+                        data[idx+2] = Math.min(255, Math.max(0, color[2] * finalBright));
+                        data[idx+3] = 255;
+                    }
+                }
+                ctx.putImageData(imgData, startX, startY);
+            }
+        }
+
+        class Ship {
+            constructor(startIsland, endIsland) {
+                this.start = startIsland;
+                this.end = endIsland;
+                this.x = startIsland.x;
+                this.y = startIsland.y;
+                this.progress = 0;
+                this.speed = 0.0005 + Math.random() * 0.0005;
+                this.active = true;
+                
+                // Create some fade particles immediately
+                for(let i=0; i<20; i++) {
+                    particles.push(new Particle(this.x, this.y));
+                }
+            }
+
+            update() {
+                this.progress += this.speed;
+                if (this.progress >= 1) {
+                    this.active = false;
+                    return;
+                }
+
+                // Linear interpolation
+                this.x = lerp(this.start.x, this.end.x, this.progress);
+                this.y = lerp(this.start.y, this.end.y, this.progress);
+
+                // Wake particles
+                if (Math.random() > 0.5) {
+                    particles.push(new Particle(this.x, this.y));
+                }
+            }
+
+            draw(ctx) {
+                // Draw Ship
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                // Calculate angle
+                const angle = Math.atan2(this.end.y - this.start.y, this.end.x - this.start.x);
+                ctx.rotate(angle);
+                
+                ctx.fillStyle = "#3e2723"; // Dark wood
+                ctx.beginPath();
+                ctx.moveTo(5, 0);
+                ctx.lineTo(-5, 3);
+                ctx.lineTo(-5, -3);
+                ctx.fill();
+
+                // Sail
+                ctx.fillStyle = "#eee";
+                ctx.beginPath();
+                ctx.moveTo(0, 0);
+                ctx.lineTo(0, -8);
+                ctx.lineTo(4, 0);
+                ctx.fill();
+                
+                ctx.restore();
+            }
+        }
+
+        class Particle {
+            constructor(x, y) {
+                this.x = x + (Math.random() - 0.5) * 10;
+                this.y = y + (Math.random() - 0.5) * 10;
+                this.life = 1.0;
+                this.decay = 0.01 + Math.random() * 0.02;
+            }
+
+            update() {
+                this.life -= this.decay;
+                this.y -= 0.5; // Float up
+                this.x += (Math.random() - 0.5) * 1;
+            }
+
+            draw(ctx) {
+                ctx.fillStyle = `rgba(255, 255, 255, ${this.life * 0.5})`;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, 2, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        function initWorld() {
+            islands.length = 0;
+            
+            // Create islands with overlap check
+            let attempts = 0;
+            while (islands.length < ISLAND_COUNT && attempts < 1000) {
+                const x = Math.random() * width;
+                const y = Math.random() * height;
+                const r = 30 + Math.random() * 80;
+                
+                let tooClose = false;
+                for (let iso of islands) {
+                    const d = Math.hypot(x - iso.x, y - iso.y);
+                    if (d < iso.radius + r + 20) {
+                        tooClose = true;
+                        break;
+                    }
+                }
+                
+                if (!tooClose) {
+                    islands.push(new Island(x, y, r));
+                }
+                attempts++;
+            }
+        }
+
+        function createShip() {
+            if (islands.length < 2) return;
+            const i1 = islands[Math.floor(Math.random() * islands.length)];
+            let i2 = islands[Math.floor(Math.random() * islands.length)];
+            while (i1 === i2) {
+                i2 = islands[Math.floor(Math.random() * islands.length)];
+            }
+            ships.push(new Ship(i1, i2));
+        }
+
+        function getDayColor(t) {
+            // t goes 0..1
+            // 0 = Midnight, 0.25 = Sunrise, 0.5 = Noon, 0.75 = Sunset
+            
+            let r, g, b;
+            
+            if (t < 0.25) { // Night to Dawn
+                // Deep blue to Orange/Pink
+                r = 10 + (255 - 10) * Math.pow((t - 0) / 0.25, 2);
+                g = 20 + (150 - 20) * Math.pow((t - 0) / 0.25, 2);
+                b = 60 + (200 - 60) * Math.pow((t - 0) / 0.25, 2);
+            } else if (t < 0.5) { // Dawn to Noon
+                // Orange to Blue
+                r = 255 * (1 - (t - 0.25) * 2);
+                g = 150 * (1 - (t - 0.25) * 2);
+                b = 200;
+            } else if (t < 0.75) { // Noon to Sunset
+                // Blue to Orange
+                const p = (t - 0.5) * 2;
+                r = 100 + (255 - 100) * Math.pow(p, 2);
+                g = 150 + (100 - 150) * Math.pow(p, 2); // slight dim
+                b = 200 - 100 * p;
+            } else { // Sunset to Night
+                const p = (t - 0.75) * 4;
+                r = 255 - 245 * p;
+                g = 100 - 80 * p;
+                b = 100 - 40 * p;
+            }
+
+            return [r, g, b];
+        }
+
+        function drawSky(ctx, color) {
+            const grad = ctx.createLinearGradient(0, 0, 0, height);
+            grad.addColorStop(0, `rgb(${color[0]*0.5}, ${color[1]*0.5}, ${color[2]*0.5})`); // Top darker
+            grad.addColorStop(1, `rgb(${color[0]}, ${color[1]}, ${color[2]})`);
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, width, height);
+        }
+
+        function drawWater(ctx, dayColor) {
+            // Animated water plane behind islands
+            ctx.save();
+            ctx.translate(0, height * 0.1); // Slight perspective offset? No, top down.
+            
+            // We draw water "below" islands.
+            // Since we use putImageData for islands, we need to draw water on the main canvas first?
+            // Or draw islands on top of a background.
+            
+            // To animate waves, we can use a simple sine wave pattern.
+            // But putImageData destroys the pixels. 
+            // Strategy:
+            // 1. Draw Sky.
+            // 2. Draw Water (using paths or simple rects).
+            // 3. Draw Islands (pixel manipulation).
+            // 4. Draw Ships/Particles (on top).
+            
+            // Actually, for a smooth water look with foam, we need a dedicated water layer.
+            // Let's just draw the water background.
+            ctx.restore();
+        }
+
+        function drawOcean(ctx, dayColor, time) {
+            // We'll iterate a grid to draw "tiles" of water with sine offsets
+            // This is slower than putImageData but allows transparency if needed.
+            // To keep it fast, we draw rects.
+            
+            const step = 40;
+            const startX = 0;
+            const endX = width;
+            const startY = 0;
+            const endY = height;
+
+            // Base water color (tinted)
+            const waterR = dayColor[0] * 0.2;
+            const waterG = dayColor[1] * 0.3;
+            const waterB = dayColor[2] * 0.6 + 50;
+
+            ctx.fillStyle = `rgb(${waterR}, ${waterG}, ${waterB})`;
+            ctx.fillRect(0,0, width, height);
+
+            // Wave highlights
+            ctx.strokeStyle = `rgba(255, 255, 255, 0.05)`;
+            ctx.lineWidth = 2;
+            
+            for(let y=0; y<height; y+=step) {
+                for(let x=0; x<width; x+=step) {
+                    const wave = Math.sin(x * 0.01 + time) + Math.cos(y * 0.01 + time);
+                    if (wave > 1.5) {
+                        ctx.fillStyle = `rgba(255, 255, 255, 0.03)`;
+                        ctx.fillRect(x, y, step, step);
+                    }
+                }
+            }
+        }
+
+        function loop() {
+            globalTime += 0.01;
+            dayCycle = (dayCycle + 0.0005) % 1; // Long cycle
+
+            const dayColor = getDayColor(dayCycle);
+
+            // 1. Sky
+            drawSky(ctx, dayColor);
+
+            // 2. Ocean (Background)
+            drawOcean(ctx, dayColor, globalTime);
+
+            // 3. Islands (Rising)
+            // Sort by Y for pseudo-depth? Not needed for top-down, but good for layering if we had shadows.
+            islands.forEach(iso => {
+                iso.update();
+                iso.draw(ctx, dayColor, dayCycle);
+            });
+
+            // 4. Ships
+            if (Math.random() < 0.002) createShip();
+            
+            for (let i = ships.length - 1; i >= 0; i--) {
+                ships[i].update();
+                ships[i].draw(ctx);
+                if (!ships[i].active) ships.splice(i, 1);
+            }
+
+            // 5. Particles (Wakes)
+            for (let i = particles.length - 1; i >= 0; i--) {
+                particles[i].update();
+                particles[i].draw(ctx);
+                if (

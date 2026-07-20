@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ghostly Explosions</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// Simplex-like noise implementation
+const F2 = 0.5 * (Math.sqrt(3) - 1);
+const G2 = (3 - Math.sqrt(3)) / 6;
+const perm = new Uint8Array(512);
+const grad3 = [[1,1],[−1,1],[1,−1],[−1,−1],[1,0],[−1,0],[0,1],[0,−1]].length ? 
+  [[1,1],[-1,1],[1,-1],[-1,-1],[1,0],[-1,0],[0,1],[0,-1]] : [];
+(function() {
+  const p = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) p[i] = i;
+  for (let i = 255; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [p[i], p[j]] = [p[j], p[i]];
+  }
+  for (let i = 0; i < 512; i++) perm[i] = p[i & 255];
+})();
+
+function simplex2(x, y) {
+  let n0, n1, n2;
+  const s = (x + y) * F2;
+  const i = Math.floor(x + s);
+  const j = Math.floor(y + s);
+  const t = (i + j) * G2;
+  const X0 = i - t, Y0 = j - t;
+  const x0 = x - X0, y0 = y - Y0;
+  let i1, j1;
+  if (x0 > y0) { i1 = 1; j1 = 0; } else { i1 = 0; j1 = 1; }
+  const x1 = x0 - i1 + G2, y1 = y0 - j1 + G2;
+  const x2 = x0 - 1 + 2 * G2, y2 = y0 - 1 + 2 * G2;
+  const ii = i & 255, jj = j & 255;
+  let t0 = 0.5 - x0 * x0 - y0 * y0;
+  if (t0 < 0) n0 = 0;
+  else { t0 *= t0; const g = grad3[perm[ii + perm[jj]] % 8]; n0 = t0 * t0 * (g[0] * x0 + g[1] * y0); }
+  let t1 = 0.5 - x1 * x1 - y1 * y1;
+  if (t1 < 0) n1 = 0;
+  else { t1 *= t1; const g = grad3[perm[ii + i1 + perm[jj + j1]] % 8]; n1 = t1 * t1 * (g[0] * x1 + g[1] * y1); }
+  let t2 = 0.5 - x2 * x2 - y2 * y2;
+  if (t2 < 0) n2 = 0;
+  else { t2 *= t2; const g = grad3[perm[ii + 1 + perm[jj + 1]] % 8]; n2 = t2 * t2 * (g[0] * x2 + g[1] * y2); }
+  return 70 * (n0 + n1 + n2);
+}
+
+function fbm(x, y, octaves) {
+  let val = 0, amp = 1, freq = 1, max = 0;
+  for (let i = 0; i < octaves; i++) {
+    val += simplex2(x * freq, y * freq) * amp;
+    max += amp;
+    amp *= 0.5;
+    freq *= 2;
+  }
+  return val / max;
+}
+
+// Curl of the noise field
+function curlNoise(x, y, t, scale) {
+  const eps = 0.1 / scale;
+  const s = scale;
+  const tVal = t * 0.0003;
+  const ox = x * s + tVal * 50;
+  const oy = y * s + tVal * 30;
+  const n = 3;
+  const dx = (fbm(ox + eps, oy + eps, n) - fbm(ox - eps, oy + eps, n) +
+              fbm(ox + eps, oy - eps, n) - fbm(ox - eps, oy - eps, n)) / (4 * eps);
+  const dy = (fbm(ox + eps, oy + eps, n) - fbm(ox + eps, oy - eps, n) +
+              fbm(ox - eps, oy + eps, n) - fbm(ox - eps, oy - eps, n)) / (4 * eps);
+  return [dy, -dx]; // curl
+}
+
+// Color palettes
+function spectralColor(t, warmAnomaly) {
+  if (warmAnomaly) {
+    const r = 0.8 + 0.2 * Math.sin(t * 3);
+    const g = 0.15 + 0.1 * Math.sin(t * 2);
+    const b = 0.05 + 0.05 * Math.sin(t * 4);
+    return [r, g, b];
+  }
+  const colors = [
+    [0.15, 0.4, 0.9],   // blue
+    [0.1, 0.7, 0.85],   // cyan
+    [0.5, 0.2, 0.9],    // purple
+    [0.2, 0.8, 0.6],    // teal
+    [0.3, 0.15, 0.85],  // violet
+    [0.05, 0.5, 0.7],   // deep cyan
+    [0.4, 0.1, 0.75],   // deep purple
+    [0.1, 0.6, 0.5],    // sea green
+  ];
+  const idx = Math.floor(t * colors.length) % colors.length;
+  const next = (idx + 1) % colors.length;
+  const frac = (t * colors.length) % 1;
+  const c0 = colors[idx], c1 = colors[next];
+  return [
+    c0[0] + (c1[0] - c0[0]) * frac,
+    c0[1] + (c1[1] - c0[1]) * frac,
+    c0[2] + (c1[2] - c0[2]) * frac
+  ];
+}
+
+// Particle class
+class Wisp {
+  constructor(x, y, isWarm) {
+    this.x = x;
+    this.y = y;
+    this.vx = (Math.random() - 0.5) * 2;
+    this.vy = (Math.random() - 0.5) * 2;
+    this.life = 1.0;
+    this.maxLife = 1.0;
+    this.decay = 0.002 + Math.random() * 0.004;
+    this.size = 1.5 + Math.random() * 3;
+    this.baseSize = this.size;
+    this.isWarm = isWarm;
+    this.t = Math.random();
+    this.noiseOffsetX = Math.random() * 1000;
+    this.noiseOffsetY = Math.random() * 1000;
+    this.alive = true;
+  }
+
+  update(dt, time) {
+    if (!this.alive) return;
+    
+    const speed = 1.8;
+    const curl = curlNoise(this.x + this.noiseOffsetX, this.y + this.noiseOffsetY, time, 0.004);
+    const noiseStrength = speed * (0.5 + 0.5 * this.life);
+    this.vx += curl[0] * noiseStrength * dt * 0.06;
+    this.vy += curl[1] * noiseStrength * dt * 0.06;
+    
+    // Damping
+    this.vx *= 0.985;
+    this.vy *= 0.985;
+    
+    this.x += this.vx * dt * 0.06;
+    this.y += this.vy * dt * 0.06;
+    
+    this.life -= this.decay * dt;
+    
+    // Size expands over time
+    this.size = this.baseSize * (1 + (1 - this.life) * 4);
+    
+    if (this.life <= 0) {
+      this.alive = false;
+      // Leave fog residue
+      return 'fog';
+    }
+    return null;
+  }
+
+  draw(ctx, time) {
+    if (!this.alive) return;
+    const [r, g, b] = spectralColor(this.t, this.isWarm);
+    const alpha = this.life * this.life * 0.6;
+    const coreAlpha = this.life * 0.8;
+    
+    // Core glow
+    const grad = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, this.size * 2.5);
+    grad.addColorStop(0, `rgba(${Math.floor(r*255)},${Math.floor(g*255)},${Math.floor(b*255)},${coreAlpha})`);
+    grad.addColorStop(0.3, `rgba(${Math.floor(r*200)},${Math.floor(g*200)},${Math.floor(b*200)},${alpha * 0.5})`);
+    grad.addColorStop(1, `rgba(${Math.floor(r*100)},${Math.floor(g*100)},${Math.floor(b*100)},0)`);
+    
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.size * 2.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// Fog layer
+class FogLayer {
+  constructor() {
+    this.fogCanvas = document.createElement('canvas');
+    this.fogCtx = this.fogCanvas.getContext('2d');
+    this.fogData = null;
+    this.resized = false;
+  }
+  
+  resize() {
+    this.fogCanvas.width = W;
+    this.fogCanvas.height = H;
+    this.fogData = this.fogCtx.createImageData(W, H);
+    this.resized = true;
+  }
+  
+  addParticle(x, y, r, g, b, alpha) {
+    if (!this.resized) this.resize();
+    const data = this.fogData.data;
+    const radius = Math.ceil(3 * alpha) + 1;
+    const r2 = radius * radius;
+    const ix = Math.floor(x), iy = Math.floor(y);
+    const minX = Math.max(0, ix - radius);
+    const maxX = Math.min(W - 1, ix + radius);
+    const minY = Math.max(0, iy - radius);
+    const maxY = Math.min(H - 1, iy + radius);
+    
+    for (let cy = minY; cy <= maxY; cy++) {
+      for (let cx = minX; cx <= maxX; cx++) {
+        const dx = cx - ix, dy = cy - iy;
+        const dist2 = dx * dx + dy * dy;
+        if (dist2 < r2) {
+          const falloff = 1 - dist2 / r2;
+          const idx = (cy * W + cx) * 4;
+          const contribution = falloff * alpha * 0.15;
+          data[idx] = Math.min(255, data[idx] + r * contribution * 255);
+          data[idx+1] = Math.min(255, data[idx+1] + g * contribution * 255);
+          data[idx+2] = Math.min(255, data[idx+2] + b * contribution * 255);
+          data[idx+3] = Math.min(255, data[idx+3] + contribution * 0.3);
+        }
+      }
+    }
+  }
+  
+  update() {
+    if (!this.resized) return;
+    const data = this.fogData.data;
+    const decay = 0.0008;
+    for (let i = 3; i < data.length; i += 4) {
+      data[i] *= (1 - decay);
+      if (data[i] < 0.5) {
+        data[i] = 0;
+        data[i-3] = 0;
+        data[i-2] = 0;
+        data[i-1] = 0;
+      }
+    }
+  }
+  
+  draw(ctx) {
+    if (!this.resized) return;
+    this.fogCtx.putImageData(this.fogData, 0, 0);
+    ctx.globalCompositeOperation = 'screen';
+    ctx.drawImage(this.fogCanvas, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+  }
+}
+
+// Explosion
+class Explosion {
+  constructor(x, y) {
+    this.particles = [];
+    this.count = 80 + Math.floor(Math.random() * 60);
+    this.isWarm = Math.random() < 0.08; // rare warm anomaly
+    this.time = performance.now();
+    
+    for (let i = 0; i < this.count; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 0.5 + Math.random() * 3;
+      const p = new Wisp(x, y, this.isWarm || Math.random() < 0.05);
+      p.vx = Math.cos(angle) * speed;
+      p.vy = Math.sin(angle) * speed;
+      p.t = Math.random();
+      this.particles.push(p);
+    }
+    
+    // Core flash particle
+    const core = new Wisp(x, y, this.isWarm);
+    core.baseSize = 8;
+    core.size = 8;
+    core.life = 1;
+    core.decay = 0.015;
+    core.t = Math.random();
+    this.particles.unshift(core);
+  }
+  
+  update(dt, time) {
+    const toFog = [];
+    for (let i = this.particles.length - 1; i >= 0; i--) {
+      const result = this.particles[i].update(dt, time);
+      if (result === 'fog') {
+        const p = this.particles[i];
+        const [r, g, b] = spectralColor(p.t, p.isWarm);
+        toFog.push({ x: p.x, y: p.y, r, g, b, alpha: 0.3 });
+        this.particles.splice(i, 1);
+      }
+    }
+    for (const f of toFog) fogLayer.addParticle(f.x, f.y, f.r, f.g, f.b, f.alpha);
+    
+    return this.particles.length === 0 && toFog.length === 0;
+  }
+  
+  draw(ctx, time) {
+    for (const p of this.particles) {
+      p.draw(ctx, time);
+    }
+  }
+  
+  hasActiveParticles() {
+    return this.particles.length > 0;
+  }
+}
+
+// Main
+const explosions = [];
+const fogLayer = new FogLayer();
+let lastTime = performance.now();
+let autoTimer = 0;
+
+// Click to create explosion
+canvas.addEventListener('click', (e) => {
+  explosions.push(new Explosion(e.clientX, e.clientY));
+});
+
+// Ambient auto-explosions
+function autoExplosion() {
+  const margin = 100;
+  const x = margin + Math.random() * (W - margin * 2);
+  const y = margin + Math.random() * (H - margin * 2);
+  explosions.push(new Explosion(x, y));
+}
+
+function loop(now) {
+  requestAnimationFrame(loop);
+  
+  const dt = Math.min(now - lastTime, 50);
+  lastTime = now;
+  
+  // Auto explosions
+  autoTimer += dt;
+  if (autoTimer > 2500 + Math.random() * 2000) {
+    autoExplosion();
+    autoTimer = 0;
+  }
+  
+  // Clear
+  ctx.fillStyle = '#020208';
+  ctx.fillRect(0, 0, W, H);
+  
+  // Subtle vignette
+  const vignette = ctx.createRadialGradient(W/2, H/2, W*0.1, W/2, H/2, W*0.75);
+  vignette.addColorStop(0, 'rgba(2,2,8,0)');
+  vignette.addColorStop(1, 'rgba(0,0,0,0.5)');
+  ctx.fillStyle = vignette;
+  ctx.fillRect(0, 0, W, H);
+  
+  // Update and draw fog
+  fogLayer.update();
+  fogLayer.draw(ctx);
+  
+  // Update explosions
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i = explosions.length - 1; i >= 0; i--) {
+    const done = explosions[i].update(dt, now);
+    explosions[i].draw(ctx, now);
+    if (done) {
+      explosions.splice(i, 1);
+    }
+  }
+  ctx.globalCompositeOperation = 'source-over';
+  
+  // Subtle darkening of fog over very long periods to prevent buildup
+  if (Math.random() < 0.001) {
+    fogLayer.fogCtx.globalCompositeOperation = 'destination-out';
+    fogLayer.fogCtx.fillStyle = 'rgba(0,0,0,0.005)';
+    fogLayer.fogCtx.fillRect(0, 0, W, H);
+    fogLayer.fogCtx.globalCompositeOperation = 'source-over';
+  }
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

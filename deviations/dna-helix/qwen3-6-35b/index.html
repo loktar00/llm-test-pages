@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DNA Replication</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #050508;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="dnaCanvas"></canvas>
+    <script>
+        const canvas = document.getElementById('dnaCanvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let cx, cy;
+        
+        // Configuration
+        const config = {
+            pointCount: 80,
+            radius: 150,
+            twist: 0.25, // radians per segment
+            speed: 0.02,
+            globalRotation: 0,
+            strandWidth: 3,
+            basePairColorA: '#FF4136', // Adenine (Red)
+            basePairColorB: '#0074D9', // Thymine (Blue)
+            basePairColorC: '#2ECC40', // Cytosine (Green)
+            basePairColorD: '#FFDC00', // Guanine (Yellow)
+            glowAmount: 15,
+            strandDepthMod: 0.3
+        };
+
+        // State
+        let points = [];
+        let replicationState = 'IDLE'; // IDLE, UNZIPPING, REBUILDING
+        let replicationIndex = 0;
+        let replicationDirection = 1; // 1 for unzip, -1 for rebuild
+        let nextReplicationTime = 300; // Frames until next event
+
+        // Resize Handler
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            cx = width / 2;
+            cy = height / 2;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // Base Pair Logic
+        const basePairs = [
+            { type: 'A', pair: 'T', color: config.basePairColorA, partnerColor: config.basePairColorB },
+            { type: 'T', pair: 'A', color: config.basePairColorB, partnerColor: config.basePairColorA },
+            { type: 'C', type: 'C', pair: 'G', color: config.basePairColorC, partnerColor: config.basePairColorD },
+            { type: 'G', pair: 'C', color: config.basePairColorD, partnerColor: config.basePairColorC }
+        ];
+
+        // Initialize DNA Points
+        function initDNA() {
+            points = [];
+            for (let i = 0; i < config.pointCount; i++) {
+                // Assign random base pair
+                const rand = Math.floor(Math.random() * 4);
+                const bp = basePairs[rand];
+                
+                points.push({
+                    index: i,
+                    base: bp,
+                    angleOffset: i * config.twist,
+                    x1: 0, y1: 0, z1: 0,
+                    x2: 0, y2: 0, z2: 0,
+                    opacity: 0,
+                    connected: true
+                });
+            }
+        }
+        initDNA();
+
+        // Math Helpers
+        function updatePoints() {
+            // 3D Projection parameters
+            const focalLength = 300;
+            
+            // Process points in reverse order for correct painter's algorithm (back to front)
+            // We need to sort or calculate z-depth. 
+            // Since it's a helix, we can just calculate depths and sort them for drawing.
+            
+            for (let i = 0; i < points.length; i++) {
+                const p = points[i];
+                
+                // Current rotation of the whole strand
+                const theta = config.globalRotation + p.angleOffset;
+                
+                // Parametric Helix Equations
+                // x = r * cos(theta)
+                // y = r * sin(theta)
+                // z = i (distance along the tube)
+                
+                const x = config.radius * Math.cos(theta);
+                const y = config.radius * Math.sin(theta);
+                const z = i; // Linear depth for the curve itself
+                
+                // Rotate the whole helix around X axis slightly for 3D perspective
+                const tilt = 0.2;
+                const yRot = y * Math.cos(tilt) - z * Math.sin(tilt);
+                const zRot = y * Math.sin(tilt) + z * Math.cos(tilt);
+
+                p.x1 = x;
+                p.y1 = yRot;
+                p.z1 = zRot;
+
+                // Strand 2 is opposite (pi radians offset)
+                const x2 = config.radius * Math.cos(theta + Math.PI);
+                const y2 = config.radius * Math.sin(theta + Math.PI);
+                
+                p.x2 = x2;
+                p.y2 = y2 * Math.cos(tilt) - zRot * Math.sin(tilt); // Rough approx for visual continuity
+                p.z2 = zRot;
+
+                // Sort points by depth for rendering
+                p.drawZ = zRot; 
+            }
+
+            // Sort for drawing
+            points.sort((a, b) => a.drawZ - b.drawZ);
+        }
+
+        function draw() {
+            // Clear Background
+            ctx.fillStyle = '#050508';
+            ctx.fillRect(0, 0, width, height);
+            
+            // Draw Stars (Background)
+            drawStars();
+
+            updatePoints();
+
+            // Replication Logic
+            handleReplication();
+
+            // Draw DNA
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+
+            points.forEach(p => {
+                // Screen Coordinates
+                const scale1 = focalLength / (focalLength + p.z1);
+                const scale2 = focalLength / (focalLength + p.z2); // simplified scale diff for same Z
+
+                const sx1 = cx + p.x1 * scale1;
+                const sy1 = cy + p.y1 * scale1;
+                
+                const sx2 = cx + p.x2 * scale1; // assuming same Z for simplicity of visual
+                const sy2 = cy + p.y2 * scale1;
+
+                // Depth calculation for brightness
+                // Normalize Z roughly between -radius and +radius
+                const depthNorm = (p.z1) / config.radius; 
+                // Map depth to alpha: Front (low Z) is bright, Back (high Z) is dim
+                // Since we rotated, z goes positive/negative.
+                // Let's assume standard view: smaller Z is closer.
+                // Actually, my zRot calc makes 'i' (index) affect Z too.
+                // Let's rely on the sort order. 
+                
+                // Alpha based on depth
+                // We want front to be bright (1.0) and back to be dim (0.1)
+                // Depth index roughly 0 to 1
+                let alpha = 0.15 + 0.85 * (1.0 - (p.z1 / (config.pointCount * 0.5))); 
+                alpha = Math.max(0.05, Math.min(1, alpha));
+
+                // Replication Opacity Logic
+                if (p.index > replicationIndex) {
+                    alpha = 0; // Hidden ahead
+                } else if (replicationState === 'REBUILDING' && p.index === replicationIndex) {
+                    // Fade in newly added base
+                    alpha = 0.5; 
+                } else {
+                    // Existing base
+                    alpha = Math.min(1, alpha);
+                }
+
+                // Draw Backbone (Strands)
+                // We draw lines from current point to previous point for continuity
+                if (p.index > 0) {
+                    const prev = points.find(pt => pt.index === p.index - 1);
+                    if (!prev) continue;
+
+                    const ps = 300 / (300 + prev.z1);
+                    const ps2 = 300 / (300 + prev.z2);
+                    
+                    ctx.lineWidth = config.strandWidth * Math.max(0.5, ps); // Taper
+                    ctx.globalAlpha = alpha * 0.6;
+                    
+                    // Strand 1
+                    ctx.strokeStyle = '#00FFFF'; // Cyan backbone
+                    ctx.shadowColor = '#00FFFF';
+                    ctx.shadowBlur = 10 * ps;
+                    ctx.beginPath();
+                    ctx.moveTo(cx + prev.x1 * ps, cy + prev.y1 * ps);
+                    ctx.lineTo(sx1, sy1);
+                    ctx.stroke();
+
+                    // Strand 2
+                    ctx.beginPath();
+                    ctx.moveTo(cx + prev.x2 * ps2, cy + prev.y2 * ps2);
+                    ctx.lineTo(sx2, sy2);
+                    ctx.stroke();
+                    
+                    ctx.shadowBlur = 0;
+                }
+
+                // Draw Base Pairs (Rungs)
+                // Only draw if connected
+                if (p.connected && p.index > 0) {
+                    const prev = points.find(pt => pt.index === p.index - 1);
+                    if (!prev) continue;
+
+                    const ps = 300 / (300 + prev.z1);
+                    const ps2 = 300 / (300 + prev.z2);
+
+                    ctx.lineWidth = 3 * Math.max(0.5, ps);
+                    
+                    // Colors
+                    ctx.shadowColor = p.base.color;
+                    ctx.shadowBlur = config.glowAmount * ps;
+                    ctx.strokeStyle = p.base.color;
+                    ctx.globalAlpha = alpha;
+
+                    // Draw line from Strand 1 to Strand 2
+                    // We draw from previous to current for smoothness
+                    ctx.beginPath();
+                    ctx.moveTo(cx + prev.x1 * ps, cy + prev.y1 * ps);
+                    ctx.lineTo(sx1, sy1); // This is wrong, we need to connect strands
+                    
+                    // Correct Rung Drawing:
+                    // Connect Strand 1 (Current) to Strand 2 (Current)
+                    // And Strand 1 (Prev) to Strand 2 (Prev) to fill the gap
+                    
+                    // Actually, simply drawing a line between the two strands at this index is sufficient visually
+                    // But to make it look like a tube surface, we draw from prev-pair to curr-pair
+                    
+                    // Let's draw the rung segment
+                    ctx.beginPath();
+                    ctx.moveTo(cx + prev.x2 * ps2, cy + prev.y2 * ps2); // Prev Strand 2
+                    ctx.lineTo(sx2, sy2); // Curr Strand 2
+                    ctx.lineTo(sx1, sy1); // Curr Strand 1
+                    ctx.lineTo(cx + prev.x1 * ps, cy + prev.y1 * ps); // Prev Strand 1
+                    // This makes a quad, but lines are faster.
+                    
+                    // Let's just draw a line connecting the two strands at this Z
+                    // Using the average Z scale for better depth effect
+                    ctx.beginPath();
+                    ctx.moveTo(sx2, sy2);
+                    ctx.lineTo(sx1, sy1);
+                    ctx.stroke();
+                    
+                    ctx.shadowBlur = 0;
+                }
+            });
+
+            ctx.globalAlpha = 1;
+            
+            // Advance global rotation
+            config.globalRotation += config.speed;
+            
+            requestAnimationFrame(draw);
+        }
+
+        // Background Stars
+        const stars = [];
+        for(let i=0; i<100; i++) {
+            stars.push({
+                x: Math.random() * window.innerWidth,
+                y: Math.random() * window.innerHeight,
+                size: Math.random() * 2,
+                alpha: Math.random()
+            });
+        }
+
+        function drawStars() {
+            ctx.fillStyle = '#FFFFFF';
+            stars.forEach(star => {
+                ctx.globalAlpha = star.alpha;
+                ctx.beginPath();
+                ctx.arc(star.x, star.y, star.size, 0, Math.PI*2);
+                ctx.fill();
+            });
+            ctx.globalAlpha = 1;
+        }
+
+        // Replication Logic
+        function handleReplication() {
+            // Trigger Logic
+            if (replicationState === 'IDLE') {
+                nextReplicationTime--;
+                if (nextReplicationTime <= 0) {
+                    replicationState = 'UNZIPPING';
+                    replicationIndex = config.pointCount - 1; // Start from back
+                    // Reset opacity of all points to ensure clean start
+                    points.forEach(p => p.connected = false);
+                }
+            } else if (replicationState === 'UNZIPPING') {
+                if (replicationIndex > 0) {
+                    // Find the point
+                    const p = points.find(pt => pt.index === replicationIndex);
+                    if(p) {
+                        p.connected = false; // Break the rung
+                        
+                        // Visual flair: Add a particle or flash?
+                        // Keep it simple: just remove the line.
+                    }
+                    
+                    // Move backwards
+                    replicationIndex--;
+                } else {
+                    // Unzip complete, start rebuild
+                    replicationState = 'REBUILDING';
+                    replicationDirection = -1; // Move forward
+                    // Reset index to start rebuilding from front
+                    replicationIndex = 0;
+                }
+            } else if (replicationState === 'REBUILDING') {
+                if (replicationIndex < config.pointCount) {
+                    const p = points.find(pt => pt.index === replicationIndex);
+                    if(p) {
+                        p.connected = true; // Re-attach rung
+                        
+                        // Slight visual shake on the point
+                        p.x1 += (Math.random() - 0.5) * 5;
+                        p.y1 += (Math.random() - 0.5) * 5;
+                    }
+                    replicationIndex++;
+                } else {
+                    // Done
+                    replicationState = 'IDLE';
+                    nextReplicationTime = Math.random() * 300 + 200; // Random delay
+                }
+            }
+        }
+
+        // Start
+        requestAnimationFrame(draw);
+
+    </script>
+</body>
+</html>

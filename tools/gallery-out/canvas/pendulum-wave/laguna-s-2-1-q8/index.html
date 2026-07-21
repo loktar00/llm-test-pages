@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pendulum Wave</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background: #000;
+  }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script>
+(() => {
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+
+  function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  const W = canvas.width;
+  const H = canvas.height;
+
+  // Pendulum parameters
+  const numPendulums = 24;
+  const pendulumSpacing = W / (numPendulums + 1);
+
+  const amplitude = 0.4; // radians, initial swing
+  const basePeriod = 2.0; // seconds, central period
+  const spread = 0.5; // spread in period variation
+
+  const lengths = [];
+  const periods = [];
+  const phases = [];
+  const positions = [];
+
+  // Tuning: create a smooth frequency gradient across pendulums
+  for (let i = 0; i < numPendulums; i++) {
+    // Position along wave: from -1 to 1
+    const t = (i / (numPendulums - 1)) * 2 - 1;
+    
+    // Period varies smoothly - quadratic to create interesting phase relationships
+    const periodVariation = spread * t * t;
+    const period = basePeriod + periodVariation;
+    
+    periods.push(period);
+    phases.push(0);
+    positions.push({ x: 0, y: 0, trail: [] });
+  }
+
+  // Seismograph history
+  const seismoHistoryLength = Math.floor(W * 0.6); // pixels wide
+  const seismoHistory = Array.from({ length: numPendulums }, () => []);
+  const seismoWidth = W * 0.6;
+  const seismoHeight = H * 0.3;
+  const seismoX = (W - seismoWidth) / 2;
+  const seismoY = H - seismoHeight - 20;
+  const trailMaxLength = 80;
+
+  // Time tracking
+  let startTime = null;
+  const cycleDuration = 60; // seconds
+
+  function getAngle(index, time) {
+    const period = periods[index];
+    const omega = (2 * Math.PI) / period;
+    return amplitude * Math.cos(omega * time + phases[index] * 0);
+  }
+
+  function getPosition(index, time) {
+    const angle = getAngle(index, time);
+    const length = 200 + 200 * Math.sin((index / numPendulums) * Math.PI);
+    const pivotX = pendulumSpacing * (index + 1);
+    const pivotY = H * 0.2;
+    const x = pivotX + Math.sin(angle) * length;
+    const y = pivotY + Math.cos(angle) * length;
+    return { x, y };
+  }
+
+  function draw() {
+    if (!startTime) startTime = performance.now();
+    const now = performance.now();
+    const elapsed = (now - startTime) / 1000;
+    const time = elapsed % cycleDuration;
+    const cycleProgress = elapsed / cycleDuration;
+    const isResetting = elapsed > 0 && Math.floor(elapsed / cycleDuration) > Math.floor((elapsed - 0.016) / cycleDuration);
+
+    // Clear with fade for trails
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
+    ctx.fillRect(0, 0, W, H);
+
+    // Draw seismograph background
+    ctx.fillStyle = 'rgba(10, 10, 20, 0.7)';
+    ctx.fillRect(seismoX, seismoY, seismoWidth, seismoHeight);
+
+    // Draw seismograph lines
+    for (let i = 0; i < numPendulums; i++) {
+      const hue = (i * 360) / numPendulums;
+      ctx.strokeStyle = `hsla(${hue}, 80%, 60%, 0.7)`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let j = 0; j < seismoHistory[i].length - 1; j++) {
+        const x = seismoX + (j / (seismoWidth)) * seismoWidth;
+        const y = seismoY + seismoHeight / 2 + seismoHistory[i][j] * (seismoHeight / 2);
+        if (j === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+
+    // Draw pendulums
+    for (let i = 0; i < numPendulums; i++) {
+      const pos = positions[i];
+      const hue = (i * 360) / numPendulums;
+      
+      // Update position
+      const newPos = getPosition(i, time);
+      pos.x = newPos.x;
+      pos.y = newPos.y;
+
+      // Update trail
+      pos.trail.push({ x: pos.x, y: pos.y });
+      if (pos.trail.length > trailMaxLength) pos.trail.shift();
+
+      // Update seismograph
+      const normalizedX = (pos.x - pendulumSpacing * (i + 1)) / 200;
+      seismoHistory[i].push(normalizedX);
+      if (seismoHistory[i].length > seismoWidth) seismoHistory[i].shift();
+
+      // Draw string
+      const pivotX = pendulumSpacing * (i + 1);
+      const pivotY = H * 0.2;
+      ctx.strokeStyle = 'rgba(100, 100, 120, 0.5)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(pivotX, pivotY);
+      ctx.lineTo(pos.x, pos.y);
+      ctx.stroke();
+
+      // Draw trail
+      if (pos.trail.length > 1) {
+        ctx.strokeStyle = `hsla(${hue}, 80%, 60%, 0.5)`;
+        ctx.lineWidth = 2;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        for (let j = 0; j < pos.trail.length - 1; j++) {
+          if (j === 0) ctx.moveTo(pos.trail[j].x, pos.trail[j].y);
+          else ctx.lineTo(pos.trail[j].x, pos.trail[j].y);
+        }
+        ctx.stroke();
+      }
+
+      // Draw bob
+      const gradient = ctx.createRadialGradient(pos.x - 5, pos.y - 5, 1, pos.x, pos.y, 12);
+      gradient.addColorStop(0, `hsla(${hue}, 100%, 70%, 1)`);
+      gradient.addColorStop(1, `hsla(${hue}, 100%, 40%, 1)`);
+      ctx.fillStyle = gradient;
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, 10, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Flash marker at reset
+    if (isResetting) {
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+      ctx.font = 'bold 24px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('RESET', W / 2, seismoY + 30);
+    }
+
+    requestAnimationFrame(draw);
+  }
+
+  requestAnimationFrame(draw);
+})();
+</script>
+</body>
+</html>

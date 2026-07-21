@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Aquarium Screensaver</title>
+<style>
+html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
+canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="aquarium"></canvas>
+<script>
+(() => {
+const canvas = document.getElementById('aquarium');
+const ctx = canvas.getContext('2d');
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+const W = () => canvas.width, H = () => canvas.height;
+
+// Utility
+function rand(min, max) { return Math.random() * (max - min) + min; }
+function randInt(min, max) { return Math.floor(rand(min, max + 1)); }
+function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+function angleTo(a, b) { return Math.atan2(b.y - a.y, b.x - a.x); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+function rotate(v, ang) { return {x: v.x*Math.cos(ang)-v.y*Math.sin(ang), y: v.x*Math.sin(ang)+v.y*Math.cos(ang)}; }
+
+// Fish species definitions
+const SPECIES = [
+  { name: "Goldfish", color: "#FFD700", sizeRange: [25, 35], speed: 0.8, shape: "rounded" },
+  { name: "Neon Tetra", color: "#33CCFF", sizeRange: [12, 18], speed: 1.3, shape: "slender" },
+  { name: "Guppy", color: "#FF69B4", sizeRange: [16, 22], speed: 1.1, shape: "flowy" },
+  { name: "Angelfish", color: "#4169E1", sizeRange: [30, 40], speed: 0.7, shape: "tall" },
+  { name: "Cichlid", color: "#FF4500", sizeRange: [20, 28], speed: 1.0, shape: "robust" }
+];
+
+const FISH_COUNT = 17;
+const fish = [];
+
+for (let i = 0; i < FISH_COUNT; i++) {
+  const spec = SPECIES[randInt(0, SPECIES.length - 1)];
+  const size = rand(spec.sizeRange[0], spec.sizeRange[1]);
+  fish.push({
+    x: rand(50, W() - 50),
+    y: rand(100, H() - 150),
+    vx: 0,
+    vy: 0,
+    ax: 0,
+    ay: 0,
+    size: size,
+    spec: spec,
+    angle: rand(0, Math.PI * 2),
+    targetAngle: rand(0, Math.PI * 2),
+    speed: spec.speed * rand(0.9, 1.1),
+    dartTimer: 0,
+    wanderPhase: rand(0, Math.PI * 2),
+    lastDart: 0,
+    flee: false,
+    fleeTimer: 0,
+    fleeTarget: null
+  });
+}
+
+// Bubbler
+const bubblerX = W() * 0.2;
+const bubbles = [];
+const BUBBLE_INTERVAL = 200; // ms per batch
+let lastBubble = 0;
+
+function spawnBubble() {
+  bubbles.push({
+    x: bubblerX + rand(-3, 3),
+    y: H() - 60,
+    size: rand(3, 8),
+    vx: rand(-0.3, 0.3),
+    vy: rand(-0.8, -1.5),
+    wobble: rand(0, Math.PI * 2),
+    alpha: 1,
+    pop: false
+  });
+}
+
+// Plants
+const plants = [];
+for (let i = 0; i < 8; i++) {
+  plants.push({
+    x: rand(30, W() - 30),
+    height: rand(80, 160),
+    segments: Math.floor(rand(6, 10)),
+    phase: rand(0, Math.PI * 2),
+    width: rand(3, 6)
+  });
+}
+
+// Hermit crab
+const crab = {
+  x: W() * 0.75,
+  y: H() - 40,
+  vx: 0,
+  dir: -1,
+  speed: 0.3,
+  anim: 0
+};
+
+// Caustic ripples
+const ripples = [];
+for (let i = 0; i < 5; i++) {
+  ripples.push({
+    phase: rand(0, Math.PI * 2),
+    freq: rand(0.02, 0.04),
+    amp: rand(3, 8)
+  });
+}
+
+// Mouse interaction for startling fish
+let mouseX = -9999, mouseY = -9999;
+document.addEventListener('mousemove', (e) => {
+  mouseX = e.clientX;
+  mouseY = e.clientY;
+});
+document.addEventListener('mouseleave', () => {
+  mouseX = -9999; mouseY = -9999;
+});
+
+// Physics helper
+function applyForce(f, pos, vel, acc) {
+  const m = 1; // mass = 1
+  acc.x += f.x / m;
+  acc.y += f.y / m;
+}
+
+// Steering behaviors
+function seek(fish, target, weight) {
+  const desired = {x: target.x - fish.x, y: target.y - fish.y};
+  const d = Math.hypot(desired.x, desired.y);
+  if (d > 0) {
+    desired.x /= d; desired.y /= d;
+  }
+  desired.x *= fish.speed * 60; desired.y *= fish.speed * 60;
+  const steer = {x: desired.x - fish.vx, y: desired.y - fish.vy};
+  fish.ax += steer.x * weight * 0.05;
+  fish.ay += steer.y * weight * 0.05;
+}
+
+function separate(fish, others, radius, weight) {
+  let steer = {x: 0, y: 0};
+  let count = 0;
+  for (const other of others) {
+    if (other === fish) continue;
+    const d = dist(fish, other);
+    if (d < radius && d > 0) {
+      const diff = {x: fish.x - other.x, y: fish.y - other.y};
+      if (d > 0) { diff.x /= d; diff.y /= d; }
+      steer.x += diff.x; steer.y += diff.y;
+      count++;
+    }
+  }
+  if (count > 0) {
+    steer.x /= count; steer.y /= count;
+    const mag = Math.hypot(steer.x, steer.y);
+    if (mag > 0) {
+      steer.x /= mag; steer.y /= mag;
+      steer.x *= fish.speed * 60; steer.y *= fish.speed * 60;
+      const s = {x: steer.x - fish.vx, y: steer.y - fish.vy};
+      fish.ax += s.x * weight * 0.02;
+      fish.ay += s.y * weight * 0.02;
+    }
+  }
+}
+
+let lastTime = 0;
+const FPS = 60;
+const INTERVAL = 1000 / FPS;
+let accumulator = 0;
+
+function animate(timestamp) {
+  if (!lastTime) lastTime = timestamp;
+  let delta = timestamp - lastTime;
+  lastTime = timestamp;
+  accumulator += delta;
+
+  while (accumulator >= INTERVAL) {
+    update();
+    accumulator -= INTERVAL;
+  }
+
+  render();
+  requestAnimationFrame(animate);
+}
+
+function update() {
+  const dt = INTERVAL / 1000;
+  const margin = 30;
+
+  // Update bubbles
+  for (let i = bubbles.length - 1; i >= 0; i--) {
+    const b = bubbles[i];
+    b.vx += Math.sin(b.wobble) * 0.1;
+    b.vy += 0.02;
+    b.wobble += 0.05;
+    b.x += b.vx;
+    b.y += b.vy;
+    b.alpha -= 0.002;
+    if (b.y < 30 || b.alpha <= 0) {
+      bubbles.splice(i, 1);
+    }
+  }
+
+  // Spawn bubbles
+  if (timestamp_now > lastBubble) {
+    lastBubble = timestamp_now + BUBBLE_INTERVAL + rand(-50, 50);
+    for (let i = 0; i < randInt(1, 2); i++) {
+      spawnBubble();
+    }
+  }
+
+  // Update fish
+  for (const f of fish) {
+    f.wanderPhase += 0.02 * f.speed;
+
+    // Wander steering
+    const wanderAng = Math.sin(f.wanderPhase) * 0.3;
+    f.targetAngle += wanderAng * 0.3;
+
+    // Mouse avoidance (startle)
+    const mouseDist = dist(f, {x: mouseX, y: mouseY});
+    if (mouseDist < 80) {
+      f.flee = true;
+      f.fleeTimer = 1.5;
+      f.lastDart = 0;
+    }
+
+    if (f.flee) {
+      const fleeDir = angleTo(f, {x: mouseX, y: mouseY}) + Math.PI;
+      f.targetAngle = fleeDir + rand(-0.3, 0.3);
+      f.lastDart -= dt * (f.dartTimer > 0 ? 0 : 1);
+      
+      if (f.dartTimer <= 0) {
+        f.dartTimer = rand(0.1, 0.3);
+        f.lastDart = f.dartTimer;
+      }
+      
+      if (f.fleeTimer > 0) {
+        f.fleeTimer -= dt;
+      } else {
+        f.flee = false;
+      }
+    }
+
+    // Wall avoidance
+    if (f.x < margin) {
+      const force = {x: (margin - f.x) / margin * f.speed * 5, y: 0};
+      f.ax += force.x;
+    }
+    if (f.x > W() - margin) {
+      const force = {x: -(margin - (W() - f.x)) / margin * f.speed * 5, y: 0};
+      f.ax += force.x;
+    }
+    if (f.y < margin + 40) {
+      const force = {x: 0, y: (margin - f.y) / margin * f.speed * 5};
+      f.ay += force.y;
+    }
+    if (f.y > H() - margin - 60) {
+      const force = {x: 0, y: -(margin - (H() - f.y)) / margin * f.speed * 5};
+      f.ay += force.y;
+    }
+
+    // Acceleration from target angle
+    const forceMag = f.flee ? f.speed * 3 : f.speed;
+    f.ax += Math.cos(f.targetAngle) * forceMag;
+    f.ay += Math.sin(f.targetAngle) * forceMag;
+
+    // Separate from other fish
+    separate(f, fish, f.size * 2.5, 1);
+
+    // Apply physics
+    f.vx += f.ax;
+    f.vy += f.ay;
+    
+    // Speed limit
+    const speed = Math.hypot(f.vx, f.vy);
+    const maxSpeed = f.flee ? f.speed * 8 : f.speed * 3;
+    if (speed > maxSpeed) {
+      f.vx = (f.vx / speed) * maxSpeed;
+      f.vy = (f.vy / speed) * maxSpeed;
+    }
+
+    f.x += f.vx;
+    f.y += f.vy;
+
+    // Reset acceleration
+    f.ax = 0;
+    f.ay = 0;
+
+    // Update angle based on velocity
+    if (Math.hypot(f.vx, f.vy) > 0.1) {
+      f.angle = Math.atan2(f.vy, f.vx);
+    }
+  }
+
+  // Update hermit crab
+  crab.anim += 0.1;
+  if (Math.random() < 0.01) {
+    crab.dir *= -1;
+  }
+  crab.x += crab.speed * crab.dir;
+  if (crab.x < 50 || crab.x > W() - 50) {
+    crab.dir *= -1;
+  }
+
+  // Update plant phases
+  for (const p of plants) {
+    p.phase += 0.01;
+  }
+}
+
+let timestamp_now = 0;
+
+function render() {
+  timestamp_now = Date.now();
+  ctx.fillStyle = '#0a2342';
+  ctx.fillRect(0, 0, W(), H());
+
+  // Draw caustic ripples on back glass
+  for (const r of ripples) {
+    r.phase += 0.005;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < W(); i += 4) {
+      const wave = Math.sin(i * r.freq + r.phase) * r.amp;
+      ctx.strokeStyle = `rgba(100, 200, 255, 0.03)`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(i, 0);
+      ctx.lineTo(i, H());
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(i, wave);
+      ctx.lineTo(i, H());
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // Draw sand/gravel
+  ctx.fillStyle = '#c9a66b';
+  ctx.fillRect(0, H() - 60, W(), 60);
+  // Gravel details
+  ctx.fillStyle = '#a8864a';
+  for (let i = 0; i < 500; i++) {
+    const x = rand(0, W());
+    const y = H() - 60 + rand(0, 60);
+    const s = rand(1, 3);
+    ctx.fillRect(x, y, s, s);
+  }
+
+  // Draw plants
+  for (const p of plants) {
+    drawPlant(p);
+  }
+
+  // Draw fish
+  for (const f of fish) {
+    drawFish(f);
+  }
+
+  // Draw hermit crab
+  drawCrab();
+
+  // Draw bubbles
+  for (const b of bubbles) {
+    drawBubble(b);
+  }
+
+  // Draw bubbler
+  ctx.fillStyle = '#555';
+  ctx.beginPath();
+  ctx.arc(bubblerX, H() - 55, 8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#333';
+  ctx.beginPath();
+  ctx.arc(bubblerX - 2, H() - 57, 3, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawFish(f) {
+  const { x, y, size, angle, spec } = f;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+
+  // Body gradient
+  const grad = ctx.createLinearGradient(-size, 0, size, 0);
+  grad.addColorStop(0, spec.color);
+  grad.addColorStop(1, adjustColor(spec.color, -30));
+
+  ctx.fillStyle = grad;
+
+  if (spec.shape === "slender") {
+    // Tetra - thin elongated
+    ctx.beginPath();
+    ctx.ellipse(0, 0, size * 0.8, size * 0.35, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Tail
+    ctx.beginPath();
+    ctx.moveTo(-size * 0.8, 0);
+    ctx.lineTo(-size * 1.3, -size * 0.5);
+    ctx.lineTo(-size * 1.3, size * 0.5);
+    ctx.closePath();
+    ctx.fill();
+    // Eye
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.arc(size * 0.6, 0, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (spec.shape === "flowy") {
+    // Guppy - rounded with trailing fins
+    ctx.beginPath();
+    ctx.ellipse(0, 0, size * 0.7, size * 0.4, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Tail
+    ctx.beginPath();
+    ctx.moveTo(-size * 0.7, 0);
+    ctx.lineTo(-size * 1.2, -size * 0.7);
+    ctx.lineTo(-size * 1.2, size * 0.7);
+    ctx.closePath();
+    ctx.fill();
+    // Top fin
+    ctx.beginPath();
+    ctx.moveTo(0, -size * 0.4);
+    ctx.quadraticCurveTo(size * 0.3, -size * 0.8, size * 0.6, -size * 0.3);
+    ctx.lineTo(size * 0.2, -size * 0.3);
+    ctx.closePath();
+    ctx.fill();
+    // Eye
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.arc(size * 0.5, 0, 1.2, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (spec.shape === "tall") {
+    // Angelfish - tall and laterally compressed
+    ctx.beginPath();
+    ctx.ellipse(0, 0, size * 0.4, size * 0.7, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Tail
+    ctx.beginPath();
+    ctx.moveTo(-size * 0.4, 0);
+    ctx.lineTo(-size * 1.0, -size * 0.5);
+    ctx.lineTo(-size * 1.0, size * 0.5);
+    ctx.closePath();
+    ctx.fill();
+    // Top fin
+    ctx.beginPath();
+    ctx.moveTo(0, -size * 0.7);
+    ctx.quadraticCurveTo(-size * 0.2, -size * 0.9, size * 0.2, -size * 0.6);
+    ctx.closePath();
+    ctx.fill();
+    // Bottom fin
+    ctx.beginPath();
+    ctx.moveTo(0, size * 0.7);
+    ctx.quadraticCurveTo(-size * 0.2, size * 0.9, size * 0.2, size * 0.6);
+    ctx.closePath();
+    ctx.fill();
+    // Eye
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.arc(size * 0.3, -size * 0.1, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (spec.shape === "robust") {
+    // Cichlid - oval with strong jaw
+    ctx.beginPath();
+    ctx.ellipse(0, 0, size * 0.6, size * 0.45, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Tail
+    ctx.beginPath();
+    ctx.moveTo(-size * 0.6, 0);
+    ctx.lineTo(-size * 1.2, -size * 0.4);
+    ctx.lineTo(-size * 1.2, size * 0.4);
+    ctx.closePath();
+    ctx.fill();
+    // Dorsal fin
+    ctx.beginPath();
+    ctx.moveTo(-size * 0.2, -size * 0.45);
+    ctx.quadraticCurveTo(0, -size * 0.7, size * 0.3, -size * 0.4);
+    ctx.closePath();
+    ctx.fill();
+    // Eye
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.arc(size * 0.4, 0, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    // Default: Goldfish
+    ctx.beginPath();
+    ctx.ellipse(0, 0, size * 0.7, size * 0.45, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Tail
+    ctx.beginPath();
+    ctx.moveTo(-size * 0.7, 0);
+    ctx.lineTo(-size * 1.3, -size * 0.5);
+    ctx.lineTo(-size * 1.3, size * 0.5);
+    ctx.closePath();
+    ctx.fill();
+    // Top fin
+    ctx.beginPath();
+    ctx.moveTo(0, -size * 0.45);
+    ctx.quadraticCurveTo(size * 0.3, -size * 0.8, size * 0.6, -size * 0.3);
+    ctx.closePath();
+    ctx.fill();
+    // Eye
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.arc(size * 0.5, 0, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Highlight
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  ctx.beginPath();
+  ctx.ellipse(size * 0.2, -size * 0.1, size * 0.15, size * 0.08, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawPlant(p) {
+  ctx.save();
+  ctx.strokeStyle = '#2e8b57';
+  ctx.fillStyle = '#228b22';
+  ctx.lineWidth = p.width;
+
+  const sway = Math.sin(p.phase) * 0.3;
+  const segmentHeight = p.height / p.segments;
+
+  ctx.beginPath();
+  ctx.moveTo(p.x, H() - 60);
+
+  for (let i = 1; i <= p.segments; i++) {
+    const t = i / p.segments;
+    const x = p.x + Math.sin(sway + t * 0.5) * 5 * t;
+    const y = H() - 60 - segmentHeight * i;
+    ctx.lineTo(x, y);
+  }
+
+  ctx.stroke();
+
+  // Leaf clusters
+  for (let i = 1; i <= p.segments; i++) {
+    const t = i / p.segments;
+    const x = p.x + Math.sin(sway + t * 0.5) * 5 * t;
+    const y = H() - 60 - (p.height / p.segments) * i;
+    const leafSize = p.width * 1.5 * (1 - t * 0.3);
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(sway * 0.5);
+    ctx.beginPath();
+    ctx.ellipse(0, 0, leafSize, leafSize * 0.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  ctx.restore();
+}
+
+function drawCrab() {
+  ctx.save();
+  ctx.translate(crab.x, crab.y);
+  ctx.scale(crab.dir, 1);
+
+  // Shell
+  ctx.fillStyle = '#8B4513';
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 12, 16, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Shell pattern
+  ctx.strokeStyle = '#654321';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(0, 0, 8, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Legs
+  ctx.strokeStyle = '#8B4513';
+  ctx.lineWidth = 3;
+  const legOffset = Math.sin(crab.anim) * 0.3;
+  ctx.beginPath();
+  ctx.moveTo(-8, 5);
+  ctx.lineTo(-15, 10 + legOffset);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(-8, -5);
+  ctx.lineTo(-15, -10 - legOffset);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(8, 5);
+  ctx.lineTo(15, 10 - legOffset);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(8, -5);
+  ctx.lineTo(15, -10 + legOffset);
+  ctx.stroke();
+
+  // Eyes
+  ctx.fillStyle = '#000';
+  ctx.beginPath();
+  ctx.arc(-3, -12, 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(3, -12, 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawBubble(b) {
+  ctx.save();
+  ctx.translate(b.x, b.y);
+  ctx.globalAlpha = b.alpha * 0.7;
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(0, 0, b.size, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = b.alpha * 0.9;
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(-b.size * 0.3, -b.size * 0.3, b.size * 0.5, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function adjustColor(hex, delta) {
+  const r = Math.max(0, Math.min(255, parseInt(hex.substr(1, 2), 16) + delta));
+  const g = Math.max(0, Math.min(255, parseInt(hex.substr(3, 2), 16) + delta));
+  const b = Math.max(0, Math.min(255, parseInt(hex.substr(5, 2), 16) + delta));
+  return `rgb(${r},${g},${b})`;
+}
+
+requestAnimationFrame(animate);
+})();
+</script>
+</body>
+</html>

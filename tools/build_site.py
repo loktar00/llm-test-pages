@@ -100,6 +100,8 @@ for section, stems in by_section.items():
         for r in runs:
             src = os.path.join(SRC, section, stem, r['runId'])
             dst = os.path.join(REPO, section, stem, r['runId'])
+            if not os.path.isdir(src):
+                continue  # already in the repo from a previous build
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             preview = os.path.join(dst, 'preview.webm')
             stash = os.path.join(REPO, section, stem, r['runId'] + '.keep')

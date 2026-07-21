@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Koi Pond</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="pond"></canvas>
+<script>
+(() => {
+  const canvas = document.getElementById('pond');
+  const ctx = canvas.getContext('2d');
+  let W = canvas.width = window.innerWidth;
+  let H = canvas.height = window.innerHeight;
+
+  window.addEventListener('resize', () => {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  });
+
+  // Color pools
+  const FISH_COLORS = ['#e74c3c', '#f39c12', '#2ecc71', '#3498db', '#9b59b6', '#e67e22', '#1abc9c', '#d35400', '#2c3e50'];
+  const LILY_PAD_COLORS = ['#27ae60', '#219653', '#1e8449', '#2d8659'];
+
+  // Caustics noise texture
+  const causticsCanvas = document.createElement('canvas');
+  causticsCanvas.width = 256;
+  causticsCanvas.height = 256;
+  const cCtx = causticsCanvas.getContext('2d');
+  const imageData = cCtx.createImageData(256, 256);
+  const data = imageData.data;
+  for (let i = 0; i < data.length; i += 4) {
+    const val = Math.random() * 80 + 20;
+    data[i] = val; data[i+1] = val; data[i+2] = val; data[i+3] = 20;
+  }
+  cCtx.putImageData(imageData, 0, 0);
+
+  let causticOffsetX = 0, causticOffsetY = 0;
+
+  function drawCaustics() {
+    causticOffsetX += 0.3;
+    causticOffsetY += 0.2;
+    const pattern = ctx.createPattern(causticsCanvas, 'repeat');
+    ctx.save();
+    ctx.globalAlpha = 0.12;
+    ctx.fillStyle = pattern;
+    ctx.translate(causticOffsetX, causticOffsetY);
+    ctx.fillRect(-causticOffsetX % 256, -causticOffsetY % 256, W + 256, H + 256);
+    ctx.restore();
+  }
+
+  // Spline helper
+  function cubicInterpolate(p0, p1, p2, p3, t) {
+    const tt = t * t;
+    const ttt = tt * t;
+    return (
+      p1 +
+      0.5 * t * (p2 - p0) +
+      (p2 - 2 * p1 + p0) * tt +
+      0.5 * (3 * (p0 - p1) + p3 - p2) * ttt
+    );
+  }
+
+  // Draw a flexible fish body using cubic spline
+  function drawFish(x, y, angle, length, color, time) {
+    const segments = 8;
+    const points = [];
+    for (let i = 0; i <= segments; i++) {
+      const t = i / segments;
+      const wave = Math.sin(t * Math.PI - Math.PI / 2 + time * 0.05) * 0.15 * (1 - Math.abs(t - 0.5) * 2);
+      const offsetX = Math.cos(angle) * t * length - Math.sin(angle) * wave * 15;
+      const offsetY = Math.sin(angle) * t * length + Math.cos(angle) * wave * 15;
+      points.push({
+        x: x - offsetX,
+        y: y - offsetY,
+        width: (1 - Math.abs(t - 0.5) * 2) * 8 + 3
+      });
+    }
+
+    // Tail
+    const tailT = -0.2;
+    const tailWave = Math.sin(time * 0.1) * 0.2;
+    const tailLen = length * 0.6;
+    const tailX = x - Math.cos(angle) * tailLen;
+    const tailY = y - Math.sin(angle) * tailLen;
+    const tailOffsetX = Math.sin(angle) * tailWave * 20;
+    const tailOffsetY = -Math.cos(angle) * tailWave * 20;
+    const tailSideX = Math.cos(angle + Math.PI / 2) * tailLen * 0.7;
+    const tailSideY = Math.sin(angle + Math.PI / 2) * tailLen * 0.7;
+
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+
+    // Shadow
+    ctx.beginPath();
+    ctx.ellipse(0, 0, length * 0.5, 3, angle + Math.PI / 2, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0,0,0,0.2)';
+    ctx.fill();
+
+    // Body
+    ctx.beginPath();
+    for (let i = 0; i < points.length; i++) {
+      const p = points[i];
+      const relX = p.x - x;
+      const relY = p.y - y;
+      if (i === 0) {
+        ctx.moveTo(relX, relY);
+      } else {
+        ctx.lineTo(relX, relY);
+      }
+    }
+    // Top outline
+    for (let i = points.length - 1; i >= 0; i--) {
+      const p = points[i];
+      const relX = p.x - x;
+      const relY = p.y - y;
+      ctx.lineTo(relX, relY);
+    }
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+
+    // Blotch pattern
+    ctx.fillStyle = darkenColor(color, 0.4);
+    for (let i = 0; i < 3; i++) {
+      const bx = (Math.random() - 0.5) * length * 0.6;
+      const by = (Math.random() - 0.5) * length * 0.4;
+      ctx.beginPath();
+      ctx.ellipse(bx, by, length * 0.2, length * 0.15, Math.random() * Math.PI, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Tail
+    ctx.beginPath();
+    ctx.moveTo(-tailLen, 0);
+    ctx.lineTo(-tailLen * 0.4, tailLen * 0.5);
+    ctx.lineTo(-tailLen * 0.8, -tailLen * 0.3);
+    ctx.lineTo(-tailLen * 0.3, -tailLen * 0.6);
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.fillStyle = darkenColor(color, 0.4);
+    ctx.fill();
+
+    // Eye
+    ctx.beginPath();
+    ctx.arc(length * 0.3, 0, 2, 0, Math.PI * 2);
+    ctx.fillStyle = '#000';
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  function darkenColor(color, factor) {
+    const r = Math.floor(parseInt(color.slice(1, 3), 16) * (1 - factor));
+    const g = Math.floor(parseInt(color.slice(3, 5), 16) * (1 - factor));
+    const b = Math.floor(parseInt(color.slice(5, 7), 16) * (1 - factor));
+    return `rgb(${r},${g},${b})`;
+  }
+
+  // Lily pads
+  const lilyPads = [];
+  for (let i = 0; i < 15; i++) {
+    lilyPads.push({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      size: 20 + Math.random() * 30,
+      color: LILY_PAD_COLORS[Math.floor(Math.random() * LILY_PAD_COLORS.length)],
+      tilt: Math.random() * Math.PI * 2
+    });
+  }
+
+  function drawLilyPad(pad) {
+    ctx.save();
+    ctx.translate(pad.x, pad.y);
+    ctx.rotate(pad.tilt);
+
+    // Shadow
+    ctx.beginPath();
+    ctx.ellipse(0, 2, pad.size * 1.2, pad.size * 0.4, 0, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0,0,0,0.15)';
+    ctx.fill();
+
+    // Pad
+    const grad = ctx.createRadialGradient(0, 0, pad.size * 0.3, 0, 0, pad.size);
+    grad.addColorStop(0, lightenColor(pad.color, 0.3));
+    grad.addColorStop(1, pad.color);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(0, 0, pad.size, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Veins
+    ctx.strokeStyle = darkenColor(pad.color, 0.2);
+    ctx.lineWidth = 1;
+    for (let a = 0; a < Math.PI * 2; a += Math.PI / 3) {
+      const ex = Math.cos(a) * pad.size;
+      const ey = Math.sin(a) * pad.size;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(ex, ey);
+      ctx.stroke();
+    }
+
+    // Flower dot
+    ctx.beginPath();
+    ctx.arc(0, -pad.size * 0.3, 3, 0, Math.PI * 2);
+    ctx.fillStyle = '#f1c40f';
+    ctx.fill();
+    ctx.strokeStyle = '#d4ac0d';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function lightenColor(color, factor) {
+    const r = Math.min(255, Math.floor(parseInt(color.slice(1, 3), 16) + (255 - parseInt(color.slice(1, 3), 16)) * factor));
+    const g = Math.min(255, Math.floor(parseInt(color.slice(3, 5), 16) + (255 - parseInt(color.slice(3, 5), 16)) * factor));
+    const b = Math.min(255, Math.floor(parseInt(color.slice(5, 7), 16) + (255 - parseInt(color.slice(5, 7), 16)) * factor));
+    return `rgb(${r},${g},${b})`;
+  }
+
+  // Ripples
+  const ripples = [];
+  function addRipple(x, y, maxRadius = 60) {
+    ripples.push({ x, y, radius: 0, maxRadius, alpha: 0.5 });
+  }
+  ripples.forEach((r, i) => {
+    if (r.radius > r.maxRadius) ripples.splice(i, 1);
+  });
+
+  function drawRipples(time) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = ripples.length - 1; i >= 0; i--) {
+      const r = ripples[i];
+      r.radius += 0.6 + Math.random() * 0.4;
+      r.alpha -= 0.004;
+      if (r.radius > r.maxRadius || r.alpha <= 0) {
+        ripples.splice(i, 1);
+        continue;
+      }
+      const grad = ctx.createRadialGradient(r.x, r.y, 0, r.x, r.y, r.radius + 10);
+      grad.addColorStop(0, `rgba(255,255,255,${r.alpha * 0.3})`);
+      grad.addColorStop(1, `rgba(255,255,255,0)`);
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(r.x, r.y, r.radius, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // Dragonflies
+  const dragonflies = [];
+  for (let i = 0; i < 3; i++) {
+    dragonflies.push({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      vx: (Math.random() - 0.5) * 1.5,
+      vy: (Math.random() - 0.5) * 1.5,
+      wingPhase: Math.random() * Math.PI * 2
+    });
+  }
+
+  function drawDragonfly(d, time) {
+    ctx.save();
+    ctx.translate(d.x, d.y);
+    ctx.rotate(Math.atan2(d.vy, d.vx) + (d.vx < 0 ? Math.PI : 0));
+
+    // Body
+    ctx.fillStyle = '#2c3e50';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 10, 3, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Wings
+    const wingFlap = Math.sin(time * 0.3 + d.wingPhase) * 3;
+    ctx.fillStyle = 'rgba(52, 152, 219, 0.6)';
+    ctx.beginPath();
+    ctx.ellipse(-2, -5, 8, 2, wingFlap * 0.1, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(-2, 5, 8, 2, -wingFlap * 0.1, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.15)';
+    ctx.beginPath();
+    ctx.ellipse(0, 3, 8, 2, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  // Fish
+  const koi = [];
+  for (let i = 0; i < 8; i++) {
+    koi.push({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      vx: (Math.random() - 0.5) * 1.2,
+      vy: (Math.random() - 0.5) * 1.2,
+      length: 20 + Math.random() * 15,
+      color: FISH_COLORS[Math.floor(Math.random() * FISH_COLORS.length)],
+      target: { x: Math.random() * W, y: Math.random() * H },
+      targetTimer: 0
+    });
+  }
+
+  function updateFish(fish, time) {
+    // Wander behavior
+    fish.targetTimer--;
+    if (fish.targetTimer <= 0 || Math.random() < 0.002) {
+      fish.target.x = Math.random() * W;
+      fish.target.y = Math.random() * H;
+      fish.targetTimer = 100 + Math.random() * 200;
+    }
+
+    const dx = fish.target.x - fish.x;
+    const dy = fish.target.y - fish.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > 5) {
+      fish.vx += (dx / dist) * 0.03;
+      fish.vy += (dy / dist) * 0.03;
+    }
+
+    // Avoid other fish
+    for (const other of koi) {
+      if (other === fish) continue;
+      const odx = fish.x - other.x;
+      const ody = fish.y - other.y;
+      const odist = Math.sqrt(odx * odx + ody * ody);
+      if (odist < 60 && odist > 0) {
+        fish.vx += (odx / odist) * 0.05 * (60 - odist) / 60;
+        fish.vy += (ody / odist) * 0.05 * (60 - odist) / 60;
+      }
+    }
+
+    // Slow near edges
+    const margin = 40;
+    if (fish.x < margin || fish.x > W - margin) fish.vx *= 0.95;
+    if (fish.y < margin || fish.y > H - margin) fish.vy *= 0.95;
+
+    // Clamp speed
+    const maxSpeed = 1.8 + (fish.length - 20) / 25;
+    const speed = Math.sqrt(fish.vx * fish.vx + fish.vy * fish.vy);
+    if (speed > maxSpeed) {
+      fish.vx = (fish.vx / speed) * maxSpeed;
+      fish.vy = (fish.vy / speed) * maxSpeed;
+    }
+
+    fish.x += fish.vx;
+    fish.y += fish.vy;
+  }
+
+  function drawFishWithRibbons(fish, time) {
+    const angle = Math.atan2(fish.vy, fish.vx);
+    drawFish(fish.x, fish.y, angle, fish.length, fish.color, time);
+
+    // Nibble at lily pads occasionally
+    for (const pad of lilyPads) {
+      const dx = fish.x - pad.x;
+      const dy = fish.y - pad.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < pad.size + 10 && Math.random() < 0.02) {
+        addRipple(fish.x, fish.y, 30);
+      }
+    }
+
+    // Occasionally create ripples
+    if (Math.random() < 0.03) {
+      addRipple(fish.x - Math.cos(angle) * fish.length / 2, fish.y - Math.sin(angle) * fish.length / 2, 20);
+    }
+  }
+
+  // Surface points
+  const surfacePoints = [];
+  for (let i = 0; i < 30; i++) {
+    surfacePoints.push({ x: Math.random() * W, y: Math.random() * H, lastX: 0, lastY: 0 });
+  }
+
+  function drawSurfacePoints(time) {
+    for (const p of surfacePoints) {
+      p.lastX = p.x;
+      p.lastY = p.y;
+      // Gentle drift
+      p.x += (Math.random() - 0.5) * 0.5;
+      p.y += (Math.random() - 0.5) * 0.5;
+      if (p.x < 0 || p.x > W) p.x = Math.random() * W;
+      if (p.y < 0 || p.y > H) p.y = Math.random() * H;
+
+      // Check if any fish is near
+      let nibbled = false;
+      for (const fish of koi) {
+        const dx = p.x - fish.x;
+        const dy = p.y - fish.y;
+        if (Math.sqrt(dx * dx + dy * dy) < fish.length + 10 && Math.random() < 0.01) {
+          nibbled = true;
+          break;
+        }
+      }
+
+      if (nibbled) {
+        addRipple(p.x, p.y, 25);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+        ctx.fillStyle = '#2ecc71';
+        ctx.fill();
+      } else {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
+        ctx.fillStyle = '#27ae60';
+        ctx.fill();
+      }
+
+      // Occasional ripple
+      if (Math.random() < 0.005) {
+        addRipple(p.x, p.y, 15);
+      }
+    }
+  }
+
+  // Main loop
+  let lastTime = 0;
+  function animate(time) {
+    const dt = time - lastTime;
+    lastTime = time;
+
+    // Clear with gradient water
+    const bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+    bgGrad.addColorStop(0, '#1a5276');
+    bgGrad.addColorStop(1, '#0e2f44');
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, W, H);
+
+    // Water surface sparkles
+    ctx.fillStyle = 'rgba(255,255,255,0.1)';
+    for (let i = 0; i < 50; i++) {
+      ctx.fillRect(Math.random() * W, Math.random() * H, 1, 1);
+    }
+
+    // Animated caustics
+    drawCaustics();
+
+    // Update and draw lily pads
+    for (const pad of lilyPads) {
+      drawLilyPad(pad);
+    }
+
+    // Update fish
+    for (const fish of koi) {
+      updateFish(fish, time * 0.001);
+      drawFishWithRibbons(fish, time * 0.001);
+    }
+
+    // Surface points
+    drawSurfacePoints(time * 0.001);
+
+    // Ripples
+    drawRipples(time * 0.001);
+
+    // Dragonflies
+    for (let i = dragonflies.length - 1; i >= 0; i--) {
+      const d = dragonflies[i];
+      d.x += d.vx;
+      d.y += d.vy;
+      d.wingPhase += 0.02;
+
+      // Bounce off edges
+      if (d.x < 0 || d.x > W) d.vx *= -1;
+      if (d.y < 0 || d.y > H) d.vy *= -1;
+
+      drawDragonfly(d, time * 0.001);
+
+      // Occasionally land
+      if (Math.random() < 0.005 && d.y > H - 80) {
+        // Stay still briefly
+        d.vx *= 0.9;
+        d.vy *= 0.9;
+      }
+      if (Math.random() < 0.002) {
+        d.vx = (Math.random() - 0.5) * 1.5;
+        d.vy = (Math.random() - 0.5) * 1.5;
+      }
+    }
+
+    requestAnimationFrame(animate);
+  }
+
+  requestAnimationFrame(animate);
+})();
+</script>
+</body>
+</html>

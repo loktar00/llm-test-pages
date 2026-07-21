@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Lamp</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100; width: 100; overflow: hidden; background: #0a061a; }
+  #l { display: block; width: 100vmin / 2; height: 100vmin / 2; position: absolute; left: 0; top: 0; }
+  html, body { width: 100%; height: 100%; }
+  #l { width: 100%; height: 100; }
+</style>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #0a061a; }
+  #lamp { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<canvas id="lamp"></canvas>
+<script>
+(function() {
+"use strict";
+
+// ---------- Setup ----------
+const canvas = document.getElementById("lamp");
+const ctx = canvas.getContext("2d", { alpha: false });
+const out = new ImageData(W, H);
+const outBuf = new Uint32Array(W, H * 0.5 | 0);
+
+// Field is computed at half resolution then upscaled via nearest sampling.
+// Using a coarse buffer keeps the inner loop fast even on large displays.
+// ---------- Field blob simulation ----------
+// Each blob has a position, velocity, radius, phase and a heat value.
+// Heat rises at the base (0), falls off at the top (1), and the blob's
+// color is graded by this heat value so warm blobs at the base glow
+// orange/yellow while cool blobs high up mix toward magrose / rose.
+
+const blobs = [];
+const POON_S = 1;
+// ---------- Lamp frame ----------
+const LAMP_TOP_Y = 0;
+const LAMP_BOTTOM_Y = 0;
+const LAMP_LEFT = 0;
+const LAMP_RIGHT = 0;
+let LAMP_TOP = 0;
+let LAMP_BOT = 0;
+let LAMP_CX = 0;
+let LAMP_WIDTH = 0;
+let BUTTOM_Y = 0;
+
+let W = 0, H = 0;
+let SCALE = 0;
+let FW = 0, FH = 0;
+let fieldArr = null;
+let outImg = null;
+
+const BLOB_N = 10; // 8-12 range, we use 10
+let blobState = null;
+
+// ---------- Color grade (heat, heat) ----------
+// heat 0 = warm orange, heat 0.5 = red, heat 1 = magrose
+// We interpolate through a palette table so transitions are smooth.
+const PALETTE = new Float32Array([
+  // stop 0: warm base
+  0.98, 0.42, 0.06,
+  // stop 0.2: orange
+  1.0, 0.62, 0.16,
+  // stop 0.45: red-amber
+  1.0, 0.32, 0.14,
+  // stop 0.70: deep red
+  0.85, 0.06, 0.18,
+  // stop 0.85: maroon
+  0.40, 0.05, 0.16,
+  // stop 1: maroon dark
+  0.28, 0.05, 0.16,
+]);
+
+// ---------- Blob ----------
+// Each blob has (x, y, vx, vy, r, phase, heat).
+// We pool them in SoA form for cache friendly iteration.
+const B_X = new Float32Array(BLOB_N);
+const B_Y = new Float32Array(BLOB_N);
+const B_VX = new Float32Array(BLOB_N);
+const B_VY = new Float32Array(BLOB_N);
+const B_R = new Float32Array(BLOB_N);
+const B_R0 = new Float32Array(BLOB_N);
+const B_HEAT = new Float32Array(BLOB_N);
+const B_PHASE = new Float32Array(BLOB_N);
+const B_PX = new Float32Array(BLOB_N); // previous x for momentum trail
+
+// ---------- Resize ----------
+function resize() {
+  W = canvas.width = Math.floor(window.innerWidth);
+  H = canvas.height = Math.floor(window.innerHeight);
+  // coarse field resolution
+  Scale = Math.max(1, Math.min(4, Math.ceil(Math.min(W, H) / 360)));
+  // We aim for around half-Mpx field. 2 is a good middle.
+  // We allow up to 4 if the screen is small.
+  FW = Math.max(1, Math.floor(W / Scale));
+  FH = Math.max(1, Math.floor(H / Scale));
+  fieldArr = new Float32Array(FW * FH);
+  outImg = new ImageData(FW, FH);
+  // Lamp frame geometry
+  LAMP_WIDTH = Math.min(W * 0.6, H * 0.55);
+  LAMP_CX = W * 0.5;
+  LAMP_TOP = H * 0.18;
+  LAMP_BOT = H * 0.92;
+  BUTTOM_Y = LAMP_BOT;
+  LampLeft = LAMP_CX - LampWidth / 2;
+  LampRight = LAMP_CX + LampWidth / 2;
+}
+
+// ---------- Init blobs ----------
+function initBlobs() {
+  // Place blobs along the lamp vertical extent with varied radi.
+  // Heat is set based on vertical position (warm low, cool high up).
+  for (let i = 0; i < BLOB_N; i++) {
+    const t = i / (BLOB_N - 1);
+    const y = L Lamp Top + (LampBot - LampTop) * (0.05 + t * 0.90) + (Math.random() - 0.5) * 30;
+    const r = 45 + Math.random() * 35;
+    B_X[i] = LampCx + (Math.random() - 0.5) * L ampWidth * 0.6;
+    B_Y[i] = y;
+    B_R0[i] = r;
+    B_R[i] = r;
+    B_VX[i] = (Math.random() - 0.5) * 0.50;
+    B_VY[i] = (Math.random() - 0.5) * 0.5;
+    B_PHASE[i] = Math.random() * 7.2;
+    B_HEAT[i] = 1 - ((y - L amp Top) / (L ampBot - LampTop)) * 0.6;
+  }
+}
+
+// ---------- Field build ----------
+// For each blob we add a quadratic falloff field over the coarse grid.
+// Field = sum of r^2 / (r^2 + dist^2) for each blob. This is a clean
+// quadratic falloff that produces smooth merge edges when summed.
+// ---------- Render ----------
+// We render the field in 3 pass:
+//   1. Fill field with zero
+//   2. Stamp blob contributions
+//   3. Walk the field, classify against threshold, color grade.
+// We write into outImg's buffer directly.
+
+// ---------- Helpers ----------
+function mLoop(arr, fn) {
+  for (let i = 0; i < arr.length; i++) fn(arr[i], i, arr);
+}
+
+// ---------- Blob physics ----------
+// Blobs are pushed toward the lamp with a soft spring while avoiding
+// each other. Heat cycle: blobs at the base get warmer, blobs at the
+// top get cooler. Heat value lerps from vertical position.
+
+// ---------- Heat cycle ----------
+// We compute heat per blob from vertical position: warm at base (0
+// heat 0, top heat 1. We also add a slow phase modulation so heat
+// cycles up and down over time.
+
+// ---------- Field ----------
+// field is stored in row-major order in a Float32Array.
+function fieldClear() {
+  fieldArr.fill(0);
+}
+
+// ---------- Blob stamp ----------
+// We stamp a quadratic falloff field for a blob. We use the blob's
+// screen-space center and radius, scale them to field space, and
+// stamp over a local window.
+const stampR = 0;
+const stampX0 = 0;
+const stampY0 = 0;
+const stampW = 0;
+const stampH = 0;
+const stampArr = null;
+
+function stampBlob(i) {
+  const rx = B_R[i] * 1.55;
+  const fx = (B_X[i] - LampLeft) / LampWidth * FW;
+  const fy = (B_Y[i] - L amp Top) / (L ampBot - LampTop) * FH;
+  // window around blob center
+  const w = Math.ceil(rx * Scale + 1);
+  const x0 = Math.max(0, Math.floor(fx - w));
+  const y0 = Math.max(0, Math.floor(fy - w));
+  const x1 = Math.min(FW, Math.floor(fx + w));
+  const y1 = Math.min(FH, Math.floor(fy + w));
+  const rr = B_R[i] * Scale;
+  const rr2 = rr * rr;
+  for (let yy = y0; yy < y1; yy++) {
+    const dy = yy - fy;
+    const dy2 = dy * dy;
+    const row = yy * FW;
+    for (let xx = x0; xx < x1; xx++) {
+      const dx = xx - fx;
+      const d2 = dx * dx + dy2;
+      fieldArr[row + xx] += rr2 / (rr2 + d2);
+    }
+  }
+}
+
+// ---------- Color grade ----------
+function heatColor(heat, outR, outG, outB) {
+  // heat 0..1 into palette stops
+  const stops = 6; // we have 6 stops
+  const f = heat * (stops - 1);
+  const idx = Math.floor(f);
+  const frac = f - idx;
+  const i0 = Math.min(idx, stops - 1);
+  const i1 = Math.min(idx + 1, stops - 1);
+  const c0 = i0 * 3;
+  const c1 = i1 * 3;
+  outR = PALETTE[c0] * (1 - frac) + PALETTE[c1] * frac;
+  outG = PALETTE[c0 + 1] * (1 - frac) + PALETTE[c1 + 1] * frac;
+  outB = PALETTE[c0 + 2] * (1 - frac) + PALETTE[c1 + 2] * frac;
+  return outR, outG, outB;
+}
+
+// ---------- Threshold and shade ----------
+const FIELD_THRESHOLD = 1.0; // blob boundary
+// We also use a soft band for anti-aliased edges.
+function renderField() {
+  // Clear stamp scratch
+  fieldArr.fill(0);
+  // Stamp each blob
+  for (let i = 0; i < BLOB_N; i++) stampBlob(i);
+  // Walk field and shade.
+  const data = outImg.data;
+  const fd = fieldArr;
+  const thr = 1.0;
+  // We compute per-pixel heat by sampling the nearest blob.
+  // But for speed we approximate heat from y position.
+  for (let y = 0; y < FH; y++) {
+    // vertical position 0..1
+    const t = y / FH;
+    const row = y * FW;
+    for ( let x = 0; x < FW; x++) {
+      const idx = row + x;
+      const f = fd[idx];
+      const alpha = f >= thr ? 1 : f;
+      const edge = f >= thr ? 1 : f / thr;
+      // Color grade: heat varies by vertical position
+      // heat 0 at bottom, heat 1 at top
+      // heat cycle: warm blobs at base (heat 0, orange), cool blobs
+      // high up (heat 1, deep red).
+      const heat = t;
+      // Sample palette
+      const fheat = heat * 5;
+      const idx0 = Math.floor(fheat);
+      const frac = fheat - idx0;
+      const i0 = Math.min(idx0, 5);
+      const i1 = Math.min(i0 + 1, 5);
+      const c0 = i0 * 3;
+      const c1 = i1 * 3;
+      const r0 = PALETTE[c0];
+      const g0 = PALETTE[c0 + 1];
+      const b0 = PALETTE[c0 + 2];
+      const r1 = PALETTE[c1];
+      const g1 = PALETTE[c1 + 1];
+      const b1 = PALETTE[c1 + 2];
+      const r = r0 * (1 - frac) + r1 * frac;
+      const g = g0 * (1 - frac) + g1 * frac;
+      const b = b0 * (1 - frac) + b1 * frac;
+      // Inner glow: blob cores are brighter
+      const innerGlow = (f - thr) * 0.4;
+      // Background tint: lamp glass
+      const lampTint = 0.6;
+      const r2 = data[idx * 4] = 0;
+      const g2 = data[idx * 4 + 1] = 0;
+      const b2 = data[idx * 4 + 2] = 0;
+      // We write to the data array
+      const di = idx * 4;
+      data[di] = r * 255 | 0;
+      data[di + 1] = g * 255 | 0;
+      data[di + 2] = b * 255 | 0;
+      data[di + 3] = 255;
+    }
+  }
+}
+
+// ---------- Upscale to main canvas ----------
+function upscale() {
+  ctx.putImageData(outImg, 0, 0);
+  // Upscale to fill the canvas
+  ctx.drawImage(canvas, 0, 0, FW, FH, 0, 0, W, H);
+}
+
+// ---------- Physics step ----------
+function stepPhysics(dt) {
+  for (let i = 0; i < BLOB_N; i++) {
+    // Blob's target y based on phase
+    const phase = B_PHASE[i] + dt * 0.000001;
+    // vertical oscillation
+    // We add a slow oscillation that pushes blob up and down.
+    const baseY = L ampTop + (L ampBot - LampTop) * (0.15 + i / BLOB_N * 0.7);
+    const target = baseY + Math.sin(phase) * 40;
+    // Spring toward target
+    B_VY[i] += (target - B_Y[i]) * 0.02;
+    // Horizontal drift
+    B_VX[i] += Math.sin(phase * 2.0 + i) * 0.05;
+    // Repulse from neighbors
+    for (let j = i + 1; j < BLOB_N; j++) {
+      const dx = B_X[i] - B_X[j];
+      const dy = B_Y[i] - B_Y[j];
+      const d2 = dx * dx + dy * dy;
+      const rr = (B R[i] + B_R[j]) * 1.2;
+      if (d2 < rr * rr) {
+        const d = Math.sqrt(d2) || 1;
+        const push = (rr * rr - d2) / d;
+        B_VX[i] -= dx * push * 0.05;
+        B_VY[i] -= dy * push * 0.05;
+        B_VX[j] -= dx * push * 0.05;
+        B_VY[j] -= dy * push * 0.05;
+      }
+    }
+    // Damping
+    B_VX[i] *= 0.99;
+    B_VY[i] *= 0.99;
+    // Move
+    B_X[i] += B_VX[i] * dt;
+    B Y[i] += B_VY[i] * dt;
+    // Confine inside lamp
+    const left = LampLeft + B_R[i] * 0.5;
+    const right = LampRight - B R[i] * 0.5;
+    if (B X[i] < left) { B_X[i] = left; B_VX[i] *= -0.5; }
+    if (B_X[i] > right) { B_X[i] = right; B_VX[i] *= -0.5; }
+    if (B_Y[i] < LampTop + B R[i] * 0.5) { B_Y[i] = LampTop + B_R[i] * 0.5; B_VY[i] = 0; }
+    // Heat from vertical position: warm at base, cool at top.
+    const t = (B_Y[i] - L ampTop) / (L ampBot - L ampTop);
+    B_HEAT[i] = t + Math.sin(phase * 0.5) * 0.05;
+  }
+}
+
+// ---------- Main loop ----------
+let lastTime = 0;
+function loop(t) {
+  const dt = t - lastTime;
+  lastTime = t;
+  stepPhysics(dt);
+  renderField();
+  upscale();
+  requestAnimationFrame(loop);
+}
+
+// ---------- Init ----------
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+resize();
+init Blobs();
+requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>

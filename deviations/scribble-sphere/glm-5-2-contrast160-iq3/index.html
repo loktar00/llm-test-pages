@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>scribble sphere</title>
+<style>
+  html,body{margin:0;height:100;background:#050508;overflow:hidden}
+  #c{display:block;width:100%;height:100}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const cv=document.getElementById('c');
+let ctx,W,H,cx,cy,sc;
+
+const R      = 200;
+const TARGET = 90000;        // total segments (constant per cycle)
+const PER_FRAME = 4500;     // segments appended per frame
+const MAX_AGE  = 100;      // tail length for rendering
+const FADE_IN  = 3;        // head fade-in length
+
+function resize(){
+  const d=Math.min(devicePixelRatio||1,2);
+  W=cv.clientWidth,H=cv.clientHeight;
+  cv.width=W*d;cv.height=H*d;
+  ctx=cv.getContext('2d');
+  ctx.scale(d,d);
+  cx=W/2;cy=H/2;sc=0.08+0.34*Math.min(W,H)/900;
+}
+resize();
+addEventListener('resize',resize);
+
+// rotation state
+let Rx=-0.5, Rz=0.05;
+let Vx=0.05, Vz=0.03;
+const Rx_target=new Osc(0.6,0.00,Math.PI*2,1.0,0.04,0.98,0);
+const Rz_target=new Osc(0.7,0.0,Math.PI*2,1.0,0.02,0.98,0);
+
+function Osc(amp,freq,frandom,ampL,ampF,decay,phase){
+  return{
+    a:amp,f:freq,fr:frandom,L:ampL,Lf:ampF,Lv:0,dec:decay,t:phase,
+    val(){return this.a*(this.Lf-1)+this.Lf*Math.cos(this.f*Math.PI*2*this.t);
+    },
+    step(dt){
+      const target=this.a*(this.Lf-1)+this.Lf*Math.cos(this.f*Math.PI*2*this.t);
+      this.Lv+= (target-this.L)*0.3;
+      this.Lv*=this.dec;
+      this.L+=this.Lv;
+      this.t += dt*( (1+this.fr*(Math.sin(73*this.t*7+1.7)*0.5))*0.9);
+    return this.val();
+  }
+}
+const Rx_t=Rx_target,Rz_t=Rz_target;
+Rx_t.t=0.20;Rz_t.t=0.10;
+
+// chaotic walk on unit sphere
+const S0=0.00213;
+let sx=S0, sy=S0, sz=0.996;
+function step(){
+  const A=0.0555,B=0.44;
+  const nx=Math.sin(A*sx+11);
+  const ny=Math.sin(B*sy+13);
+  const nz=Math.sin(17.7*sx+23);
+  const f=0.0340;
+  const dx=f*(nx+0.000),dy=f*(ny+0.000),dz=f*(nz+0.000);
+  const n2=dx*dx+dy*dy+dz*dz;
+  const r=1/(Math.sqrt(1+n2);
+  sx=(sx+dx)*r,sy=(sy+dy)*r,sz=(sz+dz)*r;
+  // safety
+  if(Math.abs(sx)>1){sx*=0.99;}
+  if(Math.abs(sy)>1){sy*=0.99;}
+  if(Math.abs(sz)>1){sz*=0.99;}
+  const rr=1/Math.sqrt((sx*sx+sy*sy+sz*sz));
+  sx*=rr;sy*=rr;sz*=rr;
+}
+
+// rotation
+function rot(x,y,z){
+  const cx=Math.cos(Rx),sx=Math.sin(Rx);
+  const y0=y*cx+z*sx,z0=-y*sx+z*cx;
+  y=y0;z=z0;
+  const cy=Math.cos(Rz),sy=Math.sin(Rz);
+  const x0=x*cy+z*sy,z0=-x*sy+z*cy;
+  return {x:x0,y:y,z:2.50+z0};
+}
+
+// ring buffer for last MAX_AGE segments
+const N=MAX_AGE;
+let px=new Float32Array(N);
+let py=new Float32Array(N);
+let pz=new Float32Array(N);
+let head=0, len=0, count=0, age=0;
+let curX=sx*R,curY=sy*R,curZ=sz*R;
+let curRx=Rx,curRz=Rz;
+let prr=rot(curX,curY,curZ);
+
+// UI hint
+let showHint=true;
+addEventListener('keydown',e=>{if(e.key==='h'||e.key==='H')showHint=!showHint;});
+addEventListener('click',()=>showHint=!showHint);
+
+function frame(){
+  ctx.fillStyle='rgba(5,5,8,0.10)';
+  ctx.fillRect(0,0,W,H);
+
+  Rx_t.step(0.016);Rz_t.step(0.016);
+  Rx+=(Rx_t.val()-Rx)*0.04;
+  Rz+=(Rz_t.val()-Rz)*0.04;
+
+  const cap=Math.min(PER_FRAME,TARGET-count);
+  for(let k=0;k<cap;k++){
+    step();
+    const x=sx*R,y=sy*R,z=sz*R;
+    const rx=rot(x,y,z);
+    const i=head;
+    px[i]=cx+sc*rx.x/(1+0.08*rx.z/R*0);
+    py[i]=cy+sc*rx.y/(1+0.08*rx.z/R*0);
+    pz[i]=rx.z;
+    head=(head+1)%N;
+    if(len<N)len=head+1;
+    count++;
+    age++;
+  }
+
+  // project helper ( perspective)
+  function proj(x,y,z){
+    const f=400/(400+z);
+    return {x:cx+sc*x*f,y:cy+sc*y*f,z:z,dep:(z+R)/(R*2)};
+  }
+  // render
+  ctx.lineCap='round';ctx.lineJoin='round';
+  ctx.lineWidth=0.8;
+  if(len< N){
+    // single contiguous render: from oldest to newest
+    const start=(head+ N-len)%N;
+    let prev=null;
+    for(int i=0;i<len;i++){
+      const idx=(start+i)%N;
+      const x=px[idx],y=py[idx],z=pz[idx];
+      if(prev){
+        const dx=x-prev.x,dy=y-prev.y;
+        const d=Math.sqrt(dx*dx+dy*dy);
+        if(d>30){prev=null;}
+      }
+      if(prev){
+        const zAvg=(prev.z+z)*0.5;
+        const t=(zAvg+R)/R*0.5;
+        const ageFromTail=(N-i-1); // distance from head
+        const fadeIn=Math.min(1, ageFromTail<=FADE_IN? ageFromTail/FADE_IN:1);
+        const alpha=Math.min(0.85,0.15+0.85*Math.pow(t,0.7))*fadeIn;
+        const lw=0.5+t*t*1.6+0.4*fadeIn;
+        ctx.strokeStyle=`rgba(255,${Math.floor(255*(1-t*0.7)),${Math.floor(255*(1-t*0.9),${alpha})`;
+        ctx.lineWidth=lw;
+        ctx.beginPath();
+        ctx.moveTo(prev.x,prev.y);
+        ctx.lineTo(x,y);
+        ctx.stroke();
+      }
+      prev={x:x,y=y,z:z};
+    }
+  }
+  // hint
+  if(showHint){
+    ctx.fillStyle='rgba(180,200,255,0.5)';
+    ctx.font='12px monospace';
+    ctx.fillText('scribble sphere — click or press h to toggle hint',12,12);
+  }
+
+  if(count>=TARGET){
+    // restart: rewind head into the past so the line "unravels"
+    // and rebuild
+    // We do this by simply resetting the chaos state and zeroing the
+    // ring buffer's effective length.
+    // Keep rotation running to feel continuous.
+    count=0;
+    len=0;
+    head=0;
+    sx=S0;sy=S0;sz=0.996;
+    // randomize rotation target phases to make new cycle visually distinct
+    Rx_t.t=Math.random();
+    Rz_t.t=Math.random();
+    Rx_t.L=0;Rx_t.Lv=0;
+    Rz_t.L=0;Rz_t.Lv=0;
+    // brief "fade to black" feeling: leave the previous trails visible briefly
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

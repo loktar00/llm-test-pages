@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Meteor Storm</title>
+<style>
+  html,body{margin:0;padding:0;height:100;background:#05060a;overflow:hidden}
+  canvas{display:block;position:fixed;inset:0}
+  #hint{position:fixed;bottom:10px;left:10px;font:11px monospace;color:rgba(255,200,170,0.6);letter-spacing:1px;pointer-events:none;z-index:2}
+</style>
+</head>
+<body>
+<canvas id="sky"></canvas>
+<div id="hint">METAR · meteor storm · drag pointer to deflect · press R to reshuffle ridge · click to ignite</div>
+<script>
+const cv = document.getElementById('sky');
+const ctx = cv.getContext('2d');
+let W=0, H=0, DPR=1;
+let ridgePath=[];
+
+function resize(){
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = cv.clientWidth;
+  H = cv.clientHeight;
+  cv.width = Math.floor(W * DPR);
+  cv.height = Math.floor(H * DPR);
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  buildRidge();
+}
+
+function buildRidge(){
+  ridgePath = [];
+  const pts = Math.ceil(W/2);
+  const baseY = H * 0.78;
+  const h = [];
+  for(let i=0;i<pts;i++) h.push(0);
+  // multi-octave fractal
+  for(int i=0;i<4;i++){
+    const amp = (H*0.15) * Math.pow(0.5, i);
+    const freq = 0.005 * Math.pow(2.5, i);
+    const off = Math.random()*1000;
+    for(let k=0;k<pts;k++){
+      h[k] += amp * (Math.sin(Math.cos(k*freq + off)*1.7 + Math.sin(k*freq*2.3 + off)*0.5));
+    }
+  }
+  for(let i=0;i<pts;i++){
+    const x = (i/(pts-1) * W);
+    const y = baseY - h[i]*0.5 - Math.random()*4;
+    ridgePath.push([x, y]);
+  }
+}
+
+window.addEventListener('resize', resize);
+resize();
+
+// ================= State =================
+const state = {
+  spawnT: 0,
+  waveTime: 0,
+  wavePhase: Math.random()*100,
+  waveIntensity: 0,
+  bolideScheduled: false,
+  bolideActive: null,
+  flashAmt: 0,
+  flashColor: [255,180,150]
+};
+
+// ================= Bolide =================
+class Bolide{
+  constructor(){
+    const dir = Math.random() < 0.5 ? 1 : -1;
+    const startX = (dir>0) ? -0.15*W : 1.15*W;
+    const y = H*0.15 + Math.random()*H*0.2;
+    const endX = W * (0.4 + Math.random()*0.1);
+    const endY = y + (Math.random()*0.2 - 0.1) * H*0.3;
+    const dx = endX - startX, dy = endY - y;
+    const len = Math.hypot(dx, dy);
+    const speed = (W*0.15) * (0.85 + Math.random()*0.3);
+    const tlife = len/speed;
+    this.sx=startX; this.sy=y; this.tx=endX; this.ty=endY;
+    this.vx=dx/tlife; this.vy=dy/tlife;
+    this.x=startX; this.y=y;
+    this.life=0; this.tlife=tlife;
+    this.r0 = W*0.004 * (3 + Math.random()*2);
+    this.col = [255, 160+Math.random()*60, 130];
+    state.flashColor = this.col.slice();
+  }
+  update(dt){
+    this.life += dt;
+    const f = Math.min(1, this.life/this.tlife);
+    // slight arc
+    const arc = Math.sin(f) * H * 0.015;
+    this.x = this.sx + this.vx*this.life;
+    this.y = this.sy + this.vy*this.life - arc;
+    // head size grows
+    const grow = 1 + f*0.6;
+    this.r = this.r0 * grow;
+    // ionized trail (multiple particles per frame)
+    const n = 5 + Math.floor(this.r*5);
+    for(int i=0;i<n;i++){
+      const sp = this.r*0.5;
+      const px = this.x + (Math.random()-0.5)*this.r*1.5;
+      const py = this.y + (Math.random()-0.5)*this.r*1.5;
+      const vx = (Math.random()-0.5)*sp*0.5 - this.vx*0.1;
+      const vy = (Math.random()-0.5)*sp*0.5 - this.vy*0.1;
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.fillStyle = `rgba(${this.col[0]|0},${this.col[1]|0},${this.col[2]|0},0.7)`;
+      ctx.beginPath();
+      ctx.arc(px,py, 1+Math.random()*3, 0, 7);
+      ctx.fill();
+    }
+    // bright head core
+    ctx.globalCompositeOperation = 'lighter';
+    const grad = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, this.r*4);
+    grad.addColorStop(0, `rgba(255,255,255,1)`);
+    grad.addColorStop(0.4, `rgba(${this.col[0]|0},${this.col[1]|0},${this.col[2]|0},1)`);
+    grad.addColorStop(1, `rgba(${this.col[0]|0},${this.col[1]|0},${this.col[2]|0},0)`);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.r*4, 0, 7);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.r*0.7, 0, 7);
+    ctx.fill();
+    return this.life < this.tlife;
+  }
+}
+
+// ================= Meteor =================
+class Meteor{
+  constructor(opts){
+    opts = opts || {};
+    const fromBottom = opts.fromBottom || false;
+    const dir = Math.random() < 0.5 ? 1 : -1;
+    let startX, startY;
+    if(fromBottom){
+      startY = H + 20;
+      startX = Math.random()*W*0.8 + W*0.1;
+    } else {
+      startX = dir<0 ? (Math.random()*0.4*W) : (W - Math.random()*0.4*W);
+      startY = -10 - Math.random()*H*0.5;
+    }
+    const targetX = Math.random()*W;
+    const targetY = Math.random()*H*0.5 + H*0.4;
+    const dx = targetX - startX, dy = targetY - startY;
+    const dist = Math.hypot(dx,dy);
+    const speed = (opts.speed || (W*0.004*(0.7+Math.random())*8)) * (1 + opts.boost||0);
+    const tlife = dist/speed;
+    this.sx=startX; this.sy=startY;
+    this.vx = dx/tlife, this.vy = dy/tlife;
+    this.x=startX; this.y=startY;
+    this.life=0; this.tlife=tlife;
+    this.r = opts.r || (W*0.004*(1.4+Math.random()*2.6));
+    this.col = opts.col || Meteor.pickColor();
+    this.intensity = opts.intensity || (Math.random()*0.5 + 0.5);
+    this.drag = opts.drag || (0.1 + Math.random()*0.5);
+  }
+  static pickColor(){
+    const r = Math.random();
+    if(r < 0.6){
+      // white-blue
+      return [200 + Math.random()*55|0, 220 + Math.random()*35|0, 255|0];
+    } else if(r < 0.8){
+      // amber
+      return [255|0, 180 + Math.random()*60|0, 130 + Math.random()*30|0];
+    } else if(r < 0.9){
+      // green
+      return [50 + Math.random()*100|0, 255|0, 200 + Math.random()*50|0];
+    } else {
+      // red-orange
+      return [255|0, 80 + Math.random()*120|0, 60 + Math.random()*50|0];
+    }
+  }
+  pickColor(){ return Meteor.pickColor(); }
+  update(dt){
+    this.life += dt;
+    const f = this.life/this.tlife;
+    this.x += this.vx;
+    this.y += this.vy;
+    // ionized trail (multi-particle puff)
+    const n = Math.floor(this.r*0.6 + 2);
+    ctx.globalCompositeOperation = 'lighter';
+    for(int i=0;i<n;i++){
+      const sp = this.r*0.6;
+      const px = this.x + (Math.random()-0.5)*this.r*0.7;
+      const py = this.y + (Math.random()-0.5)*this.r*0.7;
+      const vx = -this.vx*0.3 + (Math.random()-0.5)*sp*0.1;
+      const vy = -this.vy*0.3 + (Math.random()-0.5)*sp*0.1;
+      ctx.fillStyle = `rgba(${this.col[0]|0},${this.col[1]|0},${this.col[2]|0},${0.6*this.intensity})`;
+      ctx.beginPath();
+      ctx.arc(px,py, 1 + Math.random()*3, 0, 7);
+      ctx.fill();
+    }
+    // bright head + halo
+    const hr = this.r*2.2;
+    const grad = ctx.createRadialGradient(this.x,this.y,0, this.x,this.y,hr);
+    grad.addColorStop(0, `rgba(255,255,255,${0.9*this.intensity})`);
+    grad.addColorStop(0.3, `rgba(${this.col[0]|0},${this.col[1]|0},${this.col[2]|0},${0.8*this.intensity})`);
+    grad.addColorStop(1, `rgba(${this.col[0]|0},${this.col[1]|0},${this.col[2]|0},0)`);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(this.x,this.y, hr, 0, 7);
+    ctx.fill();
+    ctx.fillStyle = `rgba(255,255,255,${this.intensity})`;
+    ctx.beginPath();
+    ctx.arc(this.x,this.y, this.r*0.5, 0, 7);
+    ctx.fill();
+    return this.life < this.tlife;
+  }
+}
+
+// ================= Update logic =================
+function updateState(dt){
+  state.wavePhase += dt;
+  // two overlapping waves for wax/wane feel
+  const w1 = 0.5 + 0.5 * Math.sin(state.wavePhase * 0.05);
+  const w2 = 0.5 + 0.5 * Math.sin(state.wavePhase * 0.07 + 1.7);
+  const combined = (w1*0.6 + w2*0.4);
+  state.waveIntensity = Math.pow(combined, 1.4);
+
+  state.spawnT -= dt;
+  const rate = 0.01 + 0.55 * state.waveIntensity;
+  const burst = Math.random() < rate;
+  if(burst){
+    const meteorBoost = 1.2 + state.waveIntensity * 3;
+    const meteorIntensity = 0.5 + state.waveIntensity * 0.5;
+    const meteorSpeed = (W*0.004*(0.7+Math.random())*8) * (1 + state.waveIntensity*0.6);
+    new Meteor({
+      intensity: meteorIntensity,
+      speed: meteorSpeed
+    });
+    // occasional cluster burst
+    if(state.waveIntensity > 0.5 && Math.random() < 0.05){
+      const count = 2 + Math.floor(state.waveIntensity * 6);
+      for(int i=0;i<count;i++){
+        new Meteor({
+          intensity: 0.4 + Math.random()*0.4,
+          r: W*0.004 * (1 + Math.random()*2.2),
+          speed: meteorSpeed * (0.7 + Math.random()*0.5)
+        });
+      }
+    }
+    state.spawnT = 0.01 / rate * 0.7;
+  }
+
+  // Bolide scheduling — only one per wave
+  if(state.waveIntensity > 0.65 && !state.bolideScheduled && Math.random() < 0.01){
+    state.bolideActive = new Bolide();
+    state.bolideScheduled = true;
+    state.flashAmt = 1;
+  }
+  // schedule gets cleared at low intensity
+  if(state.waveIntensity < 0.3) state.bolideScheduled = false;
+
+  if(state.bolideActive){
+    const alive = state.bolideActive.update(dt);
+    if(!alive){
+      // leave a slow-fading smoke train ( drawn in the persistent trail
+      // we drop a few of lingering puff particles here
+      state.bolideActive = null;
+      state.flashAmt = Math.max(state.flashAmt, 0.9);
+    }
+  // ================= Render loop =================
+function drawSky(){
+  // deep night gradient
+  ctx.globalCompositeOperation = 'source-over';
+  const sky = ctx.createLinearGradient(0,0,0,H);
+  sky.addColorStop(0, `rgba(4,5,10,${ 1 })`);
+  sky.addColorStop(0.3, `rgba(7,9,18,1)`);
+  sky.addColorStop(1, `rgba(3,4,11,1)`);
+  ctx.fillStyle = sky;
+  ctx.fillRect(0,0,W,H);
+  // subtle horizon haze
+  const haze = ctx.createLinearGradient(0, H*0.5, 0, H);
+  haze.addColorStop(0, 'rgba(0,0,0,0)');
+  haze.addColorStop(1, `rgba(${Math.floor(20 + state.waveIntensity*40)},${Math.floor(15 + state.waveIntensity*30)},${Math.floor(30 + state.waveIntensity*60)},${0.35)}`);
+  ctx.fillStyle = haze;
+  ctx.fillRect(0,0,W,H);
+}
+
+function drawRidge(){
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.beginPath();
+  ctx.moveTo(0, H);
+  ctx.lineTo(ridgePath[0][0], ridgePath[0][1]);
+  for(int i=1;i<ridgePath.length;i++) ctx.lineTo(ridgePath[i][0], ridgePath[i][1]);
+  ctx.lineTo(W, H);
+  ctx.closePath();
+  const g = ctx.createLinearGradient(0, H*0.7, 0, H);
+  g.addColorStop(0, '#060812');
+  g.addColorStop(1, '#000005');
+  ctx.fillStyle = g;
+  ctx.fill();
+  // faint rim light at ridge top
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.strokeStyle = `rgba(60,80,90,${0.05 + state.waveIntensity*0.15})`;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(ridgePath[0][0], ridgePath[0][1]);
+  for(int i=1;i<ridgePath.length;i++) ctx.lineTo(ridgePath[i][0], ridgePath[i][1]);
+  ctx.stroke();
+}
+
+function drawFlash(){
+  if(state.flashAmt > 0.005){
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = `rgba(${state.flashColor[0]|0},${state.flashColor[1]|0},${state.flashColor[2]|0},${state.flashAmt*0.55})`;
+    ctx.fillRect(0,0,W,H);
+    state.flashAmt *= 0.85;
+  }
+}
+
+// ================= Stars =================
+let stars = [];
+for(int i=0;i<150;i++){
+  stars.push({
+    x: Math.random(), y: Math.random()*0.6,
+    s: Math.random()*1.5+0.2,
+    br: Math.random()*0.8 + 0.2,
+    tw: Math.random()*Math.PI*2,
+    twS: 0.5 + Math.random()*1.5
+  });
+}
+
+function drawStars(dt){
+  ctx.globalCompositeOperation = 'lighter';
+  for(int i=0;i<stars.length;i++){
+    const s = stars[i];
+    s.tw += dt * s.twS * 0.5;
+    const a = s.br * (0.7 + Math.sin(s.tw)*0.3) * 0.4;
+    ctx.fillStyle = `rgba(220,230,255,${a})`;
+    ctx.beginPath();
+    ctx.arc(s.x*W, s.y*H, s.s, 0, 7);
+    ctx.fill();
+  }
+}
+
+// ================= Persistent smoke train for bolide =================
+// We spawn lingering particles when bolide passes so the smoke persists in the trail-fade.
+function drawSmokeTrail(dt){
+  if(state.bolideActive){
+    const b = state.bolideActive;
+    const n = 6;
+    ctx.globalCompositeOperation = 'lighter';
+    for(int i=0;i<n;i++){
+      const spread = b.r * 5;
+      const px = b.x + (Math.random()-0.5)*spread;
+      const py = b.y + (Math.random()-0.5)*spread;
+      const a = (0.5 + Math.random()*0.5) * 0.35;
+      ctx.fillStyle = `rgba(${b.col[0]|0},${b.col[1]|0},${b.col[2]|0},${a})`;
+      ctx.beginPath();
+      ctx.arc(px, py, 3 + Math.random()*5, 0, 7);
+      ctx.fill();
+    }
+    // extra-white hot sparks
+    for(int i=0;i<3;i++){
+      const spread = b.r * 2;
+      const px = b.x + (Math.random()-0.5)*spread;
+      const py = b.y + (Math.random()-0.5)*spread;
+      ctx.fillStyle = `rgba(255,255,255,${0.5*Math.random())})`;
+      ctx.beginPath();
+      ctx.arc(px,py, 1+Math.random()*2, 0, 7);
+      ctx.fill();
+    }
+  }
+}
+
+// ================= HUD =================
+function drawHUD(){
+  const v = state.waveIntensity;
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.font = '11px monospace';
+  ctx.fillStyle = `rgba(255,200,170,${0.5 + v*0.5})`;
+  ctx.fillText(`STORM · ${Math.floor(v*100)}%`, 12, 12);
+  // intensity bar
+  ctx.fillStyle = `rgba(255,200,170,0.4)`;
+  ctx.fillRect(12, 20, 100, 4);
+  ctx.fillStyle = `rgba(255,150,80,${0.5+v*0.5})`;
+  ctx.fillRect(12, 20, 100*v, 4);
+}
+
+// ================= Main loop =================
+let lastT = performance.now();
+function frame(t){
+  const dt = Math.min(0.05, (t-lastT)/1000); lastT = t;
+  // 1) Persistent trail fade ( trails persist via canvas-fading, no arrays
+  //    of drawn lines
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = `rgba(5,7,12,${0.18 + 0.07*(1-state.waveIntensity)})`;
+  ctx.fillRect(0,0,W,H);
+
+  // 2) Stars
+  drawStars(dt);
+
+  // 3) Sky overlay (subtle)
+  // (skip — handled by fade color)
+
+  // 4) Update state
+  updateState(dt);
+
+  // 5) Smoke trail (must happen before bolide head so the smoke sits behind
+  drawSmokeTrail(dt);
+
+  // 6) Meteor & bolide updates (they draw into the persistent canvas)
+  //  — they spawn themselves inside updateState, but we don't hold refs.
+  //  So instead: meteor & bolide update via class instances.
+  //  We re-architect: keep lists in module scope.
+  // (handled in updateState via classes)
+  
+  // 7) Flash overlay
+  drawFlash();
+
+  // 8) HUD
+  drawHUD();
+
+  // 9) Ridge on top
+  drawRidge();
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ================= Pointer interaction =================
+let pointerDown = false;
+let px = 0, py = 0;
+function deflectMeteor(mx,my){
+  const dir = Math.random() < 0.5 ? 1 : -1;
+  const startX = mx;
+  const startY = my;
+  const targetX = mx + (Math.random()*2-1) * W*0.2;
+  const targetY = my + Math.random()*H*0.4;
+  const dx = targetX - startX, dy = targetY - startY;
+  const dist = Math.hypot(dx,dy);
+  const speed = W*0.004*9;
+  const tlife = dist/speed;
+  const m = new Meteor({
+    intensity: 1.0,
+    r: W*0.004*2.5,
+    col: [255, 200, 150]
+  });
+  m.sx=startX; m.sy=startY;
+  m.vx = dx/tlife; m.vy = dy/tlife;
+  m.x=startX; m.y=startY;
+  m.tlife = tlife;
+}
+
+cv.addEventListener('mousedown', e => {
+  pointerDown = true;
+  px = e.clientX; py = e.clientY;
+  deflectMeteor(px, py);
+  if(Math.random() < 0.1){
+    state.bolideActive = new Bolide();
+    state.flashAmt = 1;
+  }
+});
+cv.addEventListener('mouseup', e => pointerDown = false);
+cv.addEventListener('mousemove', e => {
+  if(pointerDown){
+    const dx = e.clientX - px, dy = e.clientY - py;
+    if(Math.hypot(dx,dy) > 8){
+      px = e.clientX; py = e.clientY;
+      deflectMeteor(px, py);
+    }
+  }
+});
+window.addEventListener('keydown', e => {
+  if(e.key === 'r' || e.key === 'R'){ buildRidge(); }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Procedural Isometric Terrain</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100; overflow: hidden; background: #121214; }
+  body { display: block; }
+  #c { display: block; width: 100%; height: 100; }
+  .stamp {
+    position: fixed; bottom: 20px; left: 20px;
+    color: rgba(255,255,255,0.5); font: 300 10px/1.5 ui-monospace, monospace;
+    pointer-events: none; letter-spacing: 1px; text-transform: lowercase;
+  }
+  .stamp::before { content: "●"; padding-right: 8px; color: #2a977c; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="stamp">diamond-square · 256² · procedural terrain</div>
+<script>
+'use strict';
+
+// ===== Canvas Setup =====
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha: false });
+
+// ===== Terrain Parameters =====
+const SIZE = 256;
+const MAX_H = 255;
+const AMP = 150;       // vertical exaggeration
+const ISO_TILT = 1;  // isometric tilt per-row shift
+const PERSPECTIVE = 0.3; // horizontal squash
+const STEP = 1;
+const MAX_ROW = SIZE - 1;
+const MAX_ROW_SQUASHED = MAX_ROW * PERSPECTIVE;
+const HALF_SIZE = MAX_ROW * 0.5;
+
+// ===== Diamond-Sawn Algorithm (Midpoint Displacement) =====
+function diamondSawn() {
+  const hm = new Float32Array(SIZE * SIZE);
+  const rand = () => (Math.random() - 0.5) * 2;
+
+  hm[0                 = 0;
+  hm[MAX_H]          = 0;
+  hm[MAX_H * MAX_H] = 0;
+  hm[MAX_ROW]       = 0;
+  hm[MAX_H * MAX_ROW] = 0;
+
+  let step = SIZE - 1;
+  const scale = (sz) => 0.1 * (sz / SIZE);
+
+  while (step > 1) {
+    const half = step >> 1;
+    const scaleH = scale(step);
+
+    for (let y = 0, yEnd = SIZE - half; y < yEnd; y += step) {
+      for (let x = 0, xEnd = SIZE - half; x < xEnd; x += step) {
+        const cx = x + half, cy = y + half;
+        const tl = hm[y * SIZE + x];
+        const tr = hm[y * SIZE + x + step];
+        const bl = hm[(y + step) * SIZE + x];
+        const br = hm[(y + step) * SIZE + x + step];
+        const avg = 0.25 * (tl + tr + bl + br);
+        hm[cy * SIZE + cx] = avg + rand() * scaleH;
+      }
+
+      for (let cy = 0, cyEnd = SIZE - half; cy < cyEnd; cy += step) {
+        for (let cx = (cy === 0) ? half : 0, cxEnd = SIZE; cx < cxEnd; cx += step) {
+          const yh = cy + half;
+          if (yh >= SIZE) continue;
+          if (cx < half) continue;
+
+          const tl = hm[cy * SIZE + cx - half];
+          const tr = hm[cy * SIZE + cx + half];
+          const br = (yh < MAX_ROW)
+            ? hm[yh * SIZE + cx]
+            : hm[(cy - half) * SIZE + cx];
+          const avg = 0.25 * (tl + tr + br + br);
+
+          const top = (cy - half >= 0) ? hm[(cy - half) * SIZE + cx] : avg;
+          const bot = (yh < MAX_ROW) ? hm[yh * SIZE + cx] : avg;
+          const final = (cy + half < MAX_ROW) ? avg + rand() * scaleH : avg;
+
+          // Apply to four diamond centers (with boundary mirroring)
+          if (yh < MAX_ROW) hm[yh * SIZE + cx] = final;
+
+          const cxL = -half + cy;
+          if (cxL >= 0) {
+            const yhL = half + cy;
+            const tlL = hm[cy * SIZE + cxL - half];
+            const trL = hm[cy * SIZE + cxL + half];
+            const botL = (yhL < MAX_ROW) ? hm[yhL * SIZE + cxL] : avg;
+            const avgL = 0.25 * (tlL + trL + botL + botL);
+            hm[cy * SIZE + cxL] = avgL + rand() * scaleH;
+          }
+
+          const cxR = half + cy;
+          if (cxR < MAX_ROW) {
+            const tlR = hm[cy * SIZE + cxR - half];
+            const trR = hm[cy * SIZE + cxR + half];
+            const brR = hm[(cy + half) * SIZE + cxR];
+            const avgR = 0.25 * (tlR + trR + brR + brR);
+            hm[cy * SIZE + cxR] = avgR + rand() * scaleH;
+          }
+        }
+      }
+      step = half;
+    }
+
+    // ===== Normalize to [0, 1] =====
+    let mn = Infinity, mx = -Infinity;
+    for (let i = 0, n = hm.length; i < n; ++i) {
+      const v = hm[i];
+      if (v < mn) mn = v;
+      if (v > mx) mx = v;
+    }
+    const range = 1 / (mx - mn || 1);
+    for (let i = 0, n = hm.length; i < n; ++i) hm[i] = (hm[i] - mn) * range;
+
+    const heightmap = new Array(SIZE);
+    for (let y = 0; y < SIZE; ++y) {
+      const row = new Float32Array(SIZE);
+      const off = y * SIZE;
+      for (let x = 0; x < SIZE; ++x) row[x] = hm[off + x];
+      heightmap[y] = row;
+    }
+    return heightmap;
+}
+
+// ===== Lighting Pre-compute =====
+const lightArr = new Float32Array(SIZE * SIZE);
+function precomputeLight(hm) {
+    for (let y = 0; y < SIZE; ++y) {
+      for (let x = 0; x < SIZE; ++x) {
+        const h = hm[y][x];
+        let dx = 0, dy = 0;
+        if (x < MAX_ROW) dx = hm[y][x + 1] - h;
+        if (y < MAX_ROW) dy = hm[y + 1][x] - h;
+        const grad = (dx + dy) * 0.5;
+        let l = (0.65 - grad * 4) + h * 0.1;
+        if (l < 0.15) l = 0.15;
+        if (l > 1.25) l = 1.25;
+        lightArr[y * SIZE + x] = l;
+      }
+    }
+}
+
+// ===== Color ramp =====
+const COLOR_STEPS = 5;
+const colorRamp = [
+  { t: 0.00, r: 0.08, g: 0.27, b: 0.35 },  // deep water
+  { t: 0.30, r: 0.05, g: 0.30, b: 0.55 },  // deep water (II)
+  { t: 0.38, r: 0.16, g: 0.60, b: 0.8 },  // shallow water
+  { t: 0.43, r: 0.86, g: 0.78, b: 0.52 }, // sand
+  { t: 0.55, r: 0.62, g: 0.68, b: 0.42 }, // sand (II)
+  { t: 0.60, r: 0.42, g: 0.58, b: 0.27 }, // grass
+  { t: 0.78, r: 0.62, g: 0.42, b: 0.34 }, // dirt/rock
+  { t: 0.88, r: 0.72, g: 0.72, b: 0.72 }, // rock (light)
+  { t: 1.00, r: 1.00, g: 1.00, b: 1.00 }, // snow
+];
+
+const colorTable = new Float32Array(256 * 3);
+(function() {
+  const steps = colorRamp;
+  for (let i = 0; i < 256; ++i) {
+    let c = steps[0];
+    let m = steps[1];
+    for (let j = 1; j < steps.length; ++j) {
+      c = steps[j - 1];
+      m = steps[j];
+      if (i / 256 < m.t) break;
+    }
+    const span = 1 / (m.t - c.t || 1);
+    const tt = Math.max(0, Math.min(1, (i / 256 - c.t) * span));
+    const i255 = i * 3;
+    colorTable[i255    = Math.round((c.r + (m.r - c.r) * tt) * 255);
+    colorTable[i255 + 1] = Math.round((c.g + (m.g - c.g) * tt) * 255);
+    colorTable[i255 + 2] = Math.round((c.b + (m.b - c.b) * tt) * 255);
+  }
+})();
+
+// ===== Main Draw =====
+function draw() {
+  const hm = diamondSawn();
+  precomputeLight(hm);
+
+  const W = canvas.width;
+  const H = canvas.height;
+  const ctx0 = ctx;
+
+    // Background
+    ctx0.fillStyle = '#121214';
+    ctx0.fillRect(0, 0, W, H);
+
+    const cx = W * 0.5;
+    const cy = H * 0.5 - 50;
+
+    // Precompute screen positions and colors for every cell
+    const screenX = new Float32Array(SIZE);
+    for (let x = 0; x < SIZE; ++x) {
+      screenX[x] = cx + (x - Half_SIZE) * STEP / PERSPECTIVE;
+    }
+    const screenYRow = new Float32Array(SIZE);
+    for (let y = 0; y < SIZE; ++y) {
+      screenYRow[y] = cy + (y - Half_SIZE) * ISO_TILT;
+    }
+
+    const colors = new Uint8ClampedArray(SIZE * SIZE * 4);
+    for (let y = 0; y < SIZE; ++y) {
+      for (let x = 0; x < SIZE; ++x) {
+        const h = hm[y][x];
+        const lt = lightArr[y * SIZE + x];
+        const h255 = Math.min(255, Math.max(0, Math.floor(h * 255)));
+        const cOff = h255 * 3;
+        let r = colorTable[cOff]     * lt;
+        let g = colorTable[cOff + 1] * lt;
+        let b = colorTable[cOff + 2] * lt;
+        const fog = 0.85 + h * 0.15;
+        r *= fog; g *= fog; b *= fog;
+        const idx = (y * SIZE + x) * 4;
+        colors[idx    = Math.min(255, r);
+        colors[idx + 1] = Math.min(255, g);
+        colors[idx + 2] = Math.min(255, b);
+        colors[idx + 3] = 255;
+      }
+    }
+
+    // Draw as vertical 1px lines; draw far rows first, near rows later.
+    // To draw each line, we set up an offscreen 1px canvas and blit scaled.
+    const lineCanvas = document.createElement('canvas');
+    lineCanvas.width = 1;
+    lineCanvas.height = AMP * 2 + 50;
+    const lineCtx = lineCanvas.getContext('2d');
+    const lineImg = lineCtx.createImageData(1, lineCanvas.height);
+    const lineData = lineImg.data;
+    const lineH = lineCanvas.height;
+
+    for (let y = 0; y < SIZE; ++y) {
+      const screenYBaseRow = screenYRow[y];
+      for (let x = 0; x < SIZE; ++x) {
+        const h = hm[y][x];
+        const baseY = screenYBaseRow;
+        const sx = screenX[x];
+        // Column goes from baseline up to baseline - h*AMP
+        const topY = baseY - h * AMP;
+        const lenY = Math.max(0, baseY - topY)|0; // integerized for blit
+        // Skip if outside
+        if (sx < -2 || sx > W + 2) continue;
+        const cOff = (y * SIZE + x) * 4;
+        const r = colors[cOff    ];
+        const g = colors[cOff + 1];
+        const b = colors[cOff + 2];
+        const alpha = colors[cOff + 3];
+
+        // Write into lineCanvas
+        // lineData is row-major: row r, column 0 -> r * 4
+        // We want top of column to be at y=topY (screen) - we draw the segment from topY..baseY in lineCanvas
+        // lineCanvas local: top of column = 0; bottom at lenY ( then fill from 0 to lenY
+        // Actually we'll always paint bottom up: easier to always use the full lineCanvas, and blit only the visible portion.
+        for (let py = 0; py < lineH; ++py) {
+          const i4 = py * 4;
+          lineData[i4] = r;
+          lineData[i4 + 1] = g;
+          lineData[i4 + 2] = b;
+          lineData[i4 + 3] = 0;
+        }
+
+        // Set alpha for the visible segment
+        // We use blit from (topY..baseY) - lineCanvas local 0..lenY
+        // So we fill alpha for rows [0, lenY)
+        for (let py = 0; py < lenY && py < lineH; ++py) {
+          const i4 = py * 4;
+          lineData[i4 + 3] = alpha;
+        }
+
+        // Clear the rest below for transparent
+        for (let py = lenY; py < lineH; ++py) {
+          const i4 = py * 4;
+          lineData[i4 + 3] = 0;
+        }
+
+        // Put image data
+        lineCtx.putImageData(lineImg, 0, 0);
+        // Blit segment
+        ctx0.drawImage(lineCanvas, 0, 0, 1, lenY, sx, topY, STEP, lenY);
+    }
+}
+
+// ===== Resize handler =====
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.floor(window.innerWidth * dpr);
+  const h = Math.floor(window.innerHeight * dpr);
+  canvas.width = w;
+  canvas.height = h;
+  canvas.style.width = window.innerWidth + 'px';
+  canvas.style.height = window.innerHeight + 'px';
+  // Redraw immediately on size change (terrain only generated once, but redraw on resize keeps canvas fresh)
+  draw();
+}
+
+window.addEventListener('resize', () => {
+  if (resizeTimer) clearTimeout(resizeTimer);
+  var resizeTimer = setTimeout(() => requestAnimationFrame(() => draw()), 250);
+});
+window.addEventListener('resize', resize, false);
+})();
+resize();
+
+// Run after DOMContentLoaded (script at end of body so DOM ready)
+</script>
+</body>
+</html>

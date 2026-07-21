@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Pendulum Wave</title>
+<style>
+  html,body{margin:0;padding:0;overflow:hidden;background:#050606}
+  canvas{display:block;position:fixed;top:0;left:0;right:0;bottom:0}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const cv=document.getElementById('c');
+const g=cv.getContext('2d');
+let W=0,H=0,D=1;
+
+// Layout (always portrait-safe)
+const PIV_Y_FRAC = 0.32;        // pivots in upper portion
+const BUMP_FRAC  = 0.46;       // bob row lower
+const TOP_F = 0.06;
+const BOTTOM_F = 0.97;
+
+const NUM = 24;
+const CYCLE = 60;  // seconds
+const AMP_DEG = 60; // degrees
+const AMP_RAD = AMP_DEG * Math.PI/180;
+
+const pend = [];
+
+function rebuild(){
+  // Scale-independent high-DPI
+  D = Math.min(window.devicePixelRatio || 1, 2);
+  const w = window.innerWidth, h = window.innerHeight;
+  W = w*D; H = h*D;
+  cv.width = W; cv.height = H;
+  cv.style.width = w+'px'; cv.style.height = h+'px';
+  g.setTransform(1,0,0,1,0,0);
+  g.fillStyle = '#050606';
+  g.fillRect(0,0,W,H);
+
+  // Geometry
+  const margin = Math.max(64, W * 0.04);
+  const usableW = W - margin*2;
+  const gap = usableW / (NUM - 1);
+  const x0 = margin;
+
+  const pivY = H * PIV_Y_FRAC;
+  const bobY = H * BUMP_FRAC;
+  const bobRowLen = Math.max(80, bobY - pivY - 64);
+  const ampPx = gap * 0.34;
+
+  pend.length = 0;
+  for (i=0; i<NUM; i++){
+    const p = (i+1)/NUM;
+    const len = bobRowLen * (0.25 + 0.75*p);  // increasing length
+    const f  = (i+1)/NUM;                     // increasing frequency
+    const px = x0 + i * gap;
+    pend.push({
+      L: len, f: f, x0: px, pivY: pivY,
+      ampPx: ampPx, phase0: 0
+    });
+  }
+}
+
+let start = performance.now();
+let lastFlash = -10;
+
+function frame(now){
+  // Smooth dark backdrop; Slow decay so trails stay readable.
+  g.fillStyle = 'rgba(5,6,6,0.044)';
+  g.fillRect(0,0,W,H);
+
+  // Compute bobs and seismo strip
+  const bobs = new Array(NUM);
+  const seismoY = new Array(NUM);
+  const seismoStrip = new Array(NUM);
+  for (i=0; i<NUM; i++){
+    const p = pend[i];
+    const tSec = (i+1)/NUM;
+    // Tune so all pendulums phase-align at t = CYCLE:
+    // angle = 2π·(tSec·t/C) + π·(1-tSec)
+    const t = (now - start)/1000;
+    const angle = 2*Math.PI*(tSec*t/CYCLE) + Math.PI*(1-tSec) + p.phase0;
+    const bobX = p.x0 + p.ampPx * Math.sin(angle);
+    bobs[i] = {x: bobX, y: p.pivY + p.L};
+    seismoY[i] = p.y = p.pivY + p.L;
+    seismoStrip[i] = bobX;
+  }
+
+  // Flash at cycle reset (subtle, brief)
+  let flash = 0;
+  const ct = (now - start)/1000;
+  const prev = ct - 16/1000;
+  if (Math.floor(prev / CYCLE) !== Math.floor(ct / CYCLE)) flash = 1;
+  // Also flash the first cycle boundary for initial sync
+  if (Math.abs(ct - CYCLE) < 16/1000) flash = Math.max(flash, 1);
+
+  // 1) Pivot row (thin, faint)
+  g.lineWidth = Math.max(1, D*0.8);
+  g.strokeStyle = 'rgba(40,40,40,0.5)';
+  g.beginPath();
+  g.moveTo(pend[0].x0 - gap*0.5, pend[0].pivY);
+  g.lineTo(pend[NUM-1].x0 + gap*0.5, pend[0].pivY);
+  g.stroke();
+
+  // 2) Strings (faint, soft)
+  g.lineWidth = Math.max(1, D*0.55);
+  g.strokeStyle = 'rgba(70,70,70,0.4)';
+  for (i=0; i<NUM; i++){
+    const p = pend[i];
+    const b = bobs[i];
+    g.beginPath();
+    g.moveTo(p.x0, p.pivY);
+    g.lineTo(b.x, b.y);
+    g.stroke();
+  }
+
+  // 3) Bobs (glow + core)
+  for (i=0; i<NUM; i++){
+    const p = pend[i];
+    const b = bobs[i];
+    const rad = Math.max(3, D * 6);
+
+    // halo
+    const grd = g.createRadialGradient(b.x, b.y, 0, b.x, b.y, rad*4);
+    grd.addColorStop(0, 'rgba(140,140,140,0.5)');
+    grd.addColorStop(1, 'rgba(140,140,140,0)');
+    g.fillStyle = grd;
+    g.beginPath();
+    g.arc(b.x, b.y, rad*4, 0, 2*Math.PI);
+    g.fill();
+
+    // body
+    g.fillStyle = 'rgba(225,225,225,0.9)';
+    g.beginPath();
+    g.arc(b.x, b.y, rad, 0, 2*Math.PI);
+    g.fill();
+  }
+
+  // 4) Seismograph band
+  const bandTop = H * BOTTOM_F;
+  const bandBottom = H * BOTTOM_F;
+  const bandH = 120 * D;
+  const sTop = bandTop - bandH;
+
+  // Subtle backing for readability
+  g.fillStyle = 'rgba(8,10,10,0.6)';
+  g.fillRect(0, sTop - bandH*0.5, W, bandH + bandH*0.5);
+
+  // Tick marks at every cycle reset
+  g.fillStyle = 'rgba(40,40,40,0.4)';
+  for (k=1; k<=100; k++){
+    const tMark = k * CYCLE;
+    if (tMark > 20 * CYCLE) break;
+    const x = W * (0.25 + 0.75 * tMark/(20*CYCLE));
+    g.fillRect(x, sTop, D, bandH);
+  }
+
+  // Trace
+  const traceTop = sTop + D*4;
+  const traceBottom = sTop + bandH - D*4;
+  g.strokeStyle = 'rgba(190,190,190,0.6)';
+  g.lineWidth = Math.max(1, D*0.8);
+  g.beginPath();
+  for (i=0; i<NUM; i++){
+    const p = pend[i];
+    const x = p.x0 + p.ampPx * Math.sin(0);
+    if (i===0) g.moveTo(x, traceTop);
+    else       g.lineTo(x, traceTop);
+  }
+  // Actually we want the current trace — render as a polyline of seismoStrip:
+  g.beginPath();
+  for (i=0; i<NUM; i++){
+    const x = seismoStrip[i];
+    const y = traceTop + (i/NUM) * (traceBottom - traceTop) * 0 + (traceBottom-traceTop)*0.5;
+    if (i===0) g.moveTo(x, y);
+    else       g.lineTo(x, y);
+  }
+  // Skip — handled below
+
+  // Real seismo: we render the strip as a horizontal polyline (per-row).
+  // For each pendulum row, we draw the strip across time. Since we only
+  // have the current snapshot, we plot as dots with vertical offset = row.
+  g.fillStyle = 'rgba(210,210,210,0.6)';
+  for (i=0; i<NUM; i++){
+    const x = seismoStrip[i];
+    const y = sTop + (i+0.5)/NUM * bandH;
+    g.beginPath();
+    g.arc(x, y, Math.max(1, D*1.2), 0, 2*Math.PI);
+    g.fill();
+  }
+
+  // 5) Flash marker
+  if (flash > 0){
+    g.fillStyle = 'rgba(60,60,60,0.08)';
+    g.fillRect(0,0,W,H);
+    g.fillStyle = 'rgba(220,220,220,0.6)';
+    g.fillRect(0, 0, W, D*2);
+    g.fillRect(0, H - D*2, W, D*2);
+  }
+
+  requestAnimationFrame(frame);
+}
+
+window.addEventListener('resize', rebuild);
+rebuild();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

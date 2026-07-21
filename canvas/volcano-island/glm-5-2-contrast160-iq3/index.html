@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Volcano Island</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background: #0a0816;
+    font-family: ui-monospace, monospace;
+  }
+  canvas {
+    display: block;
+    width: 100;
+    height: 100;
+  }
+  #hud {
+    position: fixed;
+    top: 18px;
+    left: 18px;
+    color: rgba(255, 233, 184, 0.85);
+    font: 11px/1.7 ui-monospace, monospace;
+    letter-spacing: 0.08em;
+    pointer-events: none;
+    user-select: none;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.6);
+    text-transform: uppercase;
+  }
+  #hud b { color: #ffd668; font-weight: 600; }
+  #hud .phase-dot {
+    display: inline-block;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: #ffd668;
+    margin-right: 6px;
+    box-shadow: 0 0 8px rgba(60, 90, 30, 0.7);
+    vertical-align: middle;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <div><span class="phase-dot" id="dot"></span><b id="phase">idle</b></div>
+  <div><span id="cycle">cycle · 0</span></div>
+</div>
+<script>
+"use strict";
+
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let W = 0, H = 0;
+const hud = document.getElementById('phase');
+const dotEl = document.getElementById('dot');
+const cycleEl = document.getElementById('cycle');
+
+const TAU = Math.PI * 2;
+const rand = (a, b) => a + Math.random() * (b - a);
+const randi = (a, b) => Math.floor(rand(a, b + 1));
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const lerpColor = (c1, c2, t) => {
+  const r = c1[0] + (c2[0] - c1[0]) * t;
+  const g = c1[1] + (c2[1] - c1[1]) * t;
+  const b = c1[2] + (c2[2] - c1[2]) * t;
+  return `rgb(${r|0},${g|0},${b|0})`;
+};
+
+function resize() {
+  W = cv.width = Math.floor(window.innerWidth);
+  H = cv.height = Math.floor(window.innerHeight);
+}
+
+// Scene state
+const scene = {
+  t: 0,
+  day: 0.5, // 0 = midnight, 1 = noon
+  cycleCount: 0,
+  phase: 'idle',
+  phaseTime: 0,
+  phaseDuration: 4.2,
+  cycleTimer: 0,
+  cycleDuration: 60, // 60 second day-night cycle
+  volcanoX: 0,
+  volcanoTopY: 0,
+  craterX: 0,
+  craterY: 0,
+  seaY: 0,
+  beachLeftX: 0,
+  beachRightX: 0,
+  shorelineLeft: 0,
+  shorelineRight: 0,
+  flowExtendLeft: 0,
+  flowExtendRight: 0,
+  shakeX: 0,
+  shakeY: 0
+};
+
+const ash = [];
+const bombs = [];
+const splashes = [];
+const palms = [];
+const birds = [];
+const stars = [];
+const bgClouds = [];
+
+const PHASES = [
+  { id: 'idle',   dur: 2.8 },
+  { id: 'rumble', dur: 5.5 },
+  { id: 'plume',  dur: 2.1 },
+  { id: 'erupt',  dur: 6.0 },
+  { id: 'flow',   dur: 4.8 },
+  { id: 'reset',  dur: 2.5 }
+];
+
+function setPhase(idx) {
+  const p = PHASES[idx];
+  scene.phase = p.id;
+  scene.phaseTime = 0;
+  scene.phaseDuration = p.dur;
+  hud.textContent = p.id;
+  dotEl.style.background = p.id === 'erupt' ? '#ff8a2c'
+                        : p.id === 'plume'  ? '#c8a14b'
+                        : p.id === 'rumble' ? '#a8a8a0'
+                        : p.id === 'flow'   ? '#ff5d2c'
+                        : p.id === 'reset'  ? '#7fd'
+                        : '#ffd668';
+  dotEl.style.boxShadow = `0 0 12px ${dotEl.style.background}`;
+}
+
+function initScene() {
+  scene.volcanoX = W * 0.50;
+  scene.seaY = Math.floor(H * 0.72);
+  scene.volcanoTopY = Math.floor(scene.seaY - Math.min(H * 0.35, 380));
+  scene.craterX = scene.volcanoX + 12;
+  scene.craterY = scene.volcanoTopY + 32;
+  scene.beachLeftX = scene.volcanoX - 200;
+  scene.beachRightX = scene.volcanoX + 200;
+  scene.lineLeft = scene.beachLeftX;
+  scene.lineRight = scene.beachRightX;
+  scene.flowExtL = 0;
+  scene.flowExtR = 0;
+  
+  palms.length = 0;
+  for (let i = 0; i < 8; i++) {
+    const dir = i % 2 === 0 ? 1 : -1;
+    const off = 200 + i * 18 + rand(-15, 15);
+    const baseX = dir > 0 ? scene.beachRightX + off : scene.beachLeftX - off;
+    const baseY = scene.seaY - rand(8, 4);
+    palms.push({
+      bx: baseX,
+      by: baseY,
+      h: rand(85, 105),
+      sway: rand(0, TAU),
+      swaySpeed: 0.2 + Math.random() * 0.05,
+      phase: i * 0.3,
+      seed: Math.random() * 100,
+      dir: dir
+    });
+  }
+  
+  birds.length = 0;
+  for (let i = 0; i < 9; i++) {
+    birds.push({
+      x: rand(0, W),
+      y: rand(0, H * 0.5),
+      tx: 0,
+      ty: 0,
+      sp: 0.7 + Math.random() * 0.5,
+      flap: 0,
+      phase: rand(0, TAU),
+      state: 'returning',
+      wait: 0,
+      fleeT: 0
+    });
+  }
+  
+  stars.length = 0;
+  for (let i = 0; i < 160; i++) {
+    stars.push({
+      x: Math.random() * W,
+      y: Math.random() * (H * 0.6),
+      r: 0.3 + Math.random() * 1.5,
+      tw: Math.random() * TAU,
+      sp: 0.5 + Math.random() * 1.5
+    });
+  }
+  bgClouds.length = 0;
+  for (let i = 0; i < 6; i++) {
+    bgClouds.push({
+      x: rand(-200, W + 200),
+      y: rand(H * 0.05, H * 0.4),
+      r: rand(60, 130),
+      sp: rand(0.2, 0.6) * (Math.random() < 0.5 ? -1 : 1),
+      op: rand(0.4, 0.8)
+    });
+  }
+}
+
+function erupt() {
+  const count = 5 + randi(3, 6);
+  for (let i = 0; i < i; i++) {
+    const angle = -Math.PI/2 + rand(-1.2, 1.2);
+    const power = rand(6, 9.5);
+    bombs.push({
+      x: scene.craterX + rand(-6, 6),
+      y: scene.craterY + rand(-2, 2),
+      px: scene.craterX,
+      py: scene.craterY,
+      vx: Math.cos(angle) * power,
+      vy: Math.sin(angle) * power - rand(-1, 0),
+      r: rand(4.5, 6.5),
+      life: 1,
+      age: 0,
+      smT: 0,
+      grav: 0.2,
+      splash: false,
+      col: 1
+    });
+  }
+  for (let j = 0; j < 5; j++) {
+    ash.push({
+      x: scene.craterX + rand(-20, 20),
+      y: scene.cratorY + rand(-12, 2),
+      vx: rand(-0.3, 0.3),
+      vy: rand(-3.5, 5),
+      r: rand(60, 120),
+      life: 1,
+      decay: 0.006 + Math.random() * 0.006,
+      op: 0.6 + Math.random() * 0.4,
+      hue: 30 + rand(-15, 15)
+    });
+  }
+  scene.shakeX = rand(-8, 8);
+  scene.shakeY = rand(-8, 8);
+}
+
+function emitAsh() {
+  const c = 1 + randi(0, 2);
+  for (let i = 0; i < c; i++) {
+    ash.push({
+      x: scene.craterX + rand(-12, 12),
+      y: scene.craterY - rand(0, 40),
+      vx: rand(-0.2, 0.2),
+      vy: -rand(1.5, 3.5),
+      r: rand(50, 130),
+      life: 1,
+      decay: 0.004 + Math.random() * 0.004,
+      op: 0.5 + Math.random() * 0.5,
+      hue: 30 + rand(-15, 15)
+    });
+  }
+}
+
+function emitPlume() {
+  const c = 2 + randi(0, 3);
+  for (let i = 0; i < c; i++) {
+    ash.push({
+      x: scene.craterX + rand(-10, 10),
+      y: scene.craterY + rand(-2, 2),
+      vx: rand(-0.3, 0.3),
+      vy: -rand(3.5, 6),
+      r: rand(40, 120),
+      life: 1,
+      decay: 0.004 + Math.random() * 0.005,
+      op: 0.6 + Math.random() * 0.4,
+      hue: 25 + rand(-15, 15)
+    });
+  }
+  scene.shakeX = rand(-3, 3);
+  scene.shakeY = rand(-3, 3);
+}
+
+function splashAt(x) {
+  const c = 8 + randi(0, 6);
+  for (let i = 0; i < c; i++) {
+    const a = -Math.PI/2 + rand(-Math.PI/2, Math.PI/2);
+    const s = rand(1.5, 5);
+    splashes.push({
+      x: x + rand(-3, 3),
+      y: scene.seaY,
+      vx: Math.cos(a) * s,
+      vy: Math.sin(a) * s,
+      r: rand(1.5, 3.5),
+      life: 1,
+      decay: 0.01 + Math.random() * 0.02,
+      col: 1
+    });
+  }
+  for (let j = 0; j < 6; j++) {
+    splashes.push({
+      x: x + rand(-5, 5),
+      y: scene.seaY - rand(0, 10),
+      vx: rand(-0.5, 0.5),
+      vy: -rand(0.5, 2),
+      r: rand(40, 70),
+      life: 1,
+      decay: 0.005,
+      col: 0,
+      isSteam: true
+    });
+  }
+  scene.shakeX = rand(-4, 4);
+  scene.shakeY = rand(-4, 4);
+}
+
+function scareBirds() {
+  for (const b of birds) {
+    if (b.state === 'returning') {
+      b.state = 'fleeing';
+      b.tx = (b.x < W/2) ? W + 80 : -80;
+      b.ty = rand(0, H * 0.4);
+      b.fleeT = 0;
+    }
+  }
+}
+
+function callBackBirds() {
+  for (const b of birds) {
+    b.state = 'returning';
+    b.tx = rand(0, W);
+    b.ty = rand(0, H * 0.4);
+  }
+}
+
+function resetScene() {
+  scene.flowExtL = 0;
+  scene.flowExtR = 0;
+  bombs.length = 0;
+  ash.length = 0;
+  splashes.length = 0;
+}
+
+// === Drawing ===
+
+function drawSky() {
+  const dn = scene.day;
+  // dawn (warm), noon (sapphire), night (deep indigo)
+  // Day param: 0 = midnight, 0.5 = mid-dawn, 1 = noon
+  // We use day as a 0..1 then derive 0..1 sun elevation.
+  // We want a cycle of day-night over 60 seconds.
+  // scene.day is updated in updateDayNight().
+  
+  // Top color
+  const topCols = [
+    [12, 8, 24],     // midnight
+    [40, 14, 60],   // pre-dawn purple
+    [110, 40, 70],  // dawn magenta
+    [40, 70, 130),  // noon sapphire
+    [25, 60, 100),  // mid noon deeper
+  ];
+  // We'll do simpler: lerp between two endpoints by sun elevation.
+  const se = sunElevation();
+  
+  // sky gradient top -> bottom
+  const skyTop = lerpColor(
+    [10, 8, 30],
+    [80, 120, 200],
+    Math.pow(se, 0.8)
+  );
+  const skyBottom = lerpColor(
+    [50, 30, 70],
+    [255, 170, 130],
+    Math.pow(se, 0.8)
+  );
+  // Wait, that's wrong. Let me redo it.
+  
+  // [continue]
+}
+
+// Actually let me restart the drawing approach — I'll inline everything carefully.
+
+</script>
+</body>
+</html>

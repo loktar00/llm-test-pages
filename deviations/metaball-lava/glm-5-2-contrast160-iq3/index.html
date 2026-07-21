@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Metaball Lava Lamp</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100;width:100;overflow:hidden;background:linear-gradient(180deg,#0a0414 0%,#160814 50%,#160408 100);font-family:system-serif;cursor:default}
+#scene{display:block;width:100%;height:100;position:fixed;inset:0;cursor:default}
+</style>
+</head>
+<body>
+<canvas id="scene" aria-label="metaball lava lamp visualization"></canvas>
+<script>
+"use strict";
+const cv = document.getElementById('scene');
+const gl2 = cv.getContext('2d', { alpha: false });
+
+const B = 8; // coarse buffer downscale factor
+let buf, bw, bh;
+
+const COL = {
+  bgDeep: [5, 5, 10],
+  bgMid: 12,
+  baseHot: [255, 70, 20],
+  blobHot: [255, 180, 60],
+  blobMid: [180, 60, 40],
+  blobCool: [120, 30, 30],
+  blobEdge: [255, 220, 220],
+  glow: [255, 160, 120]
+};
+const HEX = { 
+  hot: 'rgba(255,180,60,', 
+  mid: 'rgba(180,60,40,', 
+  cool: 'rgba(120,30,30,' 
+};
+const MASK = { edge: 1, mid: 2, core: 4 };
+
+const BLOB = { 
+  minRad: 35, 
+  maxRad: 60, 
+  spawnH: -200, 
+  topBand: 120 
+};
+
+let blobs = [];
+let t = 0;
+let W = 0, H = 0;
+
+function resize() {
+  W = Math.floor(window.innerWidth);
+  H = Math.floor(window.innerHeight);
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cv.width = Math.floor(W * dpr);
+  cv.height = Math.floor(H * dpr);
+  cv.style.width = W + 'px';
+  cv.style.height = H + 'px';
+  gl2.setTransform(dpr, 0, 0, dpr, 0, 0);
+  gl2.imageSmoothingEnabled = false;
+
+  bw = Math.max(8, Math.floor(W / B));
+  bh = Math.max(8, Math.floor(H / B));
+  const u = new Uint8Array(bw * bh * 4);
+  const a = new Uint8ClampedArray(u.buffer);
+  buf = new ImageData(a, bw, bh);
+}
+
+function makeBlob(i) {
+  const r = BLOB.minRad + Math.random() * (BLOB.maxRad - BLOB.minRad);
+  const x = 50 + Math.random() * (W - 100);
+  const y = H + r + BLOB.spawnH * Math.random();
+  const phase = Math.random() * Math.PI * 2;
+  const speed = 0.4 + Math.random() * 0.7;
+  const omega = 0.015 + Math.random() * 0.02;
+  const drift = (Math.random() - 0.5) * 0.8;
+  return {
+    x, y, r, phase, speed, omega, drift,
+    age: 0,
+    bobPhase: Math.random() * Math.PI * 2,
+    bobAmp: 10 + Math.random() * 20,
+    bobFreq: 0.02 + Math.random() * 0.04
+  };
+}
+
+function spawnBlobs() {
+  const n = 8 + Math.floor(Math.random() * 4);
+  blobs = [];
+  for (let i = 0; i < n; i++) {
+    const b = makeBlob(i);
+    b.y = H + 200 + Math.random() * 200;
+    blobs.push(b);
+  }
+}
+
+function updateBlobs() {
+  const topY = -50;
+  const bottomY = H + 30;
+  for (let i = 0; i < blobs.length; i++) {
+    const b = blobs[i];
+    b.age += 1.0;
+    b.phase += b.omega;
+    const targetY = bottomY - ((bottomY - topY) * (0.5 + 0.5 * Math.cos(b.phase)) * b.speed);
+    const targetX = W * 0.5 + b.drift * 60 + 80 * Math.sin(b.phase * 2.0 + 0.7) * b.speed;
+    const k = 0.018 + b.omega * 0.4;
+    b.y += (targetY - b.y) * k;
+    b.x += (targetX - b.x) * k * 0.6;
+    b.x += Math.sin(t * 0.01 + b.bobPhase) * 0.5;
+    b.x = Math.max(b.r + 10, Math.min(W - b.r - 10, b.x));
+    if (b.y < topY + 50 && Math.random() < 0.001) {
+      const nb = makeBlob(0);
+      nb.x = b.x + (Math.random() - 0.5) * 30;
+      nb.y = b.y;
+      nb.phase = b.phase;
+      nb.speed = b.speed * (0.8 + Math.random() * 0.4);
+      blobs.push(nb);
+    }
+  }
+  while (blobs.length > 12 && blobs[blobs.length - 1].y > H - 80) blobs.pop();
+  if (Math.random() < 0.0016 && blobs.length < 10) {
+    const nb = makeBlob(0);
+    nb.y = H + 200;
+    blobs.push(nb);
+  }
+}
+
+function computeField() {
+  const d = buf.data;
+  d.fill(0);
+  const invB = 1.0 / B;
+  const blobsLocal = blobs;
+  const n = blobsLocal.length;
+  const blobArr = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const b = blobsLocal[i];
+    blobArr[i] = b;
+  }
+  const blobX = new Float32Array(n);
+  const blobY = new Float32Array(n);
+  const blobR = new Float32Array(n);
+  const blobRSq = new Float32Array(n);
+  const blobR4 = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const b = blobArr[i];
+    blobX[i] = b.x;
+    blobY[i] = b.y;
+    blobR[i] = b.r;
+    blobRSq[i] = b.r * b.r;
+    blobR4[i] = blobRSq[i] * blobRSq[i];
+  }
+  const baseY = H;
+  const blobCount = n;
+  for (let by = 0; by < bh; by++) {
+    const py = by * B + B * 0.5;
+    const yBase = baseY - py;
+    const ySqArr = new Float32Array(blobCount);
+    const yNormArr = new Float32Array(blobCount);
+    for (let i = 0; i < blobCount; i++) {
+      const dy = py - blobY[i];
+      ySqArr[i] = dy * dy;
+      yNormArr[i] = Math.max(0, Math.min(1, yBase > 0 ? (yBase - py + blobR[i] * 2) / (yBase + blobR[i] * 4) : 1));
+    }
+    let rowOff = by * bw * 4;
+    for (let bx = 0; bx < bw; bx++) {
+      const px = bx * B + B * 0.5;
+      let f = 0;
+      let avgY = 0;
+      let contrib = 0;
+      let coreF = 0;
+      for (let i = 0; i < blobCount; i++) {
+        const dx = px - blobX[i];
+        const dSq = dx * dx + ySqArr[i];
+        const r4 = blobR4[i];
+        const v = r4 / (r4 + 1000 * dSq + 0.01);
+        f += v;
+        if (v > 0.05) { avgY += yNormArr[i] * v; contrib += v; }
+        if (v > 0.4) coreF += v;
+      }
+      const heat = (contrib > 0) ? (avgY / contrib) : 0;
+      let r, g, b, a;
+      if (f < 0.5) {
+        const m = f * 2.0;
+        r = COL.bgDeep[0] + (COL.bgMid - COL.bgDeep[0]) * m;
+        g = COL.bgDeep[1] + (COL.bgMid - COL.bgDeep[1]) * m;
+        b = COL.bgDeep[2] + (COL.bgMid - COL.bgDeep[2]) * m;
+        a = 0;
+      } else {
+        const ff = Math.min(1.0, (f - 0.5) * 2.5);
+        // Color based on heat (0=hot at bottom, 1=cool at top)
+        const hr = Math.max(0, Math.min(1, heat));
+        const rH = COL.blobHot[0] * (1 - hr) + COL.blobMid[0] * hr;
+        const gH = COL.blobHot[1] * (1 - hr) + COL.blobMid[1] * hr;
+        const bH = COL.blobHot[2] * (1 - hr) + COL.blobMid[2] * hr;
+        // Inner core highlight
+        const core = Math.min(1, coreF * 0.6);
+        r = rH + core * 60;
+        g = gH + core * 40;
+        b = bH + core * 30;
+        r = Math.max(0, Math.min(255, r));
+        g = Math.max(0, Math.min(255, g));
+        b = Math.max(0, Math.min(255, b));
+        a = ff * 255;
+      }
+      d[rowOff] = r;
+      d[rowOff + 1] = g;
+      d[rowOff + 2] = b;
+      d[rowOff + 3] = a;
+      rowOff += 4;
+    }
+  }
+}
+
+function render() {
+  gl2.fillStyle = 'rgb(5,5,10)';
+  gl2.fillRect(0, 0, W, H);
+  computeField();
+  gl2.putImageData(buf, 0, 0, 0, 0, bw, bh);
+  // Upscale coarse buffer to full screen with smoothing for soft edges
+  gl2.imageSmoothingEnabled = true;
+  gl2.imageSmoothingQuality = 'low';
+  gl2.drawImage(buf.canvas || _bufToCanvas(), 0, 0, W, H);
+  gl2.imageSmoothingEnabled = false;
+  drawGlow();
+  drawVignette();
+}
+
+function _bufToCanvas() {
+  // ImageData needs intermediate canvas to draw upscaled
+  if (!window._ic) {
+    window._ic = document.createElement('canvas');
+    window._icCtx = window._ic.getContext('2d');
+  }
+  if (window._ic.width !== bw || window._ic.height !== bh) {
+    window._ic.width = bw;
+    window._ic.height = bh;
+  }
+  window._icCtx.putImageData(buf, 0, 0);
+  return window._ic;
+}
+
+function drawGlow() {
+  gl2.save();
+  gl2.globalCompositeOperation = 'screen';
+  for (let i = 0; i < blobs.length; i++) {
+    const b = blobs[i];
+    const heatT = 1 - Math.min(1, Math.max(0, (b.y - 0) / H));
+    const baseR = (COL.glow[0] * (1 - heatT) + 120 * heatT)|0;
+    const baseG = (COL.glow[1] * (1 - heatT) + 60 * heatT)|0;
+    const baseB = (COL.glow[2] * (1 - heatT) + 30 * heatT)|0;
+    const r = Math.floor(b.r * 0.5);
+    const grad = gl2.createRadialGradient(b.x, b.y, 0, b.x, b.y, r);
+    grad.addColorStop(0, `rgba(${baseR},${baseG},${baseB},0.4)`);
+    grad.addColorStop(1, `rgba(${baseR},${baseG},${baseB},0)`);
+    gl2.fillStyle = grad;
+    gl2.beginPath();
+    gl2.arc(b.x, b.y, r, 0, Math.PI * 2);
+    gl2.fill();
+  }
+  gl2.restore();
+}
+
+function drawVignette() {
+  gl2.save();
+  const g = gl2.createRadialGradient(W * 0.5, H * 0.5, Math.min(W, H) * 0.3, W * 0.5, H * 0.5, Math.max(W, H) * 0.7);
+  g.addColorStop(0, 'rgba(0,0,0,0)');
+  g.addColorStop(1, 'rgba(0,0,0,0.55)');
+  gl2.fillStyle = g;
+  gl2.fillRect(0, 0, W, H);
+  // Top warm hint
+  const tg = gl2.createLinearGradient(0, 0, 0, H * 0.3);
+  tg.addColorStop(0, 'rgba(20,8,30,0.6)');
+  tg.addColorStop(1, 'rgba(0,0,0,0)');
+  gl2.fillStyle = tg;
+  gl2.fillRect(0, 0, W, H * 0.3);
+  gl2.restore();
+}
+
+let last = 0;
+function frame(now) {
+  const dt = now - last;
+  last = now;
+  t += 16;
+  updateBlobs();
+  render();
+  requestAnimationFrame(frame);
+}
+
+function init() {
+  resize();
+  spawnBlobs();
+  requestAnimationFrame(frame);
+  window.addEventListener('resize', () => { 
+    resize();
+    // Reposition blobs within new bounds
+    for (let i = 0; i < blobs.length; i++) {
+      const b = blobs[i];
+      b.x = Math.max(b.r + 10, Math.min(W - b.r - 10, b.x));
+    b.y = Math.min(H - 30, b.y);
+    b.drift = (Math.random() - 0.5) * 0.8;
+    b.phase = Math.random() * Math.PI * 2;
+    b.speed = 0.4 + Math.random() * 0.7;
+    b.omega = 0.015 + Math.random() * 0.02;
+    b.bobPhase = Math.random() * Math.PI * 2;
+    b.bobAmp = 10 + Math.random() * 20;
+    b.bobFreq = 0.02 + Math.random() * 0.04;
+  }
+  });
+  // Pointer interaction: gently nudge blobs
+  cv.addEventListener('pointermove', (e) => {
+    const px = e.clientX, py = e.clientY;
+    for (let i = 0; i < blobs.length; i++) {
+      const b = blobs[i];
+      const dx = b.x - px, dy = b.y - py;
+      const d2 = dx*dx + dy*dy;
+      if (d2 < 50*50) {
+        const d = Math.sqrt(d2) || 1;
+        const force = (50 - d) * 0.3;
+        b.x += (dx / d) * force;
+        b.y += (dy / d) * force * 0.5;
+      }
+    }
+  });
+}
+
+init();
+</script>
+</body>
+</html>

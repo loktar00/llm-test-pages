@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Hexagonal Fire</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #050507;
+    overflow: hidden;
+    height: 100;
+  }
+  canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(function() {
+'use strict';
+
+const canvas = document.getElementById('c');
+let ctx = canvas.getContext('2d', { alpha: false });
+let W = 0, H = 0, dpr = 1;
+
+const HEX_SIZE = 16;
+const HEX_W = Math.sqrt(3) * HEX_SIZE;
+const HEX_H = 2 * HEX_SIZE;
+const COL_W = HEX_W;
+const ROW_H = 3 * HEX_SIZE;
+
+let cols = 0, rows = 0, cells = null;
+
+function hexNeighborsFlat(col, row, colCount, rowCount) {
+  const odd = (row & 1) === 1;
+  const L = odd ? 0 : -1;
+  const R = odd ? 1 : 0;
+  return [
+    [col + L, row - 1],
+    [col + R, row - 1],
+    [col + L, row + 1],
+    [col + R, row + 1],
+    [col - 1, row + 0],
+    [col + 1, row + 0],
+  ];
+}
+
+function resize() {
+  dpr = Math.min(2, window.devicePixelRatio || 1);
+  const cssW = window.innerWidth;
+  const cssH = window.innerHeight;
+  canvas.width = Math.max(2, Math.floor(cssW * dpr));
+  canvas.height = Math.max(2, Math.floor(cssH * dpr));
+  canvas.style.width = cssW + 'px';
+  canvas.style.height = cssH + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  W = cssW;
+  H = cssH;
+  cols = Math.ceil((W + HEX_W * 2) / COL_W) + 2;
+  rows = Math.ceil((H + HEX_H * 2) / ROW_H) + 2;
+  if (!cells || cells.length !== rows * cols) {
+    cells = new Array(rows * cols);
+    for (let i = 0; i < cells.length; i++) cells[i] = 0.0;
+  }
+}
+
+window.addEventListener('resize', resize);
+resize();
+
+const paletteSize = 256;
+let palette = new Array(paletteSize);
+function buildPalette() {
+  for (let i = 0; i < paletteSize; i++) {
+    const t = i / (paletteSize - 1);
+    let r,    g,    b;
+    if (t < 0.15) {
+      const k = t / 0.15;
+      r = 8 + k * 7;
+      g = 0;
+      b = 0;
+    } else if (t < 0.4) {
+      const k = (t - 0.15) / 0.25;
+      r = 15 + k * 240;
+      g = k * 105;
+      b = 0;
+    } else if (t < 0.7) {
+      const k = (t - 0.4) / 0.30;
+      r = 255;
+      g = 105 + k * 145;
+      b = k * 100;
+    } else if (t < 0.9) {
+      const k = (t - 0.7) / 0.20;
+      r = 250 + k * 5;
+      g = 250 - k * 5;
+      b = 100 + k * 155;
+    } else {
+      r = 251;
+      g = 254;
+      b = 255;
+    }
+    palette[i] = [r, g, b};
+  }
+}
+buildPalette();
+
+function hexToScreen(col, row) {
+  const x = (col + 1) * COL_W + (row & 1) * COL_W * 0.5;
+  const y = (row + 1) * ROW_H;
+  return x, y;
+}
+
+let sparkImg = null;
+function buildSparkImage() {
+  const s = 64;
+  const cv = document.createElement('canvas');
+  cv.width = s;
+  cv.height = s;
+  const cx = cv.getContext('2d');
+  const grad = cx.createRadialGradient(s/2, s/2, 0, s/2, s/2, s/2);
+  grad.addColorStop(0, 'rgba(255,242,140,1)');
+  grad.addColorStop(0.25, 'rgba(255,160,30,0.8)');
+  grad.addColorStop(0.5, 'rgba(240,80,20,0.4)');
+  grad.addColorStop(1, 'rgba(40,12,0,0)');
+  cx.fillStyle = grad;
+  cx.beginPath();
+  cx.arc(s/2, s/2, s/2, 0, Math.PI * 2);
+  cx.fill();
+  sparkImg = cv;
+}
+buildSparkImage();
+
+function hexPath(x, y, size) {
+  const p = new Path2D ? new Path2D() : null;
+  if (p) {
+    p.moveTo(x, y - size * 0.5);
+    p.lineTo(x + size * 0.4, y - size * 0.25);
+    p.lineTo(x + size * 0.4, y + size * 0.25);
+    p.lineTo(x, y + size * 0.5);
+    p.lineTo(x - size * 0.4, y + size * 0.25);
+    p.lineTo(x - size * 0.4, y - size * 0.25);
+    p.closePath();
+    return p;
+  }
+  return null;
+}
+const HEX_PATH_CACHE = new Path2D ? new Path2D() : null;
+
+function drawHex(ctx, x, y, size, fillR, fillG, fillB, strokeR, strokeG, strokeB, strokeAlpha) {
+  if (HEX_PATH_CACHE) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.fillStyle = `rgb(${fillR|0},${fillG|0},${fillB|0})`;
+    ctx.fill(HEX_PATH_CACHE);
+    if (strokeAlpha > 0) {
+      ctx.strokeStyle = `rgba(${strokeR|0},${strokeG|0},${strokeB|0},${strokeAlpha})`;
+      ctx.lineWidth = 1.2;
+      ctx.stroke(HEX_PATH_CACHE);
+    }
+    ctx.restore();
+    return;
+  }
+  ctx.beginPath();
+  ctx.moveTo(x, y - size * 0.5);
+  ctx.lineTo(x + size * 0.4, y - size * 0.25);
+  ctx.lineTo(x + size * 0.4, y + size * 0.25);
+  ctx.lineTo(x, y + size * 0.5);
+  ctx.lineTo(x - size * 0.4, y + size * 0.25);
+  ctx.lineTo(x - size * 0.4, y - size * 0.25);
+  ctx.closePath();
+  ctx.fillStyle = `rgb(${fillR|0},${fillG|0},${fillB|0})`;
+  ctx.fill();
+  if (strokeAlpha > 0) {
+    ctx.strokeStyle = `rgba(${strokeR|0},${strokeG|0},${strokeB|0},${strokeAlpha})`;
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+  }
+}
+
+function idx(col, row) { return row * cols + col; }
+function inGrid(col, row) { return col >= 0 && col < cols && row >= 0 && row < rows; }
+
+const sparks = [];
+function spawnSpark() {
+  const row = rows - 2 - Math.floor(Math.random() * 4);
+  const col = Math.floor(Math.random() * cols);
+  const i = idx(col, row);
+  if (inGrid(col, row) && cells[i] > 0.45) {
+    const sx = (col + 1) * COL_W + (row & 1) * COL_W * 0.5;
+    const sy = (row + 1) * ROW_H;
+    sparks.push({
+      x: sx + (Math.random() - 0.5) * 6,
+      y: sy,
+      vx: (Math.random() - 0.5) * 0.6,
+      vy: -1.3 - Math.random() * 0.6,
+      life: 0,
+      maxLife: 1.0 + Math.random() * 1.6,
+      size: 4 + Math.random() * 5,
+    });
+  }
+}
+
+const neighborBuf = new Array(6);
+function neighborIndices(col, row) {
+  const odd = (row & 1) === 1;
+  const L = odd ? 0 : -1;
+  const R = odd ? 1 : 0;
+  neighborBuf[0] = (row - 1) * cols + (col + L);
+  neighborBuf[1] = (row - 1) * cols + (col + R);
+  neighborBuf[2] = (row + 1) * cols + (col + L);
+  neighborBuf[3] = (row + 1) * cols + (col + R);
+  neighborBuf[4] = row * cols + (col - 1);
+  neighborBuf[5] = row * cols + (col + 1);
+  return neighborBuf;
+}
+
+const heatDecay = 0.9;
+const heatRise = 0.0;
+const heatSpread = 0.9;
+const heatNoise = 0.0;
+const heatFloor = 0.9;
+
+function propagate() {
+  const next = new Float32Array(cells.length);
+  const damp = 0.95;
+  const damp2 = 0.55;
+  const t = Math.sin(Date.now() * 0.001) * 0.5 + 0.5;
+  const windBias = Math.sin(Date.now() * 0.0008) * 0.4;
+  const lean = (Math.random() - 0.5 + windBias) * 0.2;
+  const flick = Math.random() * 0.25 + 0.75;
+  for (let r = rows - 2; r >= 1; r--) {
+    for (let c = 1; c < cols - 1; c++) {
+      const i = r * cols + c;
+      const nb = neighborIndices(c, r);
+      const up1 = cells[nb[0]];
+      const up2 = cells[nb[1]];
+      const down1 = cells[nb[2]];
+      const down2 = cells[nb[3]];
+      const left = cells[nb[4]];
+      const right = cells[nb[5]];
+      let sum = (up1 + up2) * 1.15 * 0.6 + (down1 + down2) * 0.15 + (left + right) * 0.55;
+      const avg = sum / 4;
+      let nv = avg * heatSpread + cells[i] * heatDecay;
+      nv += (Math.random() - 0.5) * 0.05;
+      nv *= flick;
+      nv += lean * 0.025;
+      if (nv > damp) nv = damp;
+      if (nv < 0) nv = 0;
+      next[i] = nv;
+    }
+  }
+  for (let c = 1; c < cols - 1; c++) {
+    const r = rows - 1;
+    const base = 0.65 + Math.random() * 0.35;
+    next[r * cols + c] = Math.min(1, cells[r * cols + c] * 0.5 + base * flick);
+  const r2 = r - 1;
+    if (r2 > 0) next[r2 * cols + c] = Math.min(damp2, cells[r2 * cols + c] * 0.5 + base * 0.95 * flick);
+    const r3 = r - 2;
+    if (r3 > 0) next[r3 * cols + c] = Math.min(0.3, cells[r3 * cols + c] * 0.4 + base * 0.7 * flick);
+  }
+  for (let r = rows - 1; r > rows - 4; r--) {
+    for (let c = 1; c < cols - 1; c++) {
+      const i = r * cols + c;
+      if (Math.random() < 0.18) {
+        next[i] = Math.min(damp, next[i] + Math.random() * 0.6);
+      }
+    }
+  }
+  cells = next;
+}
+
+function updateSparks() {
+  for (let i = sparks.length - 1; i >= 0; i--) {
+    const s = sparks[i];
+    s.x += s.vx;
+    s.y += s.vy;
+    s.vy *= 0.996;
+    s.vx *= 0.996;
+    s.vy -= 0.006;
+    s.life += 0.016;
+    if (s.y < -50 || s.life > s.maxLife) {
+      sparks.splice(i, 1);
+    }
+  }
+}
+
+function render() {
+  ctx.fillStyle = '#050507';
+  ctx.fillRect(0, 0, W, H);
+  const ctx2 = ctx;
+  ctx2.save();
+  ctx2.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < sparks.length; i++) {
+    const s = sparks[i];
+    const k = 1 - s.life / s.maxLife;
+    const a = k * k;
+    const scale = s.size * (1 + (1 - k) * 0.8);
+    ctx2.globalAlpha = Math.min(1, a * 1.2);
+    ctx2.drawImage(sparkImg, s.x - scale / 2, s.y - scale / 2, scale, scale);
+  }
+  ctx2.restore();
+  ctx.globalAlpha = 1;
+  const size = HEX_SIZE;
+  const halfW = size * 0.4;
+  const halfH = size * 0.5;
+  const strokeColor = 'rgba(40,10,5,0.6)';
+  ctx.lineWidth = 1.2;
+  for (let r = 0; r < rows; r++) {
+    const y = (r + 1) * ROW_H;
+    const xBase = (r & 1) * COL_W * 0.5;
+    for (let c = 0; c < cols; c++) {
+      const x = (c + 1) * COL_W + xBase;
+      const t = cells[r * cols + c];
+      if (t < 0.07) continue;
+      const pi = Math.min(paletteSize - 1, Math.max(0, Math.floor(t * (paletteSize - 1))));
+      const p = palette[pi];
+      const r8 = p[0], g8 = p[1], b8 = p[2];
+      const a = Math.min(1, t * 1.2);
+      ctx.beginPath();
+      ctx.moveTo(x, y - halfH);
+      ctx.lineTo(x + halfW, y - size * 0.25);
+      ctx.lineTo(x + halfW, y + size * 0.25);
+      ctx.lineTo(x, y + halfH);
+      ctx.lineTo(x - halfW, y + size * 0.25);
+      ctx.lineTo(x - halfW, y - size * 0.25);
+      ctx.closePath();
+      ctx.fillStyle = `rgba(${r8|0},${g8|0},${b8|0},${a})`;
+      ctx.fill();
+      if (t > 0.5) {
+        ctx.strokeStyle = strokeColor;
+        ctx.stroke();
+      }
+    }
+  }
+}
+
+function animate() {
+  propagate();
+  if (Math.random() < 0.5) {
+    spawnSpark();
+    if (Math.random() < 0.4) spawnSpark();
+  }
+  updateSparks();
+  render();
+  requestAnimationFrame(animate);
+}
+
+animate();
+})();
+</script>
+</body>
+</html>

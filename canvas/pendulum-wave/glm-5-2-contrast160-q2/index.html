@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Pendulum Wave · 60s Cycle</title>
+<style>
+  html, body { margin:0; padding:0; overflow: hidden; background: #02000a; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const c = document.getElementById('c');
+const ctx = c.getContext('2d', { alpha: false });
+
+let W, H, DPR;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth;
+  H = window.innerHeight;
+  c.width = W * DPR;
+  c.height = H * DPR;
+  c.style.width = W + 'px';
+  c.style.height = H + 'px';
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = '#02000a';
+  ctx.fillRect(0, 0, W, H);
+  setup();
+}
+window.addEventListener('resize', resize);
+
+const NUM = 24;
+const CYCLE = 60; // seconds
+const TMAX = CYCLE * 60; // ms
+
+let pend = [];
+let pivotX, pivotY, pivotTop;
+let bobR, sepX, g, baseLen;
+let trailLen = 60;
+let pers, persH, persX, persW, persY;
+let flashLife = 0;
+let lastFlash = -CYCLE * 2;
+let frame = 0;
+
+function setup() {
+  pend.length = 0;
+  bobR = Math.max(6, Math.min(W, H) / 60);
+  sepX = Math.max(20, Math.min(W, H) / 50);
+  persH = Math.round((H * 0.36) / 2) * 2;
+  persY = H - persH - 10;
+  persX = Math.floor((W - sepX * (NUM - 1)) / 2);
+  persW = sepX;
+  pivotTop = Math.max(30, H * 0.05);
+  pivotX = Math.floor((W - sepX * (NUM - 1)) / 2);
+  pivotY = pivotTop + 30;
+  g = 980; // gravity tuned for these lengths
+  baseLen = Math.min(W, H) * 0.38;
+
+  for (let i = 0; i < NUM; i++) {
+    const cycles = 32 + (i / (NUM - 1)) * (60 - 32);
+    const L = baseLen * (1 / (cycles / 32)); // L scales inversely to cycle count
+    const omega = Math.sqrt(g / L);
+    const phase0 = Math.PI / 2;
+    const hue = ((i / NUM) * 180 + 280) % 360;
+    pend.push({
+      omega, L, phase0, hue, i,
+      x: 0, y: 0, lastX: 0,
+      trail: []
+    });
+  }
+}
+
+let t = 0;
+let lastTime = 0;
+
+function loop(now) {
+  if (lastTime === 0) lastTime = now;
+  const dt = Math.min(120, now - lastTime);
+  lastTime = now;
+  t += dt;
+  frame++;
+
+  const Tcur = (t % TMAX);
+  const phaseFlash = (t % TMAX) / TMAX;
+  const secPos = (t % 1000) / 1000;
+
+  if (secPos < 0.1 && lastFlash !== Math.floor(t / TMAX)) {
+    lastFlash = Math.floor(t / TMAX);
+    flashLife = 1;
+  }
+
+  const s = t / 1000;
+
+  ctx.globalAlpha = 1;
+  // Faint persistence trail
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = 'rgba(5,0,12,0.6)';
+  ctx.fillRect(0, 0, W, persY + 10);
+  ctx.fillStyle = 'rgba(2,0,10,0.6)';
+  ctx.fillRect(0, 0, W, persY - 5);
+  ctx.fillStyle = 'rgba(2,0,10,0.1)';
+  ctx.fillRect(0, 0, W, persY);
+
+  // === Persistence chart ===
+  // Drift each column by phase (so it stays in sync with pendulum motion)
+  const driftX = (phaseFlash * sepX * (NUM - 1));
+  ctx.save();
+  // clip to chart area
+  ctx.beginPath();
+  ctx.rect(0, persY, W, persH);
+  ctx.clip();
+
+  // subtle base line
+  ctx.globalAlpha = 0.05;
+  ctx.fillStyle = '#6b8';
+  ctx.fillRect(0, persY + persH * 0.5, W, 1);
+
+  for (let i = 0; i < NUM; i++) {
+    const p = pend[i];
+    const x0 = persX + i * sepX - driftX;
+    const x = x0 + p.x;
+    const y = persY + persH * 0.5 + (p.y - 0) * 1.25;
+
+    const hue = p.hue;
+    const lum = 60 + (p.i % 2) * 10;
+
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = `hsla(${hue}, 8%, ${lum}%, 0.7)`;
+    ctx.beginPath();
+    ctx.arc(x, y, 2.5, 0, 7);
+    ctx.fill();
+  }
+  ctx.restore();
+
+  // === Pendulum rendering ===
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < NUM; i++) {
+    const p = pend[i];
+    const cx0 = pivotX + i * sepX;
+    const cy0 = pivotY;
+
+    // string
+    const sl = 0.18 + (p.i % 2) * 0.04;
+    ctx.globalAlpha = sl;
+    ctx.strokeStyle = `hsl(${p.hue}, 5%, 10)`;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cx0, cy0);
+    ctx.lineTo(cx0 + p.x, cy0 + p.y);
+    ctx.stroke();
+
+    // bob trail
+    for (let j = 0; j < p.trail.length - 1; j++) {
+      const t1 = p.trail[j];
+      const t2 = p.trail[j + 1];
+      const f = j / p.trail.length;
+      const a = f * 0.18;
+      ctx.globalAlpha = a;
+      ctx.strokeStyle = `hsl(${p.hue}, 75%, ${50 + (j % 2) * 5})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cx0 + t1.x, cy0 + t1.y);
+      ctx.lineTo(cx0 + t2.x, cy0 + t2.y);
+      ctx.stroke();
+    }
+
+    // bob core
+    const bx = cx0 + p.x;
+    const by = cy0 + p.y;
+
+    // inner
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = `hsl(${p.hue}, 4%, 5)`;
+    ctx.beginPath();
+    ctx.arc(bx, by, bobR, 0, 7);
+    ctx.fill();
+
+    ctx.fillStyle = `hsl(${p.hue}, 85, 60)`;
+    ctx.beginPath();
+    ctx.arc(bx, by, bobR * 0.4, 0, 7);
+    ctx.fill();
+
+    // highlight
+    ctx.fillStyle = `hsl(${p.hue}, 5, 90)`;
+    ctx.beginPath();
+    ctx.arc(bx, by, bobR * 0.5, 0, 7);
+    ctx.fill();
+
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.strokeStyle = `hsla(${p.hue}, 75, 70, 0.8)`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(bx, by, bobR * 0.6, 0, 7);
+    ctx.stroke();
+    ctx.globalCompositeOperation = 'lighter';
+  }
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+
+  // === Reset flash ===
+  if (flashLife > 0) {
+    const f = flashLife;
+    const fa = f * 0.4;
+    ctx.globalAlpha = fa;
+    // horizontal line at pendulum region
+    const flY = pivotY + baseLen;
+    const flGrad = ctx.createLinearGradient(0, flY - 100, 0, flY + 100);
+    flGrad.addColorStop(0, 'hsla(0, 0%, 100%, 0)');
+    flGrad.addColorStop(0.5, 'hsla(0, 0%, 100%, 1)');
+    flGrad.addColorStop(1, 'hsla(0, 0%, 100%, 0)');
+    ctx.fillStyle = flGrad;
+    ctx.fillRect(0, flY - 100, W, 200);
+
+    // flash marker on chart
+    const cy = persY + persH * 0.5;
+    const cGrad = ctx.createLinearGradient(0, cy - 200, 0, cy + 200);
+    cGrad.addColorStop(0, 'hsla(0, 0%, 100%, 0)');
+    cGrad.addColorStop(0.5, 'hsla(0, 0%, 100%, 0.4)');
+    cGrad.addColorStop(1, 'hsla(0, 0%, 100%, 0)');
+    ctx.globalAlpha = f * 0.9;
+    ctx.fillStyle = cGrad;
+    ctx.fillRect(0, cy - 200, W, 400);
+
+    // flash dot at chart start
+    ctx.globalAlpha = f;
+    ctx.fillStyle = `hsla(${flashHSL}, 1, ${flashAlpha})`;
+    ctx.beginPath();
+    ctx.arc(0, cy, 10 * f, 0, 7);
+    ctx.fill();
+
+    // flash dot at right
+    ctx.fillStyle = `hsla(0, 0%, 100%, ${f * 0.6})`;
+    ctx.beginPath();
+    ctx.arc(W, cy, 10 * f, 0, 7);
+    ctx.fill();
+
+    flashLife -= dt / 150;
+    if (flashLife < 0) flashLife = 0;
+  }
+  ctx.globalAlpha = 1;
+
+  // === Update physics ===
+  for (let i = 0; i < NUM; i++) {
+    const p = pend[i];
+    const ph = p.phase0 * Math.exp(-s * 0.005); // phase drift
+    const pos = (Math.sin(p.omega * s + p.phase0)) * (Math.PI / 30);
+    const px = Math.cos(pos) * p.L;
+    const py = Math.sin(pos) * p.L;
+    p.x = px;
+    p.y = py;
+    p.lastX = px;
+
+    p.trail.push({ x: p.x, y: p.y });
+    if (p.trail.length > 40) p.trail.shift();
+  }
+
+  // === HUD ===
+  const timeS = (t % TMAX) / 1000;
+  const cyc = Math.floor(t / TMAX) + 1;
+  const tStr = (timeS).toFixed(2).replace(/(\d(?.\d\d)(d+)(.*)$/g, '$1$2$3$4');
+
+  ctx.font = `900 ${Math.max(8, Math.min(W, H) / 24)} "Inter", sans-serif`;
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(5, 0, 0, 0.5)';
+  ctx.fillText('t = ' + (timeS).toFixed(1) + 's', 10, 5);
+  ctx.font = `bold ${Math.min(12, W / 30)} "Inter", sans-serif`;
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+  ctx.fillText('cycle ' + cyc, W - 120, 5);
+  // ctx.fillText('cycle ' + cyc, 5, 5);
+  // ctx.fillText('cycle ' + cyc, W - 120, 5);
+  // ctx.fillText('cycle ' + cyc, 5, 5);
+  // ctx.fillText('cycle ' + cyc, W - 120, 5);
+  // ctx.fillText('cycle ' + cyc, 5, 5);
+  // ctx.fillText('cycle ' + cyc, W - 120, 5);
+  // ctx.fillText('cycle ' + cyc, 5, 5);
+  // ctx.fillText('cycle ' + cyc, W - 120, 5);
+
+  ctx.restore();
+}
+
+function drawHUD() {
+  const timeS = (t % TMAX) / 1000;
+  const cyc = Math.floor(t / TMAX) + 1;
+  const tStr = (timeS).toFixed(2);
+
+  ctx.font = `bold 11 "Inter", sans-serif`;
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(5, 0, 0, 0.5)';
+  ctx.fillText('t = ' + tStr + 's', 10, 5);
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+  ctx.fillText('cycle ' + cyc, W - 120, 5);
+}
+
+function loop(now) {
+  if (lastTime === 0) lastTime = now;
+  const dt = Math.min(120, now - lastTime);
+  lastTime = now;
+  t += dt;
+
+  // === Draw ===
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+  // fade persistence chart
+  ctx.fillStyle = 'rgba(2,0,10,0.08)';
+  ctx.fillRect(0, persY, W, persH);
+
+  // === Update ===
+  const s = t / 1000;
+  const phaseFlash = (t % TMAX) / TMAX;
+  const secPos = (t % 1000) / 1000;
+
+  if (secPos < 0.1 && lastFlash !== Math.floor(t / TMAX)) {
+    lastFlash = Math.floor(t / TMAX);
+    flashLife = 1;
+  }
+
+  for (let i = 0; i < NUM; i++) {
+    const p = pend[i];
+    const pos = Math.sin(p.omega * s + p.phase0) * (Math.PI / 30);
+    p.x = Math.cos(pos) * p.L;
+    p.y = Math.sin(pos) * p.L;
+
+    p.trail.push({ x: p.x, y: p.y });
+    if (p.trail.length > 40) p.trail.shift();
+  }
+
+  // === Draw persistence chart ===
+  const driftX = (phaseFlash * sepX * (NUM - 1));
+  for (let i = 0; i < NUM; i++) {
+    const p = pend[i];
+    const x0 = persX + i * sepX - driftX;
+    const x = x0 + p.x;
+    const y = persY + persH * 0.5 + (p.y - 0) * 1.25;
+    const lum = 60 + (p.i % 2) * 10;
+    ctx.globalAlpha = 0.7;
+    ctx.fillStyle = `hsl(${p.hue}, 8%, ${lum})`;
+    ctx.beginPath();
+    ctx.arc(x, y, 2.5, 0, 7);
+    ctx.fill();
+  }
+
+  // === Draw pendulum region ===
+  ctx.globalAlpha = 1;
+  // fade upper region
+  ctx.fillStyle = 'rgba(2,0,10,0.6)';
+  ctx.fillRect(0, 0, W, persY);
+
+  // === Draw pendulums ===
+  for (let i = 0; i < NUM; i++) {
+    const p = pend[i];
+    const cx0 = pivotX + i * sepX;
+    const cy0 = pivotY;
+
+    // string
+    ctx.globalAlpha = 0.18;
+    ctx.strokeStyle = `hsl(${p.hue}, 5%, 10)`;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cx0, cy0);
+    ctx.lineTo(cx0 + p.x, cy0 + p.y);
+    ctx.stroke();
+
+    // bob trail
+    for (let j = 0; j < p.trail.length - 1; j++) {
+      const t1 = p.trail[j];
+      const t2 = p.trail[j + 1];
+      const f = j / p.trail.length;
+      const a = f * 0.18;
+      ctx.globalAlpha = a;
+      ctx.strokeStyle = `hsl(${p.hue}, 75%, ${50 + (j % 2) * 5})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cx0 + t1.x, cy0 + t1.y);
+      ctx.lineTo(cx0 + t2.x, cy0 + t2.y);
+      ctx.stroke();
+    }
+
+    // bob
+    const bx = cx0 + p.x;
+    const by = cy0 + p.y;
+
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = `hsl(${p.hue}, 4%, 5)`;
+    ctx.beginPath();
+    ctx.arc(bx, by, bobR, 0, 7);
+    ctx.fill();
+
+    ctx.fillStyle = `hsl(${p.hue}, 85, 60)`;
+    ctx.beginPath();
+    ctx.arc(bx, by, bobR * 0.4, 0, 7);
+    ctx.fill();
+
+    ctx.fillStyle = `hsl(${p.hue}, 5, 90)`;
+    ctx.beginPath();
+    ctx.arc(bx, by, bobR * 0.5, 0, 7);
+    ctx.fill();
+
+    ctx.strokeStyle = `hsla(${p.hue}, 75, 70, 0.8)`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(bx, by, bobR * 0.6, 0, 7);
+    ctx.stroke();
+  }
+
+  // === Reset flash ===
+  if (flashLife > 0) {
+    const f = flashLife;
+    const flY = pivotY + baseLen;
+
+    ctx.globalAlpha = f * 0.4;
+    const flGrad = ctx.createLinearGradient(0, flY - 100, 0, flY + 100);
+    flGrad.addColorStop(0, 'hsla(0, 0%, 100%, 0)');
+    flGrad.addColorStop(0.5, 'hsla(0, 0%, 100%, 1)');
+    flGrad.addColorStop(1, 'hsla(0, 0%, 100%, 0)');
+    ctx.fillStyle = flGrad;
+    ctx.fillRect(0, flY - 100, W, 200);
+
+    ctx.globalAlpha = f * 0.4;
+    const cy = persY + persH * 0.5;
+    const cGrad = ctx.createLinearGradient(0, cy - 200, 0, cy + 200);
+    cGrad.addColorStop(0, 'hsla(0, 0%, 100%, 0)');
+    cGrad.addColorStop(0.5, 'hsla(0, 0%, 100%, 1)');
+    cGrad.addColorStop(1, 'hsla(0, 0%, 100%, 0)');
+    ctx.fillStyle = cGrad;
+    ctx.fillRect(0, cy - 200, W, 400);
+
+    ctx.globalAlpha = f;
+    ctx.fillStyle = 'white';
+    ctx.beginPath();
+    ctx.arc(0, cy, 10, 0, 7);
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(W, cy, 10, 0, 7);
+    ctx.fill();
+
+    flashLife -= dt / 150;
+  }
+
+  // === HUD ===
+  const timeS = (t % TMAX) / 1000;
+  const cyc = Math.floor(t / TMAX) + 1;
+  const tStr = (timeS).toFixed(2);
+
+  ctx.font = `bold 11 "Inter", sans-serif`;
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(5, 0, 0, 0.5)';
+  ctx.fillText('t = ' + tStr + 's', 10, 5);
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+  ctx.fillText('cycle ' + cyc, W - 120, 5);
+
+  requestAnimationFrame(loop);
+}
+
+resize();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

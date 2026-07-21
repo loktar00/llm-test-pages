@@ -1,0 +1,904 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Crystal Cavern</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { background: #000; overflow: hidden; height: 100; width: 100; }
+canvas { display: block; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; cursor: default; }
+html, body { width: 100; height: 100; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha: false });
+let W = 0, H = 0;
+const DPR = Math.min(window.devicePixelRatio || 1, 2);
+const TWO_PI = Math.PI * 2;
+
+function resize() {
+  W = Math.floor(window.innerWidth * DPR);
+  H = Math.floor(window.innerHeight * DPR);
+  canvas.width = W;
+  canvas.height = H;
+  ctx.fillStyle = '#08070d';
+  ctx.fillRect(0, 0, W, H);
+}
+
+// Color palette for crystals
+const HUES = [180, 207, 220, 240, 25, 40, 305, 5, 170, 195, 300, 350, 350];
+const SAT = [70, 65, 70, 40, 70, 35, 80, 60, 30, 25, 75, 75];
+const LIT = [58, 60, 58, 70, 55, 70, 50, 60, 75, 80, 55, 60, 60];
+const ACC = [50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50];
+const GLOW_COL = [220, 242, 255];
+const ACC_R = [50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50];
+
+function pickHue() { return Math.floor(Math.random() * HUES.length); }
+
+// Crystal data model
+class Crystal {
+  constructor(dir, baseX, baseY, baseR, top, side, idx, depth) {
+    this.dir = dir;
+    this.baseX = baseX;
+    this.baseY = baseY;
+    this.baseR = Math.max(2, baseR);
+    this.top = top;
+    this.side = side;
+    this.idx = idx;
+    this.depth = depth;
+    this.branches = [];
+    this.growth = 0.04;
+    this.growRate = 0.0048;
+    this.peak = 0;
+    this.h = 0;
+    this.hidx = Math.random();
+    this.tip = null;
+    this.tipJitter = new TipJitter();
+    this.glowPhase = Math.random() * 4;
+    this.dying = false;
+  }
+
+  spawnBranch() {
+    if (this.depth >= 6 || this.branches.length > 2) return null;
+    if (Math.random() > 0.35) return null;
+    const r = this.baseR * (0.5 + Math.random() * 0.7) / 2;
+    if (r < 4) return null;
+    const h = this.h + (1 + Math.random() * 1.5);
+    const dir = Math.max(-0.6, Math.min(0.6, this.dir + Math.random() - 0.5));
+    const baseX = this.baseX + h * dir;
+    const baseY = this.baseY - this.dir * h;
+    const tip = {
+      x: baseX + r * this.dir,
+      y: baseY,
+      tx: baseX + r * this.dir,
+      ty: baseY,
+      j: new TipJitter()
+    };
+    const b = new Crystal(dir, baseX, baseY, r, tip, this.side, this.hidx, this.depth + 1);
+    b.peak = r;
+    b.h = h;
+    b.tip = tip;
+    b.growth = 0.06;
+    b.growRate = 0.007;
+    this.branches.push(b);
+    b.update();
+    return b;
+  }
+
+  growStep() {
+    if (this.dying) return;
+    const peak = Math.max(this.peak, this.baseR * 2);
+    const limit = Math.max(4, Math.min(peak + 6, peak * (1.0 + 0.25 / (1 + this.depth * 0.8))));
+    if (this.h < limit) {
+      this.h += this.growRate;
+      this.growth = Math.max(0, Math.min(1, this.h / limit));
+    }
+  }
+
+  spawnBranches() {
+    if (this.branches.length < 2 && Math.random() < 0.7) {
+      this.spawnBranch();
+    }
+  }
+
+  update() {
+    if (this.dying) return;
+    this.glowPhase += 0.03;
+    if (this.branches.length === 0) this.growStep();
+    else for (let i = 0; i < this.branches.length; i++) this.branches[i].update();
+    if (this.h > 0 && this.branches.length === 0 && this.depth < 6) {
+      if (Math.random() < 0.15) this.spawnBranches();
+    }
+    if (this.tip) {
+      const jx = Math.sin(this.glowPhase * 0.4 + this.idx * 3) * 0.3 + this.tip.j.dx;
+      const jy = this.tip.j.dy + this.tip.j.dz * 0.3;
+      this.tip.tx = this.tip.x + jx;
+      this.tip.ty = this.tip.y + jy;
+      this.tip.j.tick();
+    }
+  }
+
+  getCoverage() {
+    const r = this.baseR * 1.6;
+    return Math.PI * r * r / 1e6;
+  }
+
+  shatter(age) {
+    const s = 1.6 - age * 1.0;
+    if (s < 0.6) return [];
+    if (this.branches.length === 0) {
+      const r = this.baseR * 0.55;
+      if (r < 2) return [];
+      const cx = (this.baseX + this.top.x) / 2;
+      const cy = (this.baseY + this.top.y) / 2;
+      return [{
+        x: cx, y: cy,
+        vx: Math.random() * 3 - 1.5,
+        vy: -1 - Math.random() * 2,
+        rv: (Math.random() - 0.5) * 0.6,
+        theta: 0,
+        r: r,
+        life: 1,
+        seed: Math.random()
+      }];
+    }
+    const out = [];
+    for (let i = 0; i < this.branches.length; i++) {
+      const b = this.branches[i];
+      if (b.h < 2) continue;
+      const r = Math.max(2, b.baseR * 0.5);
+      const cx = (b.baseX + b.top.x) / 2;
+      const cy = (b.baseY + b.top.y) / 2;
+      out.push({
+        x: cx, y: cy,
+        vx: Math.random() * 3 - 1.5,
+        vy: -1 - Math.random() * 2.5,
+        rv: (Math.random() - 0.5) * 0.7,
+        theta: 0,
+        r: r,
+        life: 1,
+        seed: Math.random()
+      });
+    }
+    return out;
+  }
+}
+
+class TipJitter {
+  constructor() {
+    this.dx = 0;
+    this.dy = 0;
+    this.dz = 0;
+    this.vx = 0;
+    this.vy = 0;
+    this.vz = 0;
+  }
+  tick() {
+    const r = 0.04;
+    this.vx += (Math.random() - 0.5) * r - this.dx * 0.005;
+    this.vy += (Math.random() - 0.5) * r - this.dy * 0.005;
+    this.vz += (Math.random() - 0.5) * r - this.dz * 0.005;
+    this.vx *= 0.97;
+    this.vy *= 0.97;
+    this.vz *= 0.97;
+    this.dx += this.vx;
+    this.dy += this.vy;
+    this.dz += this.vz;
+  }
+}
+
+// Crystal population
+const crystalPool = [];
+
+function seedCrystals() {
+  for (let dir = -1; dir < 2; dir += 2) {
+    let n = 20;
+    const baseY = dir === -1 ? H * 0.98 : H * 0.02;
+    for (let i = 0; i < n; i++) {
+      const r = (1.0 - (i + 1) / n) * 0.7;
+      let attempts = 20;
+      while (attempts-- > 0) {
+        const baseX = Math.random() * W;
+        const d = Math.sqrt((baseX / W - 0.5) ** 2 + (r * r));
+        if (Math.random() < d * 0.55 + 0.25) continue;
+        const baseR = 12 + Math.random() * 15;
+        const dir1 = (Math.random() - 0.5) * 0.55;
+        const side = Math.random() * W;
+        const tipX = baseX + baseR * dir1 * 2;
+        const tipY = baseY + dir * (baseR * 2.6);
+        const tip = {
+          x: tipX, y: tipY,
+          tx: tipX, ty: tipY,
+          j: new TipJitter()
+        };
+        const c = new Crystal(dir, baseX, baseY, baseR, tip, side, Math.random(), 0);
+        c.peak = baseR * (1.3 + Math.random() * 1.2);
+        c.h = 0;
+        c.tip = tip;
+        c.growRate = 0.0052 + Math.random() * 0.0026;
+        crystalPool.push(c);
+        attempts = 0;
+      }
+    }
+  }
+  crystalPool.sort((a, b) => a.baseY - b.baseY);
+}
+
+// Crystal drawing
+function drawCrystal(c) {
+  if (c.h < 0.05) return;
+  const h = c.h;
+  const r0 = c.baseR;
+  const r1 = Math.max(2.5, r0 * 0.75);
+  const r2 = Math.max(2, r0 * 0.45);
+  const r3 = Math.max(1.5, r0 * 0.25);
+  const r4 = Math.max(0.8, r0 * 0.15);
+  const r5 = Math.max(0.4, r0 * 0.8);
+  const r6 = Math.max(0.6, r0 * 0.3);
+  const r7 = Math.max(0.5, r0 * 0.5);
+
+  const bx = c.baseX;
+  const by = c.baseY;
+  const dx = c.top.x - bx;
+  const dy = c.top.y - by;
+  const len = Math.sqrt(dx * dx + dy * dy);
+  const ndx = dx / len;
+  const ndy = dy / len;
+  const sdx = -ndy;
+  const sdy = ndx;
+
+  const tipTx = (c.tip ? c.tip.tx : c.top.x);
+  const tipTy = (c.tip ? c.tip.ty : c.top.y);
+
+  const tx = bx + (tipTx - c.top.x) * h;
+  const ty = by + (tipTy - c.top.y) * h;
+
+  const ax = bx + dx * h;
+  const ay = by + dy * h;
+
+  const rT = Math.max(2, r0 * (h * 0.3 + 0.05));
+  const rA = Math.max(2, r0 * (1 - h * 0.2));
+  const rB = Math.max(2, r0 * (1 - h * 0.6));
+  const rC = Math.max(1, r0 * (1 - h * 0.4) * 0.6);
+
+  // Light direction (precomputed)
+  const Lx = lightX;
+  const Ly = lightY;
+  const Llen = lightLen;
+  const Lndx = Lx / Llen;
+  const Lndy = Ly / Llen;
+
+  const baseL = -ndx * Lndx - ndy * Lndy;
+  const tipL = baseL * 0.8;
+
+  const hidx = c.hidx;
+
+  function tri(bx, by, cx, cy, ax, ay, r1, r2, h, baseL, tipL, side) {
+    // 6 points
+    const p1x = bx + sdx * r1;
+    const p1y = by + sdy * r1;
+    const p2x = bx + cx * h + sdx * r2;
+    const p2y = by + cy * h + sdy * r2;
+    const p3x = ax - sdx * r1;
+    const p3y = ay - sdy * r1;
+    const p4x = ax - sdx * r2;
+    const p4y = ay - sdy * r2;
+    const p5x = bx - sdx * r1;
+    const p5y = by - sdy * r1;
+    const p6x = bx - sdx * r2;
+    const p6y = by - sdy * r2;
+
+    ctx.beginPath();
+    ctx.moveTo(p1x, p1y);
+    ctx.lineTo(p2x, p2y);
+    ctx.lineTo(p3x, p3y);
+    ctx.lineTo(p4x, p4y);
+    ctx.lineTo(p5x, p5y);
+    ctx.lineTo(p6x, p6y);
+    ctx.lineTo(bx, by);
+    ctx.closePath();
+
+    const c = Math.abs(baseL);
+    const t = Math.abs(tipL);
+    const s = side;
+    const m = 0.0 + s * 0.0;
+
+    // 5 face indices
+    const f1 = [1, 2, 0, 1];
+    const f2 = [2, 3, 0, 1];
+    const f3 = [3, 4, 0, 1];
+    const f4 = [4, 5, 0, 1];
+    const f5 = [5, 6, 0, 1];
+
+    const baseLabs = Math.abs(baseL);
+    const tipLabs = Math.abs(tipL);
+
+    // Compute color per face
+    const f1L = baseLabs * 0.95 + 0.05;
+    const f2L = baseLabs * 0.2 + 0.05;
+    const f3L = tipLabs * 0.95 + 0.05;
+    const f4L = tipLabs * 0.2 + 0.05;
+    const f5L = (baseLabs + tipLabs) * 0.4 + 0.05;
+
+    // 5 color hues
+    const h1 = HUES[hidx | 0;
+    const h2 = (HUES[hidx] + 5) % 360;
+    const h3 = (HUES[hidx] + 4) % 360;
+    const h4 = (HUES[hidx] + 4) % 360;
+    const h5 = (HUES[hidx] + 5) % 360;
+
+    const L1 = Math.round(f1L * 1000) / 10;
+    const L2 = Math.round(f2L * 1000) / 10;
+    const L3 = Math.round(f3L * 1000) / 10;
+    const L4 = Math.round(f4L * 1000) / 10;
+    const L5 = Math.round(f5L * 1000) / 10;
+
+    ctx.fillColor = `hsl(${h1}, 75%%, ${L1}%%)`;
+
+    // 5 fill paths
+    ctx.beginPath();
+    ctx.moveTo(p1x, p1y);
+    ctx.lineTo(p2x, p2y);
+    ctx.lineTo(p3x, p3y);
+    ctx.lineTo(p4x, p4y);
+    ctx.lineTo(p5x, p5y);
+    ctx.lineTo(p6x, p6y);
+    ctx.closePath();
+    ctx.fillStyle = `hsl(${h1}, 75%, ${L1}%`;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(p2x, p2y);
+    ctx.lineTo(p3x, p3y);
+    ctx.lineTo(p4x, p4y);
+    ctx.lineTo(p5x, p5y);
+    ctx.lineTo(p6x, p6y);
+    ctx.closePath();
+    ctx.fillStyle = `hsl(${h2}, 75%, ${L2}%`;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(p3x, p3y);
+    ctx.lineTo(p4x, p4y);
+    ctx.lineTo(p5x, p5y);
+    ctx.lineTo(p6x, p6y);
+    ctx.closePath();
+    ctx.fillStyle = `hsl(${h3}, 75%, ${L3}%`;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(p4x, p4y);
+    ctx.lineTo(p5x, p5y);
+    ctx.lineTo(p6x, p6y);
+    ctx.closePath();
+    ctx.fillStyle = `hsl(${h4}, 75%, ${L4}%`;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(p5x, p5y);
+    ctx.lineTo(p6x, p6y);
+    ctx.closePath();
+    ctx.fillStyle = `hsl(${h5}, 75%, ${L5}%`;
+    ctx.fill();
+
+    // Edges
+    ctx.strokeStyle = `hsl(${h1}, 75%, 95%`;
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(p1x, p1y);
+    ctx.lineTo(p2x, p2y);
+    ctx.lineTo(p3x, p3y);
+    ctx.lineTo(p4x, p4y);
+    ctx.lineTo(p5x, p5y);
+    ctx.lineTo(p6x, p6y);
+    ctx.lineTo(bx, by);
+    ctx.closePath();
+    ctx.stroke();
+  }
+
+  // 4 main faces per crystal
+  tri(bx, by, ndx, ndy, ax, ay, sdx, sdy, r1, r2, h, baseL, tipL, 1);
+  tri(bx, by, ndx, ndy, ax, ay, - sdx, - sdy, r1, r2, h, baseL, tipL, -1);
+
+  // Top facet
+  ctx.beginPath();
+  ctx.moveTo(tx - sdx * rT, ty - sdy * rT);
+  ctx.lineTo(tx + sdx * rT * 0.6, ty + sdy * rT * 0.6);
+  ctx.lineTo(ax + sdx * rA, ay + sdy * rA);
+  ctx.lineTo(ax - sdx * rA, ay - sdy * rA);
+  ctx.lineTo(tx - sdx * rT, ty - sdy * rT);
+  ctx.closePath();
+  const tL = Math.abs(tipL) * 0.7 + 0.25;
+  ctx.fillStyle = `hsl(${HUES[hidx | 0}, 75%, ${Math.round(tL * 100)}%`;
+  ctx.fill();
+
+  // Glow halo at top
+  if (c.peak > 8) {
+    ctx.beginPath();
+    ctx.arc(tx, ty, c.peak * 0.5, 0, TWO_PI);
+    ctx.fillStyle = `hsla(${HUES[hidx] | 0}, 75%, 70%, 0.2)`;
+    ctx.fill();
+  }
+}
+
+function drawCrystalShadow(c) {
+  if (c.h < 0.05) return;
+  const h = c.h;
+  const r0 = c.baseR;
+  const dx = c.top.x - c.baseX;
+  const dy = c.top.y - c.baseY;
+  const len = Math.sqrt(dx * dx + dy * dy);
+  const ndx = dx / len;
+  const ndy = dy / len;
+  const sdx = -ndy;
+  const sdy = ndx;
+
+  const ax = c.baseX + dx * h;
+  const ay = c.baseY + dy * h;
+
+  const rA = Math.max(2, r0 * (1 - h * 0.2));
+  const rB = Math.max(2, r0 * (1 - h * 0.6));
+
+  ctx.beginPath();
+  ctx.moveTo(c.baseX + sdx * r0, c.baseY + sdy * r0);
+  ctx.lineTo(ax + sdx * rA, ay + sdy * rA);
+  ctx.lineTo(ax - sdx * rA, ay - sdy * rA);
+  ctx.lineTo(c.baseX - sdx * r0, c.baseY - sdy * r0);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(0,0,0,0.355)';
+  ctx.fill();
+}
+
+function drawCrystalOutline(c) {
+  if (c.h < 0.05) return;
+  const h = c.h;
+  const r0 = c.baseR;
+  const dx = c.top.x - c.baseX;
+  const dy = c.top.y - c.baseY;
+  const len = Math.sqrt(dx * dx + dy * dy);
+  const ndx = dx / len;
+  const ndy = dy / len;
+  const sdx = -ndy;
+  const sdy = ndx;
+
+  const r1 = Math.max(2.5, r0 * 0.75);
+  const r2 = Math.max(2, r0 * 0.45);
+
+  const ax = c.baseX + dx * h;
+  const ay = c.baseY + dy * h;
+
+  ctx.beginPath();
+  ctx.moveTo(c.baseX + sdx * r0, c.baseY + sdy * r0);
+  ctx.lineTo(ax + sdx * r1, ay + sdy * r1);
+  ctx.lineTo(ax - sdx * r1, ay - sdy * r1);
+  ctx.lineTo(c.baseX - sdx * r0, c.baseY - sdy * r0);
+  ctx.closePath();
+  ctx.lineWidth = 1.0;
+  ctx.strokeStyle = 'hsla(220, 50%, 95%, 0.7';
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(c.baseX + sdx * r2, c.baseY + sdy * r2);
+  ctx.lineTo(ax + sdx * r2, ay + sdy * r2);
+  ctx.lineTo(ax - sdx * r2, ay - sdy * r2);
+  ctx.lineTo(c.baseX - sdx * r2, c.baseY - sdy * r2);
+  ctx.closePath();
+  ctx.strokeStyle = 'hsla(220, 50%, 95%, 0.4';
+  ctx.stroke();
+}
+
+// Shards (shattering debris
+class Shard {
+  constructor(x, y, vx, vy, rv, theta, r, life, seed) {
+    this.x = x;
+    this.y = y;
+    this.vx = vx;
+    this.vy = vy;
+    this.r = r;
+    this.theta = theta;
+    this.rv = rv;
+    this.life = life;
+    this.seed = seed;
+    this.hidx = Math.floor(Math.random() * HUES.length);
+    this.dir = Math.random() * 2 - 1.0;
+  }
+  tick() {
+    this.x += this.vx;
+    this.y += this.vy;
+    this.vy += 0.14;
+    this.vx *= 0.99;
+    this.vy *= 0.99;
+    this.theta += this.rv;
+    this.rv *= 0.99;
+    this.life -= 0.006;
+  }
+  draw() {
+    const r = this.r;
+    const th = this.theta;
+    const h = this.hidx | 0;
+    ctx.beginPath();
+    const cx = this.x;
+    const cy = this.y;
+    const s = Math.cos(th * 0.5);
+    const c = Math.cos(th * 0.5) * r;
+    const s2 = Math.sin(th * 0.5) * r;
+    const cs = Math.cos(th);
+    const ss = Math.sin(th);
+    ctx.moveTo(cx + (-r * s - r * c) * 1.2, cy + (r * s * 2.5) * 1.5);
+    ctx.lineTo(cx + r * cs, cy + r * ss);
+    ctx.lineTo(cx - r * cs, cy - r * ss);
+    ctx.lineTo(cx - r * cs, cy - r * ss);
+    ctx.lineTo(cx + r * cs, cy + r * ss);
+    ctx.closePath();
+    const L = 50 + Math.random() * 15;
+    ctx.fillStyle = `hsla(${HUES[h] | 0}, 75%, ${L}%`, ${this.life * 1}`;
+    ctx.fill();
+    ctx.strokeStyle = `hsla(${HUES[h] | 0}, 75%, 95%%, ${this.life * 1}`;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+}
+
+class Drip {
+  constructor(side, x, y, vy, r) {
+    this.side = side;
+    this.x = x;
+    this.y = y;
+    this.vy = vy;
+    this.r = r;
+    this.alive = true;
+  }
+  tick() {
+    this.y += this.vy;
+    this.vy += 0.04;
+    if (this.y > H * 0.95 + 0.6) {
+      ripples.push({ x: this.x, y: H * 0.95, r: 1.0, max: 6.5 + Math.random() * 8.5, life: 1.0, seed: Math.random() });
+      this.alive = false;
+    }
+  }
+  draw() {
+    const r = this.r;
+    const x = this.x;
+    const y = this.y;
+    ctx.beginPath();
+    ctx.moveTo(x, y - r);
+    ctx.lineTo(x + r, y);
+    ctx.lineTo(x - r, y);
+    ctx.closePath();
+    ctx.fillStyle = `hsla(220, 50%, 95%%, 0.8`;
+    ctx.fill();
+    // little trail
+    ctx.beginPath();
+    ctx.moveTo(x, y - r * 4);
+    ctx.lineTo(x + r * 0.6, y - r * 4);
+    ctx.lineTo(x - r * 0.6, y - r * 4);
+    ctx.closePath();
+    ctx.fillStyle = `hsla(220, 50%, 95%%, 0.25`;
+    ctx.fill();
+  }
+}
+
+const drips = [];
+const ripples = [];
+
+function spawnDrip() {
+  // Find a stalactite (downward crystal) at top
+  let c = null;
+  let attempts = 20;
+  while (attempts-- > 0) {
+    const i = Math.floor(Math.random() * crystalPool.length);
+    const cc = crystalPool[i];
+    if (cc.dir === -1 && !cc.dying && cc.h > 4.5) { c = cc; break; }
+  }
+  if (!c) return;
+  const d = new Drip(-1, c.tip.tx, c.tip.ty + c.peak * 0.5, 0.0 + Math.random() * 0.4, 5.5);
+  drips.push(d);
+}
+
+// Light source
+let lightX = 0, lightY = 0;
+let lightLen = 0;
+let lightAngle = 0;
+let lightPhase = 0;
+
+function updateLight() {
+  lightPhase += 0.0065;
+  lightAngle = lightPhase;
+  // Slow drift via sum of sinus
+  const ax = Math.sin(lightPhase * 0.7) * 0.35 + Math.sin(lightPhase * 0.3) * 0.15;
+  const ay = Math.cos(lightPhase * 0.5) * 0.25 + Math.cos(lightPhase * 0.7) * 0.15;
+  lightX = Math.sin(ax) * 0.7;
+  lightY = Math.cos(ay) * 0.7;
+  lightLen = Math.sqrt(lightX * lightX + lightY * lightY);
+  if (lightLen > 0.01) {
+    lightX /= lightLen;
+    lightY /= lightLen;
+  } else {
+    lightX = 0;
+    lightY = 1;
+    lightLen = 1;
+  }
+}
+
+// Rock caustics - colored patches on the cavern walls
+class CausticsPatch {
+  constructor(side, y, baseH, phase, hue, size) {
+    this.side = side;
+    this.y = y;
+    this.baseH = baseH;
+    this.phase = phase;
+    this.hue = hue;
+    this.size = size;
+  }
+  draw() {
+    const t = lightPhase * 1.7 + this.phase;
+    const cx = Math.sin(t * 0.4) * this.size + Math.sin(t * 0.7 + 1.5) * this.size * 0.5;
+    const x = this.side + cx;
+    const y = this.y + Math.sin(t * 0.5 + this.phase) * 8;
+    const r = this.baseH * (1.0 + Math.sin(t * 0.8) * 0.2);
+    const h = this.hue | 0;
+    const alpha = 0.05 + Math.sin(t * 0.2) * 0.02;
+    ctx.fillStyle = `hsla(${h}, 75%, 50%, ${Math.abs(alpha)}`;
+    ctx.beginPath();
+    ctx.ellipse(x, y, r * 1.5, r, 0, 0, TWO_PI);
+    ctx.fill();
+  }
+}
+
+class Caustics {
+  constructor() {
+    this.up = [];
+    this.down = [];
+    // Upper floor patches
+    let n = 20;
+    for (let i = 0; i < n; i++) {
+      const side = (Math.random() - 0.5) * W * 0.5;
+      const y = H * 0.98 + Math.random() * 6;
+      const h = 15 + Math.random() * 12;
+      const phase = Math.random() * 5;
+      const hue = 180 + Math.random() * 60 - 30;
+      const size = 12 + Math.random() * 16;
+      this.up.push(new CausticsPatch(side, y, h, phase, hue, size));
+    }
+    // Lower ceiling patches
+    n = 20;
+    for (let i = 0; i < n; i++) {
+      const side = (Math.random() - 0.5) * W * 0.5;
+      const y = H * 0.02 + Math.random() * 6;
+      const h = 15 + Math.random() * 12;
+      const phase = Math.random() * 5;
+      const hue = 180 + Math.random() * 60 - 30;
+      const size = 12 + Math.random() * 16;
+      this.down.push(new CausticsPatch(side, y, h, phase, hue, size));
+    }
+  }
+  draw() {
+    for (let i = 0; i < this.up.length; i++) this.up[i].draw();
+    for (let i = 0; i < this.down.length; i++) this.down[i].draw();
+  }
+}
+
+let caustics;
+
+// Cave background
+function drawBackground() {
+  // Deep background gradient
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, 'hsl(180, 5%, 5%25)');
+  grad.addColorStop(0.5, 'hsl(220, 5%, 5%25');
+  grad.addColorStop(1, 'hsl(180, 5%, 5%25)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Top rock surface
+  ctx.fillStyle = 'hsl(220, 5%25';
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(W, 0);
+  ctx.lineTo(W, H * 0.06);
+  ctx.lineTo(0, H * 0.06);
+  ctx.closePath();
+  ctx.fill();
+
+  // Bottom rock surface
+  ctx.fillStyle = 'hsl(220, 5%25';
+  ctx.beginPath();
+  ctx.moveTo(0, H * 0.94);
+  ctx.lineTo(W, H * 0.94);
+  ctx.lineTo(W, H);
+  ctx.lineTo(0, H);
+  ctx.closePath();
+  ctx.fill();
+
+  // Caustics patches
+  if (caustics) caustics.draw();
+
+  // Light glow
+  const cx = W * (0.5 + lightX * 0.6);
+  const cy = H * 0.5;
+  const lr = Math.max(80, W * 0.4);
+  const radial = ctx.createRadialGradient(cx, cy, 0, cx, cy, lr);
+  radial.addColorStop(0, 'hsla(220, 50%, 50%25)');
+  radial.addColorStop(0.5, 'hsla(220, 50%, 40%25');
+  radial.addColorStop(1, 'hsla(220, 50%, 20%25');
+  ctx.fillStyle = radial;
+  ctx.fillRect(0, 0, W, H);
+}
+
+let coverage = 0;
+let coverageThreshold = 0.7;
+let tremorPhase = 0;
+let tremorIntensity = 0;
+let tremorActive = false;
+let crystalAge = 0; // crystal age counter
+
+function computeCoverage() {
+  let cov = 0;
+  for (let i = 0; i < crystalPool.length; i++) {
+    const c = crystalPool[i];
+    if (c.dying) continue;
+    cov += c.get Coverage();
+  }
+  return cov;
+}
+
+// Main loop
+let lastTime = 0;
+function loop(t) {
+  const dt = Math.min(0.03, (t - lastTime) / 100);
+  lastTime = t;
+
+  // Light update
+  updateLight();
+
+  // Coverage
+  coverage = computeCoverage() / (W * H / 1e6);
+
+  // Trigger tremor if coverage exceeds threshold
+  if (coverage > coverageThreshold && !tremorActive) {
+    tremorActive = true;
+    tremorPhase = 0;
+    tremorIntensity = 0;
+  }
+
+  // Tremor phase
+  if (tremorActive) {
+    tremorPhase += 0.05;
+    tremorIntensity = Math.sin(tremorPhase * TWO_PI / 10) * 0.5;
+    // After 5 cycles, shatter the oldest crystals
+    if (tremorPhase > 5) {
+      // Find oldest (highest h) crystals
+      const sorted = crystalPool.slice().sort((a, b) => (b.h + b.peak) - (a.h + a.peak));
+      const N = Math.floor(sorted.length * 0.7);
+      for (let i = 0; i < N; i++) {
+        const c = sorted[i];
+        if (!c.dying) {
+          const shards = c.shatter(crystalAge);
+          for (let j = 0; j < shards.length; j++) {
+            const s = shards[j];
+            shardsPool.push(new Shard(s.x, s.y, s.vx, s.vy, s.rv, s.theta, s.r, s.life, s.seed));
+          }
+        }
+        c.dying = true;
+      }
+      // Re-seed
+      crystalAge = 0;
+      seedCrystals();
+      tremorActive = false;
+      tremorPhase = 0;
+      tremorIntensity = 0;
+    }
+  }
+
+  // Growth
+  for (let i = 0; i < crystalPool.length; i++) {
+    crystalPool[i].update();
+    if (crystalPool[i].h > 0 && !crystalPool[i].dying) crystalAge += 0.001;
+  }
+  crystalAge += 0.001;
+
+  // Periodic drips
+  if (Math.random() < 0.025) spawnDrip();
+
+  // Render
+  drawBackground();
+
+  // Tremor shake
+  ctx.save();
+  if (tremorIntensity > 0) {
+    const sx = (Math.random() - 0.5) * tremorIntensity * 8;
+    const sy = (Math.random() - 0.5) * tremorIntensity * 8;
+    ctx.translate(sx, sy);
+  }
+
+  // Draw shadows first
+  for (let i = 0; i < crystalPool.length; i++) {
+    if (!crystalPool[i].dying) drawCrystalShadow(crystalPool[i]);
+  }
+
+  // Draw crystals
+  for (let i = 0; i < crystalPool.length; i++) {
+    if (crystalPool[i].dying) continue;
+    drawCrystal(crystalPool[i]);
+  }
+
+  // Draw outlines
+  for (let i = 0; i < crystalPool.length; i++) {
+    if (crystalPool[i].dying) continue;
+    drawCrystalOutline(crystalPool[i]);
+  }
+
+  // Drips
+  for (let i = drips.length - 1; i >= 0; i--) {
+    const d = drips[i];
+    d.tick();
+    if (!d.alive) {
+      drips.splice(i, 1);
+      continue;
+    }
+    d.draw();
+  }
+
+  // Ripples
+  for (let i = ripples.length - 1; i >= 0; i--) {
+    const r = ripples[i];
+    r.r += 0.5;
+    r.life -= 0.02;
+    if (r.r > r.max) r.life = 0;
+    if (r.life <= 0) {
+      ripples.splice(i, 1);
+      continue;
+    }
+    const lw = r.r * 0.06;
+    ctx.strokeStyle = `hsla(220, 50%, 95%, ${r.life * 0.7`;
+    ctx.lineWidth = lw;
+    ctx.beginPath();
+    ctx.ellipse(r.x, r.y, r.r, r.r * 0.25, 0, 0, TWO_PI);
+    ctx.stroke();
+  // inner ripple
+    ctx.strokeStyle = `hsla(220, 50%, 95%, ${r.life * 0.5`;
+    ctx.beginPath();
+    ctx.ellipse(r.x, r.y, r.r * 0.5, r.r * 0.125, 0, 0, TWO_PI);
+    ctx.stroke();
+  }
+
+  // Shards
+  for (let i = shardsPool.length - 1; i >= 0; i--) {
+    const s = shardsPool[i];
+    s.tick();
+    if (s.life <= 0 || s.y > H + 50) {
+      shardsPool.splice(i, 1);
+      continue;
+    }
+    s.draw();
+  }
+
+  ctx.restore();
+
+  requestAnimationFrame(loop);
+}
+
+let shardsPool = [];
+
+// Init
+resize();
+caustics = new Caustics();
+seedCrystals();
+requestAnimationFrame(loop);
+
+window.addEventListener('resize', () => {
+  resize();
+  crystalPool.length = 0;
+  shardsPool.length = 0;
+  drips.length = 0;
+  ripples.length = 0;
+  caustics = new Caustics();
+  seedCrystals();
+});
+
+</script>
+</body>
+</html>

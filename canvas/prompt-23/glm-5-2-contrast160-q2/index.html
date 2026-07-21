@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Endless Tunnel</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #000;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    cursor: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(() => {
+'use strict';
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha: false });
+let W = 0, H = 0, DPR = 1;
+let cx = 0, cy = 0;
+
+function resize() {
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = Math.max(1, Math.floor(window.innerWidth * DPR));
+  H = Math.max(1, Math.floor(window.innerHeight * DPR));
+  canvas.width = W;
+  canvas.height = H;
+  canvas.style.width = window.innerWidth + 'px';
+  canvas.style.height = window.innerHeight + 'px';
+  cx = W / 2;
+  cy = H / 2;
+}
+window.addEventListener('resize', resize);
+resize();
+
+const PERSPECTIVE = Math.min(W, H) * 1.7;
+
+// Tunnel geometry parameters
+const RING_SP = 22.0;
+const RADIUS = 180;
+const SLICE_COUNT = 1500;
+
+let _t = 0;
+function rand() {
+  _t = (_t + 1.0);
+  let v = Math.sin(_t * 1.3 + 4.7) + Math.sin(_t * 0.89 + 9.1);
+  v = Math.sin(v * 2.4 + 1.0);
+  return Math.abs(v) % 1.0;
+}
+
+const cols = {
+  blue:    [0.05, 0.55, 0.85, 1.0],
+  cyan:    [0.6, 0.85, 1.0, 1.0],
+  purple:  [0.65, 0.30, 0.85, 1.0],
+  magenta: [1.0, 0.25, 0.55, 1.0],
+  orange:  [1.0, 0.45, 0.15, 1.0],
+  pink:    [1.0, 0.55, 0.8, 1.0],
+  teal:    [0.1, 0.65, 0.75, 1.0],
+  lime:    [0.6, 1.0, 0.45, 1.0]
+};
+const colKeys = ['blue','cyan','purple','magenta','orange','pink','teal','lime'];
+
+let slices = [];
+let cam_z = 0.0;
+let last_time = 0;
+let elapsed = 0;
+let stars = [];
+let streaks = [];
+let streak_acc = 0.0;
+
+function initStars() {
+  stars.length = 0;
+  const n = 120;
+  for (let i = 0; i < n; i++) stars.push({
+    x: rand() * 2 - 0.5 - 0.5,
+    y: rand() * 2 - 0.5 - 0.5,
+    z: 600 + rand() * 3000,
+    s: 1.5 + rand() * 3.5,
+    br: 0.4 + rand() * 0.7
+  });
+}
+initStars();
+
+class Slice {
+  constructor(z) {
+    this.z = z;
+    this.seed = Math.floor(rand() * 100000) + 1;
+    this.phase = rand() * 1000;
+    this.openSide = -1;
+    this.openSize = 0;
+    this.colSeed = Math.floor(rand() * 1000);
+    this.h = 0; this.w = 0;
+    this.bcx = 0; this.bcy = 0;
+  }
+}
+
+function makeSlice(z) {
+  const s = new Slice(z);
+  const r = Math.floor(rand() * 7);
+  let openSide = -1, openSize = 0;
+  if (r < 3) {
+    openSide = Math.floor(rand() * 3);
+    openSize = 0.8 + rand() * 0.8;
+  }
+  s.openSide = openSide;
+  s.openSize = openSize;
+  s.colSeed = Math.floor(rand() * 1000);
+  return s;
+}
+
+function initSlices() {
+  slices.length = 0;
+  for (let i = 0; i < SLICE_COUNT; i++) {
+    const z = (i + 1) * RING_SP;
+    slices.push(makeSlice(z));
+  }
+}
+initSlices();
+
+function updateSlices() {
+  for (let i = 0; i < slices.length; i++) {
+    const s = slices[i];
+    s.z -= RING_SP;
+    if (s.z < 0) {
+      s.z += SLICE_COUNT * RING_SP;
+      const ns = makeSlice(0);
+      s.seed = ns.seed;
+      s.phase = ns.phase;
+      s.openSide = ns.openSide;
+      s.openSize = ns.openSize;
+      s.colSeed = ns.colSeed;
+      s.h = 0; s.w = 0; s.bcx = 0; s.bcy = 0;
+    }
+  }
+  return true;
+}
+
+let speed_target = 560;
+let speed = 560;
+let speed_timer = 0;
+let speed_pulse_t = -99;
+let trail_alpha = 0.9;
+let streak_color_idx = 0;
+let streak_color_t = 0;
+
+function updateSpeed(dt) {
+  speed_target -= dt;
+  if (speed_target <= 0) {
+    speed_target = 600 + rand() * 1500;
+    const roll = rand();
+    speed_target = 600 + roll * 1500;
+    if (rand() < 0.6) speed_target = 900 + rand() * 1200;
+    speed_pulse_t = 0;
+  }
+  const k = 1 - Math.exp(-dt * 0.0000017 * 8);
+  speed = speed + (speed_target - speed) * 0.04;
+  speed_pulse_t += dt;
+}
+
+function updateTrail(dt) {
+  const tgt = 0.7 + 0.3 * (Math.min(speed, 1800) / 1801);
+  trail_alpha = trail_alpha + (tgt - trail_alpha) * 0.02;
+  streak_color_t += dt;
+  if (streak_color_t > 2.5) {
+    streak_color_t = 0;
+    streak_color_idx = (streak_color_idx + 1) % colKeys.length;
+  }
+}
+
+function streakUpdate(dt) {
+  streak_acc += dt;
+  while (streak_acc > 0.0) {
+    streak_acc -= 1.0;
+    const angle = rand() * 6.28;
+    const r = rand();
+    const r2 = Math.sqrt(r);
+    streaks.push({
+      x: cx + Math.cos(angle) * r2 * 150 + (rand() - 0.5) * 30,
+      y: cy + Math.sin(angle) * r2 * 150 + (rand() - 0.5) * 30,
+      z: 100 + rand() * 700,
+      sp: 1 + rand() * 2
+    });
+  }
+  for (let i = streaks.length - 1; i >= 0; i--) {
+    streaks[i].z -= streaks[i].sp;
+    if (streaks[i].z < 0) streaks.splice(i, i);
+  }
+}
+
+let streaks_draw = [];
+
+function streakRender() {
+  streaks_draw.length = 0;
+  for (let i = 0; i < streaks.length; i++) {
+    const s = streaks[i];
+    if (s.z > 0) streaks_draw.push(s);
+  }
+  streaks_draw.sort((a, b) => b.z - a.z);
+  for (let i = 0; i < streaks_draw.length; i++) {
+    const s = streaks_draw[i];
+    const sc = PERSPECTIVE / (PERSPECTIVE + s.z);
+    if (sc <= 0 || sc > 1.6) continue;
+    const sx = cx + (s.x - cx) * sc;
+    const sy = cy + (s.y - cy) * sc;
+    const alpha = 0.85 * sc;
+    const sz = (1 + 50 * sc) * 0.5;
+    const cc = cols[colKeys[streak_color_idx]];
+    const ccR = (Math.floor(cc[0] * 1000));
+    const ccG = (Math.floor(cc[1] * 1000));
+    const ccB = (Math.floor(cc[2] * 1000);
+    const ccA = Math.floor(alpha * 1000);
+    ctx.fillStyle = 'rgba(' + ccR + ',' + ccG + ',' + ccB + ',' + ccA + ')';
+    ctx.fillRect(sx - sz * 0.5, sy - sz * 0.5, sz, sz);
+  }
+}
+
+function sliceAt(i) { return slices[i]; }
+function sliceAt2(i) { return slices[(i + 1) % slices.length]; }
+
+function drawHorizon() {
+  const skyTop = 'hsl(240, 70%, 5)';
+  const skyMid = 'hsl(250, 60%, 7)';
+  const skyBot = 'hsl(25, 80%, 12)';
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, skyTop);
+  grad.addColorStop(0.55, skyMid);
+  grad.addColorStop(0.95, skyBot);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  const hznY = H * 0.72;
+  const mtGrad = ctx.createLinearGradient(0, hznY, 0, H);
+  mtGrad.addColorStop(0, 'hsla(280, 40%, 13, 1');
+  mtGrad.addColorStop(1, 'hsla(28, 50%, 10, 1)');
+  ctx.fillStyle = mtGrad;
+  ctx.beginPath();
+  ctx.moveTo(0, hznY);
+  ctx.lineTo(W * 0.2, hznY + 5);
+  ctx.lineTo(W * 0.2, hznY + 5);
+  ctx.lineTo(W * 0.4, hznY + 10);
+  ctx.lineTo(W * 0.6, hznY + 7);
+  ctx.lineTo(W, hznY);
+  ctx.lineTo(0, hznY);
+  ctx.lineTo(0, H);
+  ctx.lineTo(W, H);
+  ctx.lineTo(W, hznY);
+  ctx.fill();
+
+  const hazeGrad = ctx.createLinearGradient(0, hznY - 50, 0, hznY + 20);
+  hazeGrad.addColorStop(0, 'hsla(280, 30%, 5, 0)');
+  hazeGrad.addColorStop(1, 'hsla(25, 80%, 20, 0.6)');
+  ctx.fillStyle = hazeGrad;
+  ctx.fillRect(0, hznY - 50, W, 70);
+
+  for (let i = 0; i < stars.length; i++) {
+    const st = stars[i];
+    const sx = cx + st.x * (W * 0.6);
+    const sy = cy * 0.6 + st.y * (H * 0.4);
+    const tw = 0.75 + 0.25 * Math.sin(elapsed * 0.001 * st.s * 5 + st.x * 30);
+    const br = st.br * tw;
+    const sz = (0.5 + st.s * 0.7) * DPR;
+    ctx.fillStyle = 'rgba(255, 245, 240, ' + br * 0.5 + ')';
+    ctx.fillRect(sx - sz * 0.5, sy - sz * 0.5, sz, sz);
+  }
+}
+
+function projectSlice(s, twobble) {
+  const z = s.z;
+  const sc = PERSPECTIVE / (PERSPECTIVE + z);
+  if (sc < 0.0012 || sc > 1.6) return null;
+
+  const ph = s.phase;
+  const wob = twobble;
+  const dx = (Math.cos(ph * 0.3 + 2.1) + Math.cos(ph * 0.7 + 1.0)) * 150 * wob;
+  const dy = (Math.sin(ph * 0.6 + 2.3) + Math.cos(ph * 0.2 + 5.0)) * 150 * wob;
+
+  const bx = cx + dx;
+  const by = cy + dy;
+
+  const r = Math.max(1, RADIUS * sc);
+  const h = Math.max(3, r * 0.05);
+  const w = Math.max(6, r * 0.16);
+
+  s.h = h;
+  s.w = w;
+  s.bcx = bx;
+  s.bcy = by;
+
+  return [sc, bx, by, r, h, w];
+}
+
+function drawSlice(s, proj, twobble, elapsed_norm) {
+  const sc = proj[0];
+  const bx = proj[1];
+  const by = proj[2];
+  const r = proj[3];
+  const h = s.h;
+  const w = s.w;
+  const r_inner = r * 0.8;
+
+  const seed = s.seed;
+  const seedF = seed * 0.5;
+  const colH = ((seedF % 1.0) + 1.0) % 1.0;
+  const colV = (seed * 3) % 3;
+
+  let hue, r0, g0, b0;
+  const ck = (s.colSeed % colKeys.length);
+  const cc = cols[colKeys[ck]];
+  const hueShift = elapsed_norm * 0.000 * 0;
+  hue = (((colH * 80 + 240) | 0) % 360) + 240;
+  r0 = (cc[0] * 100 | 0);
+  g0 = (cc[1] * 100 | 0);
+  b0 = (cc[2] * 100);
+  hue = (hue + (s.colSeed * 13) % 360) % 0 === 0 ? (hue | 0) : hue;
+
+  const baseAlpha = 0.7 * sc + 0.1;
+  let baseA = baseAlpha;
+  const edgeA = 0.95 * sc + 0.4;
+
+  const openSide = s.openSide;
+  const openSize = s.openSize;
+  const openLen = Math.floor(r * openSize);
+
+  // First: open segments (tunnel structure)
+  const segs = 8;
+  for (let i = 0; i < segs; i++) {
+    if (i === openSide) continue;
+
+    const angle = (i / segs) * 6.28;
+    const angle2 = ((i + 1) / segs) * 6.28;
+    const cosA = Math.cos(angle);
+    const sinA = Math.sin(angle);
+    const cosB = Math.cos(angle2);
+    const sinB = Math.sin(angle2);
+
+    const x1 = bx + cosA * r;
+    const y1 = by + sinA * r;
+    const x2 = bx + cosB * r;
+    const y2 = by + sinB * r;
+
+    const x3 = bx + cosA * r_inner;
+    const y3 = by + sinA * r_inner;
+    const x4 = bx + cosB * r_inner;
+    const y4 = by + sinB * r_inner;
+
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.lineTo(x4, y4);
+    ctx.lineTo(x3, y3);
+    ctx.closePath();
+
+    const segShade = 0.85 + 0.15 * Math.sin(angle * 2 + elapsed * 0.001 * 3);
+    const rF = Math.floor(r0 * segShade);
+    const gF = Math.floor(g0 * segShade);
+    const bF = Math.floor(b0 * segShade);
+    ctx.fillStyle = 'rgba(' + rF + ',' + gF + ',' + bF + ',' + (Math.floor(baseA * 100) / 100) + ')';
+    ctx.fill();
+
+    ctx.lineWidth = Math.max(1, w * 0.25);
+    ctx.strokeStyle = 'rgba(' + r0 + ',' + g0 + ',' + b0 + ',' + edgeA + ')';
+    ctx.stroke();
+  }
+
+  // Outer contour rings
+  const ringR = r * 1.0;
+  const ringW = Math.max(2, w * 0.2);
+  const ringA = 0.98 * sc + 0.3;
+  ctx.lineWidth = ringW;
+  ctx.strokeStyle = 'rgba(' + r0 + ',' + g0 + ',' + b0 + ',' + ringA + ')';
+  ctx.beginPath();
+
+  if (openSide >= 0) {
+    const sa = openSide / 8 * 6.28;
+    const ea = ((openSide + 1) / 8) * 6.28;
+    ctx.arc(bx, by, ringR, sa, ea, false);
+  ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(bx, by, ringR * 0.8, sa, ea, false);
+    const innerA = Math.floor((0.98 * sc + 0.3) * 100) / 100;
+    ctx.strokeStyle = 'rgba(' + r0 + ',' + g0 + ',' + b0 + ',' + innerA + ')';
+    ctx.stroke();
+  } else {
+    ctx.arc(bx, by, ringR, 0, 6.28);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(bx, by, ringR * 0.8, 0, 6.28);
+    const innerA = Math.floor((0.98 * sc + 0.3) * 100) / 100;
+    ctx.strokeStyle = 'rgba(' + r0 + ',' + g0 + ',' + b0 + ',' + innerA + ')';
+    ctx.stroke();
+  }
+
+  // Spoke lines (when no open)
+  const spokeA = (0.5 * sc + 0.3) * (0.5);
+  if (openSide === -1 && sc > 0.4 && sc < 1.2) {
+    ctx.lineWidth = Math.max(1, w * 0.05);
+    ctx.strokeStyle = 'rgba(' + r0 + ',' + g0 + ',' + b0 + ',' + (Math.floor(spokeA * 100) / 100) + ')';
+    for (let k = 0; k < 8; k++) {
+      const a = (k / 8) * 6.28;
+      const cA = Math.cos(a);
+      const sA = Math.sin(a);
+      const x1 = bx + cA * r * 0.8;
+      const y1 = by + sA * r * 0.8;
+      const x2 = bx + cA * r;
+      const y2 = by + sA * r;
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+    }
+  }
+
+  // Open side glow (subtle accent color)
+  if (openSide !== -1) {
+    const sa = openSide / 8 * 6.28;
+    const ea = ((openSide + 1) / 8) * 6.28;
+    const mid = (sa + ea) * 0.5;
+    const glowR = Math.cos(mid) * r * 1.6;
+    const glowY = Math.sin(mid) * r * 1.6;
+    const glowX = bx + glowR;
+    const glowY = by + glowY;
+    const glowSz = r * 0.6;
+    ctx.globalCompositeOperation = 'screen';
+    const grad = ctx.createRadialGradient(glowX, glowY, 0, glowX, glowY, glowSz);
+    grad.addColorStop(0, 'rgba(' + r0 + ',' + g0 + ',' + b0 + ',' + (sc * 0.4) + ')');
+    grad.addColorStop(1, 'rgba(' + r0 + ',' + g0 + ',' + b0 + ',0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(glowX - glowSz, glowY - glowSz, glowSz * 2, glowSz * 2);
+    ctx.globalCompositeOperation = 'source-over';
+  }
+}
+
+function updateScene(dt, elapsed_real) {
+  const z_step = speed * dt * 0.001;
+  for (let i = 0; i < slices.length; i++) {
+    const s = slices[i];
+    s.z -= z_step;
+    if (s.z < 0) {
+      s.z += SLICE_COUNT * RING_SP;
+      const ns = makeSlice(0);
+      s.seed = ns.seed;
+      s.phase = ns.phase;
+      s.openSide = ns.openSide;
+      s.openSize = ns.openSize;
+      s.colSeed = ns.colSeed;
+      s.h = 0; s.w = 0; s.bcx = 0; s.bcy = 0;
+    }
+  }
+
+  updateSpeed(dt);
+  updateTrail(dt);
+
+  // streaks
+  streakUpdate(dt);
+
+  // Stars drift
+  for (let i = 0; i < stars.length; i++) {
+    const st = stars[i];
+    st.x = (st.x + 0.00002 * dt);
+    st.x = ((st.x % 2) + 2) % 2 - 0.5 - 0.5;
+  if (st.x > 1.5) st.x = -1.5;
+  if (st.x < -1.5) st.x = 1.5;
+  st.br = 0.4 + 0.7 * (Math.sin(elapsed_real * 0.001 * 2 + st.z * 0.05) + 1);
+  st.br = st.br * 0.5;
+  if (st.br < 0.2) st.br = 0.2;
+  if (st.br > 1.0) st.br = 1.0;
+  }
+
+  return z_step;
+}
+
+let streaks_draw_buf = [];
+
+function streakRenderFn() {
+  streaks_draw_buf.length = 0;
+  for (let i = 0; i < streaks.length; i++) {
+    const s = streaks[i];
+    if (s.z > 0) streaks_draw_buf.push(s);
+  }
+  streaks_draw_buf.sort((a, b) => b.z - a.z);
+
+  const cc = cols[colKeys[streak_color_idx]];
+  const r0 = Math.floor(cc[0] * 100);
+  const g0 = Math.floor(cc[1] * 100);
+  const b0 = Math.floor(cc[2] * 100);
+
+  for (let i = 0; i < streaks_draw_buf.length; i++) {
+    const s = streaks_draw_buf[i];
+    const sc = PERSPECTIVE / (PERSPECTIVE + s.z);
+    if (sc <= 0 || sc > 1.6) continue;
+    const sx = cx + (s.x - cx) * sc;
+    const sy = cy + (s.y - cy) * sc;
+    const alpha = 0.85 * sc;
+    const sz = (1 + 50 * sc) * 0.5;
+    const aR = Math.floor(alpha * 100);
+    ctx.fillStyle = 'rgba(' + r0 + ',' + g0 + ',' + b0 + ',' + (aR / 100) + ')';
+    ctx.fillRect(sx - sz * 0.5, sy - sz * 0.5, sz, sz);
+  }
+}
+
+function drawSlices(twobble, elapsed_real) {
+  // Sort by z (farthest first)
+  const sorted = slices.slice().sort((a, b) => b.z - a.z);
+  for (let i = 0; i < sorted.length; i++) {
+    const s = sorted[i];
+    const proj = projectSlice(s, twobble);
+    if (proj === null) continue;
+    drawSlice(s, proj, twobble, elapsed_real * 0.001);
+  }
+}
+
+function drawVign() {
+  const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W, H) * 0.7);
+  grad.addColorStop(0, 'rgba(0, 0, 0, 0)');
+  grad.addColorStop(1, 'rgba(0, 0, 0, 1)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+}
+
+function drawSpeedLines() {
+  // Speed streaks radiating outward from vanishing point
+  const n = 10;
+  for (let i = 0; i < n; i++) {
+    const t = (elapsed * 0.001 * 0.1) + (i / n);
+    const tx = Math.sin(t * 6.28);
+    const ty = Math.cos(t * 6.28);
+    const x1 = cx + tx * 60;
+    const y1 = cy + ty * 60;
+    const x2 = cx + tx * 120;
+    const y2 = cy + ty * 120;
+    const a = 0.4;
+    const r0 = 100;
+    const g0 = 150;
+    const b0 = 220;
+    ctx.strokeStyle = 'rgba(' + r0 + ',' + g0 + ',' + b0 + ',' + a + ')';
+    ctx.lineWidth = 2 * DPR;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+  }
+}
+
+function animate(time) {
+  const dt = Math.min(time - last_time, 50);
+  last_time = time;
+  elapsed += dt;
+
+  // Camera drift
+  const drift_x = Math.cos(time * 0.0000003 * 6.28) * 50 * DPR;
+  const drift_y = Math.sin(time * 0.0000005 * 6.28) * 40 * DPR;
+  const drift_rot = Math.cos(time * 0.0000003) * 0.05;
+  const twobble = 0.5 + 0.5 * Math.sin(time * 0.0000001 * 6.28);
+
+  ctx.save();
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+
+  // Background horizon
+  drawHorizon();
+
+  ctx.translate(cx + drift_x, cy + drift_y);
+  ctx.rotate(drift_rot);
+  ctx.translate(-(cx), -(cy));
+
+  // streaks (behind tunnel)
+  streakRenderFn();
+
+  // Slices
+  drawSlices(twobble, elapsed);
+
+  // Vign
+  drawVign();
+
+  // Speed streaks
+  if (speed > 1500) {
+    drawSpeedLines();
+  }
+
+  // Pulse on very fast moments
+  if (speed_pulse_t < 40) {
+    const pulseA = Math.max(0, (1 - speed_pulse_t / 40) * 0.15);
+    if (pulseA > 0.01) {
+      const pg = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W, H) * 0.5);
+      pg.addColorStop(0, 'rgba(255, 245, 200, 0)');
+      pg.addColorStop(1, 'rgba(255, 245, 200, ' + pulseA + ')');
+      ctx.fillStyle = pg;
+      ctx.fillRect(0, 0, W, H);
+    }
+  }
+
+  ctx.restore();
+
+  requestAnimationFrame(animate);
+}
+
+last_time = 0;
+requestAnimationFrame(animate);
+
+})();
+</script>
+</body>
+</html>

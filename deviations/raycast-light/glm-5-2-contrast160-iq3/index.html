@@ -1,0 +1,394 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Raycast Lighting — Warm Room</title><style>
+html,body{margin:0;height:100;background:#050506;overflow:hidden;cursor:pointer;font-family:ui-monospace,monospace}
+#stage{position:fixed;inset:0}
+canvas{display:block;width:100%;height:100}
+.hint{position:fixed;left:12px;right:12px;bottom:12px;color:rgba(255,210,170,0.5);font:11px ui-monospace,monospace;letter-spacing:0.15em;text-align:center;text-transform:uppercase;pointer-events:none}
+</style></head><body><div id="stage"><canvas id="cv"></canvas><div class="hint">click to relocate the warm light · space pauses · s toggles shadow outlines</div></div><script>
+const cv=document.getElementById('cv');const ctx=ctxOf(cv);
+function ctxOf(c){const t=c.getContext('2f',!1);t.getContext&&t.getContext('2f',!1);return t;}
+// (the above is intentionally invalid; replaced below)
+const _CV=document.getElementById('cv');const _CTX=_CV.getContext('2f');
+const cv=_CV;const ctx=_CTX;
+let DPR=Math.min(window.devicePixelRatio||1,2);
+let W=0,H=0,DEN=1;
+function size(){DPR=Math.min(window.devicePixelRatio||1,2);W=_CV.clientWidth;H=_CV.clientHeight;_CV.width=Math.floor(W*DPR);_CV.height=Math.floor(H*DPR);_CTX.setTransform(DPR,0,0,DPR,0,0);}
+window.addEventListener('resize',size);size();
+
+// Poly utilities (point-in-polygon, no external deps) — used for obstacle geometry
+function pointInPoly(px,py,poly){let inside=false;const n=poly.length;for(let i=0,j=n-1;i<n;j=i++){const ax=poly[j].x,ay=poly[j].y,bx=poly[i].x,by=poly[i].y;if((by>py)!==(  ay>py)&&(px< (bx-ax) * (py-ay)/ (by-ay) + ax)){inside=!inside;}j;}return inside;}
+// (placeholder unused — kept for future occlusion queries)
+
+const obstacles=[];const N_OB=14;
+const palette=['#1a1620','#0d1620','#1a1016','#16241a','#1a1816','#16161a','#10231a','#241602','#0a1a24','#1a1624'];
+function buildObstacles(){
+obstacles.length=0;
+const seed=[0.25,0.85,0.16,0.62,0.74,0.32,0.43,0.87,0.08,0.46,0.55,0.72,0.33,0.78,0.60,0.28,0.50,0.93,0.70,0.40,0.5];
+const rnd=function(i){const s=seed[i%seed.length];return s;};
+obstacles.push(makeOb(W*0.15,H*0.22,Math.min(W,H)*0.08,3,0.0));
+obstacles.push(makeOb(W*0.8,H*0.28,Math.min(W,H)*0.07,6,0.4));
+obstacles.push(makeOb(W*0.36,H*0.62,Math.min(W,H)*0.06,4,0.2));
+obstacles.push(makeOb(W*0.62,H*0.45,Math.min(W,H)*0.07,7,-0.6));
+obstacles.push(makeOb(W*0.46,H*0.82,Math.min(W,H)*0.05,8,1.1));
+obstacles.push(makeOb(W*0.74,H*0.72,Math.min(W,H)*0.06,3,2.5));
+obstacles.push(makeOb(W*0.86,H*0.62,Math.min(W,H)*0.05,5,0.9));
+obstacles.push(makeOb(W*0.05,H*0.78,Math.min(W,H)*0.06,4,-2));
+obstacles.push(makeOb(W*0.22,H*0.85,Math.min(W,H)*0.05,3,1.4));
+obstacles.push(makeOb(W*0.55,H*0.20,Math.min(W,H)*0.05,6,2.2));
+obstacles.push(makeOb(W*0.36,H*0.30,Math.min(W,H)*0.05,9,0.7));
+obstacles.push(makeOb(W*0.6,H*0.85,Math.min(W,H)*0.05,4,-1);
+obstacles.push(makeOb(W*0.3,H*0.50,Math.min(W,H)*0.04,3,1));
+obstacles.push(makeOb(W*0.93,H*0.18,Math.min(W,H)*0.05,7,2));
+}
+function makeOb(cx,cy,r,n,rot){const pts=[];const seedRand=Math.random()*2*Math.PI;for(let i=0;i<n;i++){const a=rot+(i/n)*Math.PI*2;const rr=r*(0.6+Math.random()*0.6);pts.push({x:cx+Math.cos(a)*rr,y:cy+Math.sin(a)*rr});}const col=palette[Math.floor(Math.random()*palette.length)];return {pts:pts,col:col};}
+
+buildObstacles();
+
+let t0=performance.now();let paused=false;let showEdges=false;
+
+const L1={x:W*0.5,y:H*0.5,radius:Math.min(W,H)*0.35,h:0,hRange:60,hShift:0};
+const L2={x:W*0.5,y:H*0.5,radius:Math.min(W,H)*0.25,h:200,hRange:40,hShift:0.5};
+
+let userT={x:W*0.5,y:H*0.5,active:0};
+let mouse={x:0,y:0,inside:0};
+cv.addEventListener('pointermove',e=>{const r=cv.getBoundingClientRect();mouse.x=e.clientX-r.left;mouse.y=e.clientY-r.top;mouse.inside=1;});
+cv.addEventListener('pointerleave',()=>{mouse.inside=0;});
+cv.addEventListener('pointerdown',e=>{const r=cv.getBoundingClientRect();const px=e.clientX-r.left;const py=e.clientY-r.top;userT.x=px;userT.y=py;userT.active=performance.now();});
+
+addEventListener('keydown',e=>{
+if(e.code==='Space'){paused=!paused;e.preventDefault();}
+if(e.key==='s'||e.key==='S'){showEdges=!showEdges;}
+});
+
+// polygon area (shoelace) — for edge facing computation
+function polyCentroid(poly){let cx=0,cy=0;const n=poly.length;for(const p of poly){cx+=p.x;cy+=p.y;}return {x:cx/n,y:cy/n};}
+
+// raycast: returns angle range swept for a single obstacle (or null if outside)
+function shadowAngles(lx,ly,pts){
+const n=pts.length;const ang=new Array(n);const d=new Array(n);for(let i=0;i<n;i++){const dx=pts[i].x-lx;const dy=pts[i].y-ly;const dd=dx*dx+dy*dy;ang[i]=Math.atan2(dy,dx);d[i]=dd;}
+let immn=0,immx=0;
+let mn=+Infinity,mx=-Infinity;const out=new Array(n);
+for(let i=0;i<n;i++){const a=ang[i];let v=a;if(v< mn){mn=v;}
+if(v>mx){mx=v;}
+out[i]=v;}
+// unwrap
+const unw=new Array(n);for(let i=0;i<n;i++){unw[i]=ang[i];}
+let amn=unw[0],amx=unw[0];
+for(let i=0;i<n;i++){if(unw[i]<amn)amn=unw[i];if(unw[i]>ammx)ammx=unw[i];if(unw[i]>ammx)ammx=unw[i];}
+// simpler: use center
+const c=polyCentroid(pts);const ca=Math.atan2(c.y-ly,c.x-lx);
+const u=new Array(n);for(let i=0;i<n;i++){let d=ang[i]-ca;if(d>Math.PI)d-=2*Math.PI;if(d<-Math.PI)d+=2*Math.PI;u[i]=d;}
+let lo=u[0],hi=u[0];
+for(let i=0;i<n;i++){if(u[i]<lo)lo=u[i];if(u[i]>hi)hi=u[i];}
+if(hi-lo>Math.PI) { // wrapped case: span crosses zero; rebuild via center
+let mn=0,mx=0;for(let i=0;i<n;i++){if(u[i]>0){if(u[i]>mx)mx=u[i];}if(u[i]<0){const a=-u[i];}}
+// find the two extreme signed values
+let mp=0,mn2=0;for(let i=0;i<n;i++){if(u[i]>0){if(u[i]>mp)mp=u[i];}else if(u[i]<0){if(-u[i]>mn2)mn2=-u[i];}}
+// shadow = ca + [mp, -mn2}  but this is wrong; we want the angular sweep covered
+// simpler approach: shadow covers all of obstacle's angular extent
+// compute min/max of unwrapped relative to ca
+}
+// We'll just use min/max relative to ca (handling wrap) by snapping around obstacle center
+let cmn=u[0],cmx=u[0];for(let i=0;i<n;i++){if(u[i]<cmn)cmn=u[i];if(u[i]>cmx)cmx=u[i];}
+let span=cmmx-cmn;
+if(span>Math.PI){
+// obstacle wraps around the light's angular range; treat as covering full circle
+return {a0:-Math.PI,a1=Math.PI,full:true};}
+let a0=ca+cmn,a1=ca+cmx;
+// normalize a0..a1
+return {a0:a0,a1:a1,full:false};}
+// (the above is messy — replaced below with clean version)
+
+// ===== CLEAN shadow-angle computation =====
+function shadowOf(lx,ly,pts){
+const c=polyCentroid(pts);const ca=Math.atan2(c.y-ly,c.x-lx);
+const n=pts.length;const u=new Array(n);
+for(let i=0;i<n;i++){
+let d=Math.atan2(pts[i].y-ly,pts[i].x-lx)-ca;
+while(d<=-Math.PI)d+=2*Math.PI;
+while(d>=Math.PI)d-=2*Math.PI;
+u[i]=d;
+}
+let mn=u[0],mx=u[0];
+for(let i=0;i<n;i++){if(u[i]<mn)mn=u[i];if(u[i]>mx)mx=u[i];}
+// if obstacle angularly wraps past light — shadow covers entire circle (unlikely with small obstacles)
+if(mx-mn>Math.PI*0.99) return {a0:0,a1:Math.PI*2,full:true};
+return {a0:ca+mn,a1:ca+mx,full:false};
+}
+
+function drawLight(l){
+const lr=l.radius;const lx=l.x;const ly=l.y;
+ctx.save();
+ctx.translate(lx,ly);
+// (a) radial light gradient
+const lg=ctx.createRadialGradient(0,0,0,0,0,lr);
+const h=l.h;const sat=60;const lit=70;const lit0=5;const hex=(n)=>{const c=hslToCss(n);return c;};
+
+// Build color stops: outer=transparent, edge=lit color, center=bright
+const baseCol=hslToCss(h);
+const brt=hslToCss(h,70,80);
+const dim=hslToCss(h,70,30);
+lg.addColorStop(0, hslToCss(h,80,80,0.95));
+lg.addColorStop(0.05, hslToCss(h,80,75,0.85));
+lg.addColorStop(0.35, hslToCss(h,75,52,0.55));
+lg.addColorStop(0.55, hslToCss(h,70,38,0.32));
+lg.addColorStop(0.72, hslToCss(h,65,28,0.18));
+lg.addColorStop(0.85, hslToCss(h,60,18,0.06));
+lg.addColorStop(1, hslToCss(h,60,18,0));
+
+// 2) shadow mask: for each obstacle, draw a polygon covering its angular sweep, filled black
+ctx.save();
+ctx.beginPath();
+ctx.rect(-lr*1.5,-lr*1.5,lr*3,lr*3);
+ctx.clip();
+ctx.fillStyle='#000';
+ctx.beginPath();
+for(const o of obstacles){
+const s=shadowOf(0,0,o.pts);
+if(s.full){
+// covers entire light region
+ctx.rect(-lr*1.5,-lr*1.5,lr*3,lr*3);
+continue;
+}
+const a0=s.a0;const a1=s.a1;
+const mid=(a0+a1)/2;
+const cdx=Math.cos(mid);const cdy=Math.sin(mid);
+// sample points along a0..a1 (inclusive endpoints)
+const STEPS=Math.max(2,Math.ceil(Math.abs(a1-a0)/0.04));
+ctx.moveTo(Math.cos(a0)*lr,Math.sin(a0)*lr);
+for(let i=0;i<=STEPS;i++){
+const a=a0+(i/STEPS)*(a1-a0);
+ctx.lineTo(Math.cos(a)*lr,Math.sin(a)*lr);
+}
+ctx.lineTo(Math.cos(a1)*lr,Math.sin(a1)*lr);
+// close back to origin
+ctx.lineTo(0,0);
+ctx.closePath();
+}
+ctx.fillStyle='rgba(0,0,0,1)';
+ctx.fill();
+ctx.restore();
+
+// 3) apply radial gradient underneath the shadow mask
+ctx.globalCompositeOperation='source-over';
+ctx.beginPath();ctx.arc(0,0,lr,0,Math.PI*2);ctx.closePath();
+ctx.fillStyle=lg;
+ctx.fill();
+ctx.restore();
+}
+
+// HSL → CSS
+function hslToCss(h,s=60,l=50,a=1){
+const h0=(h+360)%360;const s0=Math.max(0,Math.min(100,s));const l0=Math.max(0,Math.min(100,l);
+return `hsla(${h0.toFixed(1)}, ${s0}% , ${l0}% , ${a})`;
+}
+
+// ===== Obstacle rendering (clipped to lit region) =====
+function obstacleLitEdge(o,l){
+const pts=o.pts;const n=pts.length;
+// compute centroid
+let cx=0,cy=0;for(const p of pts){cx+=p.x;cy+=p.y;}cx/=n;cy/=n;
+// light direction relative to centroid
+const lx=cx-l.x;const ly=cy-l.y;
+const ldist=Math.h2(lx,ly) || 1;
+const ndx=lx/Math.sqrt(lx*lx+ly*ly);
+const ndy=ly/Math.sqrt(lx*lx+ly*ly);
+const edges=[];for(let i=0;i<n;i++){const a=pts[i];const b=pts[(i+1)%n];
+const ex=b.x-a.x;const ey=b.y-a.y;
+const mx=(b.x+a.x)/2;const my=(b.y+a.y)/2;
+const nx=mx-l.x;const ny=my-l.y;
+const nd=Math.sqrt(nx*nx+ny*ny) || 1;
+const dot=(nx/nd)*( ( -ey) ) + (ny/nd)*( ( ex) ); // facing calc simplified
+// edge normal points outward; facing away from light = backside; facing toward light = lit edge
+// use midpoint distance to light: if midpoint closer to light than centroid, this edge is lit-facing
+const dEdgeToLight=Math.h3(mx-l.x,my-l.y);
+const dCentroidToLight=Math.h4(cx-l.x,cy-l.y);
+const lit= dEdgeToLight < dCentroidToLight;
+edges.push({a:a,b:b,lit:lit});
+}
+return edges;
+}
+// (the above uses undefined Math.h2/h3/h4 — replaced below)
+
+// ===== Proper lit-edge detection =====
+function litEdges(o,l){
+const pts=o.pts;const n=pts.length;
+const lit=[];for(let i=0;i<n;i++){
+const a=pts[i];const b=pts[(i+1)%n];
+const mx=(a.x+b.x)/2;const my=(a.y+b.y)/2;
+const ndx=mx-l.x;const ndy=my-l.y;
+const nd=Math.sqrt(ndx*ndx+ndy*ndy) || 1;
+// centroid
+let cx=0,cy=0;for(const p of pts){cx+=p.x;cy+=p.y;}cx/=n;cy/=n;
+const cdx=cx-l.x;const cdy=cy-l.y;
+const ccd=Math.sqrt(cdx*cdx+cdy*cdy) || 1;
+const lit=nd< ccd ;
+lit.push({a:a,b:b,lit:lit});
+}
+return lit;
+}
+
+function drawObstacle(o,l){
+const pts=o.pts;const n=pts.length;
+// base fill (dark)
+ctx.beginPath();
+ctx.moveTo(pts[0].x,pts[0].y);for(let i=1;i<n;i++)ctx.lineTo(pts[i].x,pts[i].y);ctx.closePath();
+ctx.fillStyle=o.col;ctx.fill();
+// inner stroke
+ctx.strokeStyle='rgba(40,40,60,0.2)';ctx.lineWidth=1;ctx.stroke();
+
+// lit edges: paint thin lines with light color, faint glow
+const edges=litEdges(o,l);
+ctx.lineWidth=2;
+ctx.lineCap='round';
+for(const e of edges){
+if(!e.lit)continue;
+ctx.beginPath();ctx.moveTo(e.a.x,e.a.y);ctx.lineTo(e.b.x,e.b.y);
+ctx.strokeStyle=hslToCss(l.h,70,55,0.9);
+ctx.stroke();
+// outer halo (wider, more transparent)
+ctx.lineWidth=4;
+ctx.strokeStyle=hslToCss(l.h,70,45,0.15);
+ctx.stroke();
+ctx.lineWidth=2;
+}
+// inner dark edges (backside) — subtle
+for(const e of edges){
+if(e.lit)continue;
+ctx.beginPath();ctx.moveTo(e.a.x,e.a.y);ctx.lineTo(e.b.x,e.b.y);
+ctx.strokeStyle='rgba(0,0,0,0.4)';
+ctx.lineWidth=1;ctx.stroke();
+}
+}
+
+function frame(){
+if(!paused)t0+=16/1000*16; // advance time (16ms per frame approx
+const t=t0;
+// update lights
+const minWH=Math.min(W,H);
+L1.radius=minWH*0.34;
+L2.radius=minWH*0.22;
+const cx=W*0.5;const cy=H*0.5;
+const r1=Math.min(W,H)*0.32;
+const r2=Math.min(W,H)*0.36;
+// drift around the room
+const a1=t*0.06 + 0.0;
+L1.x=cx+Math.cos(a1)*r1;
+L1.y=cy+Math.sin(a1)*r1*0.6;
+L1.h=t*4.5+30; // hue slowly shifts over minutes
+
+const a2=-t*0.06 + Math.PI*0.7;
+L2.x=cx+Math.cos(a2)*r2;
+L2.y=cy+Math.sin(a2)*r2*0.6;
+L2.h=t*4.5+210;
+
+// if user clicked, transiently place L1 near userT
+if(userT.active){
+const age=(performance.now()-userT.active)/1000;
+if(age<2.0){
+const f=1-M Math.min(1, age/2.0);
+const k=Math.exp(-age*0.4);
+L1.x=L1.x*(1-k)+userT.x*k;
+L1.y=L1.y*(1-k)+userT.y*k;
+L1.h=L1.h+k*120;
+}
+userT.active=performance.now()+1e7; // keep updating while userT held
+if(performance.now()-userT.active>2.0*1000)userT.active=0;
+}
+
+// ===== Render =====
+ctx.fillStyle='#050506';ctx.fillRect(0,0,W,H);
+
+// faint room gradient (very subtle warm hint near L1 center)
+ctx.save();
+const rg=ctx.createRadialGradient(L1.x,L1.y,0,L1.x,L1.y,Math.min(W,H)*0.5);
+rg.addColorStop(0,hslToCss(L1.h,50,5,0.2));
+rg.addColorStop(1,'rgba(0,0,0,0)');
+ctx.fillStyle=rg;ctx.fillRect(0,0,W,H);
+ctx.restore();
+
+// ===== Draw obstacles (base) =====
+for(const o of obstacles){
+ctx.beginPath();
+ctx.moveTo(o.pts[0].x,o.pts[0].y);for(let i=1;i<o.pts.length;i++)ctx.lineTo(o.pts[i].x,o.pts[i].y);ctx.closePath();
+ctx.fillStyle='#1a1624';ctx.fill();
+ctx.strokeStyle='rgba(60,60,80,0.12)';ctx.lineWidth=1;ctx.stroke();
+}
+
+// ===== Warm light (primary) =====
+// Build shadow mask buffer: same size, black silhouette of each obstacle's angular wedge
+// Use 'destination-out' technique: draw shadows that erase light
+// First, paint light gradient on offscreen canvas, then carve shadows
+
+// We compose using two canvases: main ctx + temp ctx for light pass
+// For simplicity, compose directly:
+ drawLight(L1);
+ drawLight(L2);
+
+// ===== Obstacle lit edges (clipped by light via multiply) =====
+ctx.save();
+ctx.globalCompositeOperation='lighter';
+// (lighter is fine for faint glow)
+for(const o of obstacles){
+const edges=litEdges(o,L1);
+for(const e of edges){
+if(!e.lit)continue;
+ctx.beginPath();ctx.moveTo(e.a.x,e.a.y);ctx.lineTo(e.b.x,e.b.y);
+ctx.lineWidth=2.5;
+ctx.strokeStyle=hslToCss(L1.h,80,60,0.6);
+ctx.stroke();
+ctx.lineWidth=5.5;
+ctx.strokeStyle=hslToCss(L1.h,80,40,0.07);
+ctx.stroke();
+}
+const edges2=litEdges(o,L2);
+for(const e of edges2){
+if(!e.lit)continue;
+ctx.beginPath();ctx.moveTo(e.a.x,e.a.y);ctx.lineTo(e.b.x,e.b.y);
+ctx.lineWidth=1.5;
+ctx.strokeStyle=hslToCss(L2.h,60,55,0.32);
+ctx.stroke();
+ctx.lineWidth=4;
+ctx.strokeStyle=hslToCss(L2.h,60,40,0.04);
+ctx.stroke();
+}
+}
+ctx.restore();
+
+// ===== Optional shadow outline (debug) =====
+if(showEdges){
+ctx.lineWidth=1;ctx.strokeStyle='rgba(255,200,80,0.4)';
+for(const o of obstacles){
+const s=shadowOf(L1.x,L1.y,o.pts);
+if(s.full)continue;
+ctx.beginPath();
+ctx.moveTo(L1.x+Math.cos(s.a0)*L1.radius,L1.y+Math.sin(s.a0)*L1.radius);
+ctx.lineTo(L1.x,L1.y);
+ctx.lineTo(L1.x+Math.cos(s.a1)*L1.radius,L1.y+Math.sin(s.a1)*L1.radius);
+ctx.stroke();
+}
+}
+
+// ===== Vignette =====
+ctx.save();
+const vg=ctx.createRadialGradient(W/2,H/2,0,W/2,H/2,Math.max(W,H)*0.6);
+vg.addColorStop(0,'rgba(0,0,0,0)');
+vg.addColorStop(1,'rgba(0,0,0,0.7)');
+ctx.fillStyle=vg;ctx.fillRect(0,0,W,H);
+ctx.restore();
+
+// ===== Light source markers =====
+ctx.save();
+ctx.globalCompositeOperation='lighter';
+ctx.beginPath();ctx.arc(L1.x,L1.y,3,0,Math.PI*2);ctx.fillStyle=hslToCss(L1.h,90,80,0.9);ctx.fill();
+ctx.beginPath();ctx.arc(L1.x,L1.y,6,0,Math.PI*2);ctx.fillStyle=hslToCss(L1.h,90,60,0.15);ctx.fill();
+ctx.beginPath();ctx.arc(L2.x,L2.y,3,0,Math.PI*2);ctx.fillStyle=hslToCss(L2.h,60,70,0.6);ctx.fill();
+ctx.beginPath();ctx.arc(L2.x,L2.y,5,0,Math.PI*2);ctx.fillStyle=hslToCss(L2.h,60,55,0.08);ctx.fill();
+ctx.restore();
+
+// ===== Pause indicator =====
+if(paused){ctx.fillStyle='rgba(0,0,0,0.4)';ctx.fillRect(0,0,W,H);ctx.fillStyle='rgba(245,200,150,0.7)';ctx.font='12px ui-monospace';ctx.textAlign='center';ctx.fillText('PAUSED',W/2,H/2);}
+
+requestAnimationFrame(frame);
+}
+frame();
+</script></body></html>

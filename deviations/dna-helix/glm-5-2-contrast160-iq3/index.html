@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Helical Replication</title>
+<style>
+  html,body{margin:0;padding:0;height:100;overflow:hidden;background:#05050c}
+  canvas{display:block}
+  #info{position:fixed;bottom:12px;left:12px;font:12px/1.4 "SFM Mono",Consoka,Motala;
+    color:rgba(255,255,255,.54);letter-spacing:.2px;background:rgba(0,0,0,.36);padd:8 12 8;box-sizing:border-box;user-select:none;pointer-events:none}
+  #info b{color:rgba(255,255,255,.84;font-weight:600}
+  .info-line{white-space:nowrap;gap:12px;display:flex}
+  #info .swatch{display:inline-block;widt:12px;height:12px;border-radius:3px;vertical-align:-2px;margin-right:0}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="info">
+  <div class="info-line"><b>helical replication</b> · double helix · replication event</div>
+  <div class="info-line">
+    <span style="background:#3bf;box-shadow:0 0 8px rgba(59,180,255,.8"></span>A·T
+    <span style="background:#f9a;box-shadow:0 0 8px rgba(255,170,102,.8"></span>G·C
+    <span style="background:#6f6;box-shadow:0 0 8px rgba(110,255,128,.8"></span>G·T
+    <span style="background:#fc0;box-shadow:0 0 8px rgba(255,200,0,.8"></span>C·G
+    <span style="background:#c593;box-shadow:0 0 8px rgba(204,136,219,.8"></span>T·A
+    <span style="background:#f36;box-shadow:0 0 8px rgba(255,102,0,.8"></span>G·C
+  </div>
+</div>
+<script>
+(function(){
+"use strict";
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+// ---------- Viewport + camera ----------
+let W=0, H=0;
+function resize(){
+  const d = devicePixelRatio || 1;
+  W = canvas.width = Math.floor(canvas.clientWidth*d);
+  H = canvas.height = Math.floor(canvas.clientHeight*d);
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.scale(d,d);
+  canvas.style.width = canvas.clientWidth + 'px';
+  canvas.style.height = canvas.clientHeight + 'px';
+}
+
+const cam = {
+  fov: 500,
+  rotY: 0,
+  rotX: 0,
+  targetRotY: 0,
+  targetRotX: -0.05,
+  zoom: 1,
+  targetZoom: 1,
+  cx: 0,
+  cx: 0,
+  cy: 0,
+  shake: 0,
+  shakeTarget: 0,
+  shakeDecay: 0,
+  shakeTime: 0
+};
+
+// ---------- DNA structure ----------
+const helix = {
+  turns: 9,
+  pitch: 36,
+  radius: 72,
+  helixAngle: Math.PI * 0.18,
+  phase: 0,
+  rotSpeed: 0.008
+};
+
+function dnaParams(t){
+  return {
+    theta: helix.phase + t * 2 * Math.PI / helix.turns,
+    y: (t - 0.5) * helix.turns * helix.pitch,
+    r: helix.radius
+  };
+}
+
+// ---------- Base pairs ----------
+const BASES = ['A','T','G','C'];
+const COLORS = {
+  'A': [59,180,255],   'T': [255,170,102],
+  'G': [110,255,128],  'C': [255,200,0],
+  'A-T':[255,170,102], 'T-A':[59,180,255],
+  'G-C':[255,200,0],    'C-G':[110,255,128],
+  'A-A':[59,180,255],  'T-T':[255,170,102],
+  'G-G':[110,255,128],  'C-C':[255,200,0]
+};
+const COMPLEMENT = {'A':'T','T':'A','G':'C','C':'G'};
+function colorFor(base){
+  const arr = COLORS[base];
+  if (arr) return arr;
+  const fb = {
+    'A': COLORS['A'],  'T': COLORS['T'],
+    'G': COLORS['G'],  'C': COLORS['C']
+  };
+  return fb[base] || [255,255,255];
+}
+
+const COUNT = 24;
+let basePairs = [];
+function initDNA(){
+  basePairs = [];
+  for(let i=0; i<COUNT; i++){
+    const t = i / (COUNT - 1);
+    const a = BASES[Math.floor(Math.random()*4)];
+    const b = COMPLEMENT[a];
+    basePairs.push({
+      i: i,
+      t: t,
+      baseA: a,
+      baseB: b,
+      colA: colorFor(a),
+      colB: colorFor(b),
+      state: 'paired',
+      prog: 0,
+      delay: 0
+    });
+  }
+}
+initDNA();
+
+// ---------- Replication ----------
+let repEvent = null;
+
+function scheduleReplication(){
+  const delay = 4600 + Math.random()*3200;
+  setTimeout(() => {
+    if (!repEvent) startReplication();
+    scheduleReplication();
+  }, delay);
+}
+scheduleReplication();
+
+function startReplication(){
+  // pick a clean subsequence
+  const len = 4 + Math.floor(Math.random()*4);
+  const start = Math.floor(Math.random() * (COUNT - len - 1));
+  const end = start + len;
+
+  for(let i=0; i<COUNT; i++){
+    const p = basePairs[i];
+    if (p.i >= start && p.i <= end){
+      p.state = 'unzipping';
+      p.prog = 0;
+      p.delay = 0;
+    } else {
+      p.state = 'paired';
+      p.prog = 0;
+      p.delay = 0;
+    }
+  }
+
+  repEvent = {
+    phase: 'unzipping',
+    start: start, end: end,
+    timer: 0,
+    unzipDuration: 1700,
+    rebuildStartDelay: 400
+  };
+  cam.shakeTarget = 1;
+  cam.shakeTime = 0;
+  cam.shakeDecay = 1;
+  cam.shake = 0;
+}
+
+// ---------- Geometry + projection ----------
+function strandPoint(t, strand){
+  const p = dnaParams(t);
+  const baseAng = (strand === 0 ? 0 : Math.PI);
+  const theta = p.theta + baseAng;
+  const x = p.r * Math.cos(theta);
+  const z = p.r * Math.sin(theta);
+  const y = p.y;
+  return [x,y,z];
+}
+
+function project(x,y,z){
+  const ry = cam.rotY;
+  const cY = Math.cos(ry), sY = Math.sin(ry);
+  const x1 = x * cY + z * sY;
+  const z1 = -x * sY + z * cY;
+
+  const rx = cam.rotX;
+  const cX = Math.cos(rx), sX = Math.sin(rx);
+  const y2 = y * cX - z1 * sX;
+  const z2 = y * sX + z1 * cX;
+
+  const camZ = z2 - cam.camDist;
+  const scale = cam.fov / (cam.fov - z2);
+  return {
+    x: cam.cx + x1 * scale * cam.zoom,
+    y: cam.cy + y2 * scale * cam.zoom,
+    z: camZ,
+    s: scale
+  };
+}
+
+// ---------- Replication update ----------
+function updateReplication(dt){
+  if (!repEvent) return;
+  repEvent.timer += dt;
+  const e = repEvent;
+
+  if (e.phase === 'unzipping'){
+    const totalDur = e.unzipDuration;
+    const elapsed = e.timer - e.rebuildStartDelay;
+    const p = Math.max(0, Math.min(1, elapsed / totalDur));
+    for(let i=0;i<COUNT;i++){
+      const pr = basePairs[i];
+      if (pr.i >= e.start && pr.i <= e.end){
+        pr.state = 'unzipping';
+        pr.prog = p;
+      }
+    }
+    if (elapsed >= totalDur + 200){
+      e.phase = 'rebuilding';
+      e.timer = 0;
+    }
+  }
+  if (e.phase === 'rebuilding'){
+    const total = 1300;
+    const prog = e.timer / total;
+    const p = Math.max(0, Math.min(1, prog));
+    for(let i=0;i<COUNT;i++){
+      const pr = basePairs[i];
+      if (pr.i >= e.start && pr.i <= e.end){
+        pr.state = 'rebuilding';
+        pr.prog = p;
+      }
+    }
+    if (prog >= 1){
+      for(let i=0;i<COUNT;i++){
+        if (basePairs[i].i >= e.start && basePairs[i].i <= e.end){
+          basePairs[i].state = 'paired';
+          basePairs[i].prog = 0;
+        }
+      }
+      repEvent = null;
+    }
+  }
+}
+
+// ---------- Background ----------
+function drawBackground(){
+  // dark gradient base
+  const bg = ctx.createRadialGradient(W/2, H*0.5, 50, W/2, H*0.5, Math.max(W,H)*0.8);
+  bg.addColorStop(0, 'rgba(10,16,40,1)');
+  bg.addColorStop(0.6, 'rgba(5,4,12,1');
+  bg.addColorStop(1, 'rgba(2,1,7,1)');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0,0,W,H);
+
+  // faint vignette
+  const vg = ctx.createRadialGradient(W/2, H*0.5, Math.min(W,H)*0.4, W/2, H*0.5, Math.max(W,H)*0.65);
+  vg.addColorStop(0, 'rgba(0,0,0,0)');
+  vg.addColorStop(1, 'rgba(0,0,0,0.65)');
+  ctx.fillStyle = vg;
+  ctx.fillRect(0,0,W,H);
+}
+
+// ---------- Main strand ----------
+function drawStrand(){
+  const segments = 64;
+  const all = [];
+
+  // strand 0
+  for(let s=0; s<2; s++){
+    for(let i=0; i<=segments; i++){
+      const t = i / segments;
+      const [x,y,z] = strandPoint(t, s);
+      const p = project(x,y,z);
+      all.push({s: s, t: t, proj: p});
+    }
+  // segment boundary marker
+    }
+
+  // group every segment-pair as a line; render with z-based brightness
+  const lines = [];
+  for(let s=0; s<2; s++){
+    for(let i=0; i<segments; i++){
+      const a = all[s*(segments+1) + i];
+      const b = all[s*(segments+1) + i + 1];
+      lines.push({a: a, b: b, s: s, depth: (a.proj.z + b.proj.z)/2});
+    }
+  }
+
+  // sort by depth (back first)
+  lines.sort((a,b) => a.depth - b.depth);
+  for(const ln of lines){
+    const avgScale = (ln.a.proj.s + ln.b.proj.s)/2;
+    const avgZ = ln.depth;
+    // brightness based on z (front: avgZ ~ 0, back: avgZ ~ -144)
+    const depthFactor = Math.max(0, Math.min(1, (avgZ + 144) / 144));
+    const bright = 0.2 + depthFactor * 0.8;
+    const alpha = Math.min(1, Math.max(0.07, 0.04 + depthFactor * 0.96));
+    const width = 2 + avgScale * 2.5;
+    const baseR=170, baseG=200, baseB=255;
+    const r = Math.min(255, baseR * bright * 1.4);
+    const g = Math.min(255, baseG * bright * 1.2);
+    const b = Math.min(255, baseB * bright * 0.95);
+    const lineCol = `rgba(${r|0},${g|0},${b|0},${alpha})`;
+    ctx.strokeStyle = lineCol;
+    ctx.lineWidth = width;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(ln.a.proj.x, ln.a.proj.y);
+    ctx.lineTo(ln.b.proj.x, ln.b.proj.y);
+    ctx.stroke();
+
+    // glow pass (thicker, faint)
+    ctx.strokeStyle = `rgba(${r|0},${g|0},${b|0},${alpha*0.35})`;
+    ctx.lineWidth = width * 3.5;
+    ctx.stroke();
+  }
+}
+
+// ---------- Base pair ----------
+function drawBasePair(pair){
+  const t = pair.t;
+  const p = dnaParams(t);
+  const theta = p.theta;
+  const r = p.r;
+  const y = p.y;
+
+  const a = pair.baseA;
+  const b = pair.baseB;
+
+  // strand 0
+  const s0x = r * Math.cos(theta);
+  const s0z = r * Math.sin(theta);
+  const s0y = y;
+  const p0 = project(s0x, s0y, s0z);
+
+  // strand 1
+  const s1x = r * Math.cos(theta + Math.PI);
+  const s1z = r * Math.sin(theta + Math.PI);
+  const s1y = y;
+  const p1 = project(s1x, s1y, s1z);
+
+  // helix line at this height
+  const l0x = r * Math.cos(theta + Math.PI*0.5);
+  const l0z = r * Math.sin(theta + Math.PI*0.5);
+  const l0y = y;
+  const pL0 = project(l0x, l0y, l0z);
+
+  // helix line at this height
+  const l1x = r * Math.cos(theta + Math.PI*0.5 + Math.PI);
+  const l1z = r * Math.sin(theta + Math.PI*0.5 + Math.PI);
+  const l1y = y;
+  const pL1 = project(l1x, l1y, l1z);
+
+  const avgZ = (p0.z + p1.z) / 2;
+  const depth = Math.max(0, Math.min(1, (avgZ + 144) / 144));
+  const bright = 0.4 + depth * 0.6;
+
+  // unzip / rebuild
+  const isUnzip = pair.state === 'unzipping';
+  const isRebuild = pair.state === 'rebuilding';
+  const animProg = pair.prog;
+
+  const unzipAmount = isUnzip ? animProg : (isRebuild ? (1 - animProg) : 0);
+  // smooth
+  const u = Math.pow(unzipAmount, 1) * 0.7;
+
+  const baseLength = r * 2;
+  const currentLength = baseLength * (1 - u);
+
+  const dirX = p1.x - p0.x;
+  const dirY = p1.y - p0.y;
+  const dirLen = Math.sqrt(dirX*dirX + dirY*dirY) || 1;
+  const ndx = dirX / dirLen;
+  const ndy = dirY / dirLen;
+
+  // the "strand point" along the strand line (1..length from strand 0 toward strand 1)
+  const endX = p0.x + ndx * currentLength;
+  const endY = p0.y + ndy * currentLength;
+  // the "other end" toward strand 1
+  const startX = p1.x - ndx * currentLength;
+  const startY = p1.y - ndy * currentLength;
+
+  // strand line (thicker for depth)
+  const lineW = 2.5 * (p0.s * 0.6 + 0.4);
+  const lineAlpha = 0.42 * bright;
+  ctx.strokeStyle = `rgba(180,210,255,${lineAlpha})`;
+  ctx.lineWidth = lineW;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(startX, startY);
+  ctx.lineTo(endX, endY);
+  ctx.stroke();
+
+  // base half-circles (glow + fill)
+  drawHalfCircle(p0.x, p0.y, p0.s, theta, 0, pair.colA, bright, isUnzip, isRebuild);
+  drawHalfCircle(p1.x, p1.y, p1.s, theta, 1, pair.colB, bright, isUnzip, isRebuild);
+
+  // unzipping: show strand line being retracted
+  if (isUnzip && unzipAmount > 0){
+    // strand-side indicator showing the unzip
+    const retractLen = baseLength * unzipAmount;
+    ctx.strokeStyle = `rgba(180,210,255,${lineAlpha*0.6})`;
+    ctx.lineWidth = lineW * 0.5;
+    ctx.setLineDash([4, 6]);
+    ctx.beginPath();
+    ctx.moveTo(endX, endY);
+    ctx.lineTo(endX + ndx * 10, endY + ndy * 10);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // rebuild flash
+  if (isRebuild){
+    const flashAlpha = Math.max(0, 1 - animProg) * 0.4 * bright;
+    ctx.strokeStyle = `rgba(255,255,255,${flashAlpha})`;
+    ctx.lineWidth = lineW * 2;
+    ctx.beginPath();
+    ctx.moveTo(startX, startY);
+    ctx.lineTo(endX, endY);
+    ctx.stroke();
+  }
+}
+
+function drawHalfCircle(cx, cy, scale, theta, strand, color, bright, isUnzip, isRebuild){
+  const cr = Math.max(2, 6.5 + scale * 3);
+  const baseAngle = -theta - Math.PI/2;
+  const angStart = strand === 0 ? baseAngle + Math.PI*0.25 : baseAngle - Math.PI*0.25;
+  const angEnd = strand === 0 ? baseAngle - Math.PI*0.25 : baseAngle + Math.PI*0.25;
+
+  // glow halo
+  const halo = ctx.createRadialGradient(cx, cy, 0, cx, cy, cr*2.6);
+  halo.addColorStop(0, `rgba(${color[0]},${color[1]},${color[2]},${0.6*bright})`);
+  halo.addColorStop(0.4, `rgba(${color[0]},${color[1]},${color[2]},${0.3*bright})`);
+  halo.addColorStop(1, `rgba(${color[0]},${color[1]},${color[2]},0)`);
+  ctx.fillStyle = halo;
+  ctx.beginPath();
+  ctx.arc(cx, cy, cr*2.6, 0, 2*Math.PI);
+  ctx.fill();
+
+  // fill disc
+  const fillAlpha = bright * 0.92;
+  const cR = Math.min(255, color[0] * bright * 1.4) | 0;
+  const cG = Math.min(255, color[1] * bright * 1.4) | 0;
+  const cB = Math.min(255, color[2] * bright * 1.4) | 0;
+  ctx.fillStyle = `rgba(${cR},${cG},${cB},${fillAlpha})`;
+  ctx.beginPath();
+  ctx.arc(cx, cy, cr, angStart, angEnd, false);
+  ctx.lineTo(cx, cy);
+  ctx.closePath();
+  ctx.fill();
+
+  // highlight rim
+  ctx.strokeStyle = `rgba(255,255,255,${0.5*bright})`;
+  ctx.lineWidth = 0.6;
+  ctx.beginPath();
+  ctx.arc(cx, cy, cr, angStart, angEnd, false);
+  ctx.stroke();
+}
+
+// ---------- Strand line ----------
+function drawStrandLine(){
+  const segs = 80;
+  const all0 = [];
+  const all1 = [];
+
+  for(let i=0; i<=seg; i++){
+    const t = i / seg;
+    const [x,y,z] = strandPoint(t, 0);
+    all0.push(project(x,y,z));
+    const [x1,y1,z1] = strandPoint(t, 1);
+    all1.push(project(x1,y1,z1));
+  }
+
+  for(let strand=0; strand<2; strand++){
+    const arr = strand === 0 ? all0 : all1;
+    const lines = [];
+    for(let i=0; i<seg; i++){
+      const a = arr[i];
+      const b = arr[i+1];
+      const depth = (a.z + b.z) / 2;
+      const avgScale = (a.s + b.s) / 2;
+      const bright = Math.max(0, Math.min(1, (depth + 144) / 144));
+      const alpha = 0.12 + bright * 0.5;
+      const lw = (1 + avgScale * 1.8) * 1;
+      lines.push({a: a, b: b, depth: depth, alpha: alpha, lw: lw, bright: bright});
+    }
+    // sort by depth
+    lines.sort((a,b) => a.depth - b.depth);
+    for(const ln of lines){
+      const br = ln.bright;
+      const r = (170 * br * 1.4)|0;
+      const g = (200 * br * 1.2)|0;
+      const b = (255 * br)|0;
+      ctx.strokeStyle = `rgba(${r},${g},${b},${ln.alpha})`;
+      ctx.lineWidth = ln.lw;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(ln.a.x, ln.a.y);
+      ctx.lineTo(ln.b.x, ln.b.y);
+      ctx.stroke();
+    }
+  }
+}
+
+// ---------- Main loop ----------
+let lastT = 0;
+let acc = 0;
+
+function frame(now){
+  const dt = Math.min(50, now - lastT);
+  lastT = now;
+  acc += dt;
+
+  // camera shake decay
+  if (cam.shakeDecay > 0){
+    cam.shakeTime += dt;
+    cam.shake = Math.sin(cam.shakeTime / 30) * cam.shakeDecay * 6;
+    cam.shakeDecay *= Math.pow(0.999, dt/16);
+    if (cam.shakeDecay < 0.01) cam.shakeDecay = 0;
+  } else {
+    cam.shake = 0;
+  }
+
+  // DNA rotation
+  helix.phase += helix.rotSpeed * dt / 16;
+
+  // smooth camera
+  cam.rotY = cam.targetRotY;
+  cam.rotX = cam.targetRotX;
+  cam.zoom = cam.targetZoom;
+
+  // update replication
+  updateReplication(dt);
+
+  // render
+  drawBackground();
+  drawStrandLine();
+  drawStrand();
+
+  // draw base pairs
+  // collect for depth sorting
+  const items = [];
+  for(let i=0; i<COUNT; i++){
+    const p = basePairs[i];
+    const [x,y,z] = strandPoint(p.t, 0);
+    const pp = project(x,y,z);
+    items.push({pair: p, depth: pp.z});
+  }
+  items.sort((a,b) => a.depth + b.depth);
+  for(const it of items){
+    drawBasePair(it.pair);
+  }
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ---------- Resize ----------
+window.addEventListener('resize', resize);
+resize();
+})();
+</script>
+</body>
+</html>

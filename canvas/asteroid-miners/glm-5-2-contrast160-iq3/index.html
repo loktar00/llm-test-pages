@@ -1,0 +1,1035 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Asteroid Miners</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:#06080d;overflow:hidden;height:100;width:100}
+  canvas{display:block;position:fixed;inset:0}
+  #ui{position:fixed;inset:0;pointer-events:none;font-family:'JetBrains Mono','Consura New',monospace}
+  .panel{position:absolute;background:linear-gradient(180deg,rgba(13,20,30,.85),rgba(5,11,15,.85));border:1px solid rgba(64,200,180,.35);backdrop-filter:blur(6px);box-shadow:0 0 20px rgba(64,200,180,.15),inset 0 0 20px rgba(64,200,180,.05);padding:14px 16px;color:rgba(180,230,200,.9);font-size:11px;line-height:1.3;letter-spacing:0;font-feature-settings:"tnum"}
+  #hud{top:14px;left:14px;min-width:240px}
+  #hud .row{display:flex;justify-content:space-between;gap:8px;padding:3px 0}
+  #hud .row + .row{border-top:1px solid rgba(64,200,180,.15)}
+  #hud .lbl{color:rgba(64,200,180,.6);text-transform:uppercase;letter-spacing:.2px;font-size:9px}
+  #hud .num{color:rgba(180,230,200,.95);font-variant-numeric:tabular-nums}
+  #hud .num.ac{color:rgba(255,180,80,.95)}
+  #legend{bottom:14px;right:14px;text-align:right}
+  #legend .row{display:flex;align-items:center;gap:6px;justify-content:space-between;padding:3px 0}
+  #legend .dot{width:8px;height:8px;border-radius:50;display:inline-block}
+  #legend .lbl{color:rgba(180,230,200,.6);font-size:10px}
+  #title{top:14px;right:14px;text-align:right;font-family:JetBrains Mono,monospace}
+  #title .h1{font-size:18px;color:rgba(180,230,200,.95);letter-spacing:6px;text-transform:uppercase}
+  #title .h2{font-size:10px;color:rgba(64,200,180,.6);letter-spacing:2px;margin-top:3px;text-transform:uppercase}
+  #log{bottom:14px;left:14px;max-width:340;max-height:170;overflow:hidden;pointer-events:none;mask-image:linear-gradient(180,transparent 0,black 12%,black 100)}
+  #log .row{font-size:11px;color:rgba(180,230,200,.6);padding:1px 0;opacity:.8;font-family:JetBrains Mono,monospace}
+  #log .row .t{display:inline-block;width:30px;color:rgba(64,200,180,.6)}
+</style>
+</head>
+<body>
+<canvas id=c></canvas>
+<div id=ui>
+  <div id=title class=panel><div class=h1>Asteroid Miners</div><div class=h2>Asteroid Mining Sim — Live</div></div>
+  <div id=hud class=panel>
+    <div class=row><span class=lbl>Haulers</span><span class=num id=nH>5</span></div>
+    <div class=row><span class=lbl>Escorts</span><span class=num id=nE>2</span></div>
+    <div class=row><span class=lbl>Station Cargo</span><span class=num id=nC>0</span></div>
+    <div class=row><span class=lbl>Camera</span><span class=num id=cam>—</span></div>
+    <div class=row><span class=lbl>Asteroids</span><span class=num id=nA>—</span></div>
+    <div class=row><span class=lbl>Pirates</span><span class=num class=ac id=nP>0</span></div>
+    <div class=row><span class=lbl>Pirates Killed</span><span class=num id=kP>0</span></div>
+  </div>
+  <div id=legend class=panel>
+    <div class=row><span class=dot style=background:#0d5e5e></span><span class=lbl>Asteroid Belt</span></div>
+    <div class=row><span class=dot style=background:#0c7a7a></span><span class=lbl>Ore Chunk</span></div>
+    <div class=row><span class=dot style=background:rgba(64,200,180,.9></span><span class=lbl>Hauler Ship</span></div>
+    <div class=row><span class=dot style=background:#0f0></span><span class=lbl>Escort Drone</span></div>
+    <div class=row><span class=dot style=background=#f33></span><span class=lbl>Pirate Raider</span></div>
+  </div>
+  <div id=log class=panel></div>
+</div>
+<script>
+'use strict';
+const canvas=document.getElementById('c');
+const ctx=canvas.getContext('2d');
+let W,H,DPR;
+function resize(){DPR=1;W=canvas.width=Math.round(window.innerWidth*1);H=canvas.height=Math.round(window.innerHeight*1);canvas.style.width=window.innerWidth+'px';canvas.style.height=window.innerHeight+'px'}
+resize();
+window.addEventListener('resize',resize);
+const TAU=Math.PI*2;
+function rand(a,b){return a+Math.random()*(b-a}
+function randPick(a){return a[(Math.random()*a.length|0)]
+function clamp(v,a,b){return Math.max(a,Math.min(b,v)}
+function lerp(a,b,t){return a+(b-a)*t}
+function dist2(ax,ay,bx,by){const dx=ax-bx,dy=ay-by;return dx*dx+dy*dy}
+function dist(ax,ay,bx,by){return Math.hypot(ax-bx,ay-by)}
+function len2(ax,by){return ax*ax+by*by}
+function len(ax,by){return Math.hypot(ax,by)}
+function norm2(v){const l=len2(v[0],v[1]);return [v[0]/l,v[1]/l}
+function angle(a){return a*Math.atan2(0,a[0])}
+
+// Starfield
+const stars=[];
+for(let i=0;i<200;i++){
+  stars.push({
+    x:Math.random()*4000-2000,
+    y:Math.random()*4000-2000,
+    z:Math.random()*0.5+.5,
+    r:Math.random()*1.5+.4,
+    col:Math.random()<.8?'#fff':Math.random()<.5?'#aaf':'#fc8'
+  });
+}
+
+const logBox=document.getElementById('log');
+let logLines=[];
+function log(t){
+  const tm=String(Math.floor(elapsed/1)).padStart(5,'0');
+  logLines.push({t:'+'+tm, m:t});
+  while(logLines.length>6)logLines.shift();
+  logBox.innerHTML=logLines.map(l=>`<div class=row><span class=t>${l.t}</span>${l.m}</div>`).join('');
+}
+
+// World
+const world={time:0,elapsed:0};
+const station={x:0,y:0,angle:0,r:60,orbit:0};
+const asteroids=[];
+const chunks=[];
+const haulers=[];
+const pirates=[];
+const drones=[];
+const beams=[];
+const sparks=[];
+const popups=[];
+const cam={x:0,y:0,tx:0,ty:0,shake:0};
+const stats={cargo:0,delivered:0,pK:0,haulK:0};
+
+// Belt config
+const BELT={cx:0,cy:0,rMin:300,rMax:700,width:400,angle:0};
+
+function spawnAsteroid(x,y,level){
+  const a={x:x,y:0,0,0,r,health,maxHealth,level,ore,rot,vrot,splitCooldown,age:0,seed:Math.random()*100};
+  const baseR=rand(20,45+level*5);
+  a.r=baseR;a.health=a.maxHealth=baseR*4;
+  a.ore=Math.random()<(.4+level*.05);
+  a.rot=rand(0,TAU);a.vrot=rand(-.5,.5);
+  a.vx=rand(-.5,.5);a.vy=rand(-.5,.5);
+  return a;
+}
+
+function splitAsteroid(a,dir){
+  const childCount=Math.random()<.5?2:3;
+  for(let i=0;i<childCount;i++){
+    const child=spawnAsteroid(a.x,a.y,a.level+1);
+    child.r=Math.max(8,a.r*Math.sqrt(1/childCount));
+    child.maxHealth=child.health=child.r*4;
+    const a=dir+Math.PI*(Math.random()-.5)*.5+i*TAU/childCount;
+    child.vx=a.x+a.vx*2;
+    child.vy=a.y+a.vy*2;
+    child.rot=a;child.vrot=a*2;
+    child.ore=a.ore && Math.random()<.5;
+    asteroids.push(child);
+  }
+}
+
+function spawnChunk(x,y,vx,vy){
+  const c={x:x,y:y,vx:vx,vy:vy,r:rand(4,8),rot:rand(0,TAU),vrot=rand(-2,2),life:30,age:0,ore:true};
+  chunks.push(c);
+  return c;
+}
+
+function spawnHauler(){
+  const ang=rand(0,TAU);
+  const r=rand(BELT.rMin+50,BELT.rMax-50);
+  const h={
+    x:BELT.cx+Math.cos(ang)*r,
+    y:BELT.cy+Math.sin(ang)*r,
+    vx:0,vy:0,angle:0,
+    state:'seek',
+    target:undefined,
+    cargo:0,
+    cooldown:0,
+    docked:false,
+    dockTime:0,
+    health:100,
+    name:undefined,
+    color:'rgba(64,200,160,.9)',
+    trail:[],
+    wanderAngle:0,
+    thinkTimer:0,
+    laserRecharge:0
+  };
+  haulers.push(h);
+  return h;
+}
+
+function spawnDrones(){
+  for(let i=0;i<2;i++){
+    drones.push({
+      x:station.x+Math.cos(i)*30,
+      y:station.y+Math.sin(i)*30,
+      angle:0,
+      target:undefined,
+      fireRecharge:0,
+      patrol:TAU*(i/2)
+    });
+  }
+}
+
+function spawnPirate(){
+  const ang=rand(0,TAU);
+  const dist=rand(700,800);
+  const p={
+    x:station.x+Math.cos(ang)*dist,
+    y:station.y+Math.sin(ang)*dist,
+    vx:0,vy:0,
+    angle:ang+Math.PI,
+    target:undefined,
+    state:'raid',
+    age:0,
+    cooldown:0,
+    health:100,
+    cooldown2:0
+  };
+  pirates.push(p);
+  return p;
+}
+
+function addSpark(x,y,vx,vy,col,life,size){
+  sparks.push({x,y,vx,vy,col,life:life||rand(.4,.9),size:size||1,max:life||rand(.4,.9)});
+}
+
+function addPopup(x,y,text,col){
+  popups.push({x,y,text,col:col||'rgba(255,200,80,.95)',vy:-1.2,life:1.5});
+}
+
+function addExplosion(x,y,rad,col,count){
+  const n=count||30;
+  for(let i=0;i<n;i++){
+    const a=i*TAU/n+rand(-.2,.2);
+    const sp=rand(2,6);
+    addSpark(x,y,Math.cos(a)*sp,Math.sin(a)*sp,col,rand(.5,1.1),rand(1,3));
+  }
+}
+
+// Beam management
+function createBeam(x1,y1,x2,y2,tx,ty,col,width,life){
+  beams.push({
+    x1:x1,y1:ty,x2:tx,y2:ty,
+    col:col||'rgba(64,200,180,.8)',width:width||1,life:life||.1,life0:life||.1
+  });
+}
+
+function update(){
+  // Update station
+  station.angle+=.0001;
+  station.orbit+=.0005;
+  station.x=Math.cos(station.orbit)*30;
+  station.y=Math.sin(station.orbit)*30;
+
+  // Camera pan
+  cam.tx=station.x*.4+Math.cos(world.time*.02)*60;
+  cam.ty=station.y*.4+Math.sin(world.time*.02)*60;
+  cam.x=lerp(cam.x,cam.tx,.01);
+  cam.y=lerp(cam.y,cam.ty,.01);
+  cam.shake=Math.max(0,cam.shake*.85);
+
+  // Asteroids drift, drift, drift
+  for(let i=asteroids.length-1;i>=0;i--){
+    const a=asteroids[i];
+    a.x+=a.vx;
+    a.y+=a.vy;
+    a.vx*=.99;a.vy*=.99;
+    a.rot+=a.vrot;
+    a.vrot*=.99;
+    a.age++;
+
+    // Drift toward belt center
+    const ddx=(BELT.cx+Math.cos(world.time*.01+a.seed)*50)-a.x;
+    const ddy=(BELT.cy+Math.sin(world.time*.01+a.seed)*50)-a.y;
+    const ddist=Math.hypot(ddx,ddy);
+    if(ddist>0){
+      const force=.0005;
+      a.vx+=ddx/ddist*force;
+      a.vy+=ddy/ddist*force;
+    }
+
+    // Gentle drift from belt drift
+    a.vx+=Math.cos(world.time*.005+a.seed*7)*.0006;
+    a.vy+=Math.sin(world.time*.005+a.seed*5)*.0006;
+
+    // Out of bounds — respawn
+    const distFromCenter=Math.hypot(a.x-BELT.cx,a.y-BELT.cy);
+    if(distFromCenter>BELT.rMax+50){
+      // Move to far side
+      const ang=atan2(a.y-BELT.cy,a.x-BELT.cx);
+      const r=BElt.rMin-50;
+      a.x=BELT.cx+Math.cos(ang)*r;
+      a.y=BELT.cy+Math.sin(ang)*r;
+      a.vx=Math.cos(ang)*-.5;
+      a.vy=Math.sin(ang)*-.5;
+    }
+
+    a.splitCooldown--;
+
+    if(a.health<=0){
+      // Split
+      const wasOre=a.ore;
+      if(a.r>14 && a.splitCooldown<=0){
+        splitAsteroid(a);
+      }
+      // Drop ore
+      if(wasOre){
+        const num=Math.floor(rand(3,5));
+        for(let k=0;k<num;k++){
+          const an=rand(0,TAU);
+          const sp=rand(.2,.5);
+          spawnChunk(a.x,a.y,Math.cos(an)*sp+a.vx,Math.sin(an)*sp+a.vy);
+        }
+      }
+      addExplosion(a.x,a.y,20,'rgba(120,180,200,.8)',20);
+      asteroids.splice(i,1);
+      continue;
+    }
+  }
+
+  // Chunks physics
+  for(let i=chunks.length-1;i>=0;i--){
+    const c=chunks[i];
+    c.x+=c.vx;
+    c.y+=c.vy;
+    c.vx*=.99;c.vy*=.99;
+    c.rot+=c.vrot;
+    c.vrot*=.99;
+    c.age++;
+
+    // Tractor toward nearest hauler
+    let targetH=null;
+    let bestD=60*60;
+    for(const h of haulers){
+      if(h.docked)continue;
+      const d=dist2(c.x,c.y,h.x,h.y);
+      if(d<bestD){
+        bestD=d;targetH=h;
+      }
+    }
+    if(targetH){
+      const ddx=targetH.x-c.x;
+      const ddy=targetH.y-c.y;
+      const dd=Math.hypot(ddx,ddy);
+      const dd2=dd;
+      if(dd<60){
+        const force=8/dd;
+        c.vx+=ddx/dd*force*.5;
+        c.vy+=ddy/dd*force*.5;
+      }
+      // Auto-collect
+      if(dd<14){
+        targetH.cargo++;
+        addPopup(c.x,c.y,'+1','rgba(255,200,80,.95)');
+        chunks.splice(i,1);
+        continue;
+      }
+    }
+
+    if(c.age>c.life*60){
+      chunks.splice(i,1);
+    }
+  }
+
+  // Haulers AI
+  for(let i=haulers.length-1;i>=0;i--){
+    const h=haulers[i];
+    if(h.docked){
+      h.dockTime++;
+      if(h.dockTime>180){
+        stats.cargo+=h.cargo;
+        stats.delivered+=h.cargo;
+        addPopup(h.x,h.y,`+${h.cargo} cargo`,'rgba(64,200,180,.95)');
+        h.cargo=0;
+        h.docked=false;
+        h.dockTime=0;
+        // undock — push back
+        const a=station.angle+Math.PI*2.25+rand(-.3,.3);
+        h.x=station.x+Math.cos(a)*70;
+        h.y=station.y+Math.sin(a)*70;
+        h.vx=Math.cos(a)*1.5;
+        h.vy=Math.sin(a)*1.5;
+        h.state='seek';
+      }
+      continue;
+    }
+
+    h.thinkTimer--;
+    if(h.thinkTimer<=0){
+      // Decide state
+      const nearAsteroid=findNearestAsteroid(h.x,h.y,150);
+      if(h.state=='seek'){
+        h.target=nearAsteroid;
+        if(h.target){
+          h.state='mine';
+        }
+      }
+      h.thinkTimer=rand(60,180);
+    }
+
+    // Drift toward target or new target
+    let txX,tyY;
+    if(h.state=='seek'){
+      // Find a random point in belt
+      const ang=rand(0,TAU);
+      const r=rand(BELT.rMin+50,BELT.rMax-50);
+      txX=BELT.cx+Math.cos(ang)*r;
+      tyY=BELT.cy+Math.sin(ang)*r;
+    } else if(h.state=='mine'){
+      if(!h.target || h.target.health<=0 || asteroids.indexOf(h.target)<0){
+        h.target=findNearestAsteroid(h.x,h.y,150);
+        if(!h.target){h.state='seek';h.target=null;}
+      } else {
+        const a=h.target;
+        const dd=Math.hypot(a.x-h.x,a.y-h.y);
+        const desired=70+Math.min(50,Math.max(15,a.r-30));
+        const error=Math.abs(dd-desired);
+        const ang=atan2(a.y-h.y,a.x-h.x);
+        txX=a.x-MMath.cos(ang)*desired;
+        tyY=a.y-MMath.sin(ang)*desired;
+        // Beam lock
+        h.cooldown--;
+        if(h.cooldown<=0){
+          createBeam(h.x,h.y,a.x,a.x,a.y,1,3.6,.5);
+          // Damage
+          a.health-=2;
+          addPopup(a.x+rand(-5,5),a.y+rand(-5,5),null,'rgba(64,200,180,.6)');
+          if(Math.random()<.15 && a.ore){
+            // Chip ore
+            const an=rand(0,TAU);
+            spawnChunk(a.x,a.y,Math.cos(an)*1.2+a.vx,Math.sin(an)*1.2+a.vy);
+          }
+          h.cooldown=2;
+        }
+      }
+    } else if(h.state=='dock'){
+      txX=station.x;tyY=station.y;
+      const dd=Math.hypot(txX-h.x,tyY-h.y);
+      if(dd<40){
+        h.docked=true;
+        h.dockTime=0;
+        h.vx*=1;h.vy*=1;
+        addPopup(h.x,h.y,'DOCK','rgba(64,200,180,.95)');
+      }
+    }
+
+    // Steering
+    const ddx=txX-h.x;
+    const ddy=tyY-h.y;
+    const dd=Math.hypot(ddx,ddy)||1;
+    const desiredSpeed=.5;
+    const tForce=.1;
+    h.vx+=ddx/dd*tForce;
+    h.vy+=ddy/dd*tForce;
+    h.vx*=.96;
+    h.vy*=.96;
+    h.x+=h.vx;
+    h.y+=h.vy;
+    // Avoid asteroids
+    for(const a of asteroids){
+      const d=Math.hypot(a.x-h.x,a.y-h.y);
+      if(d<a.r+30){
+        const f=(a.r+30-d)*.02;
+        h.vx+=(.x-a.x)/d*f;
+        h.vy+=(y-a.y)/d*f;
+      }
+    }
+
+    // Heading
+    const targetAngle=Math.atan2(h.vy,h.vx);
+    let diff=targetAngle-h.angle;
+    while(diff>Math.PI/2)diff-=TAU;
+    while(diff<-Math.PI/2)diff+=TAU;
+    h.angle+=diff*.1;
+
+    // Trail
+    if(h.thinkTimer%6==0){
+      h.trial.push({x:h.x,y:h.y,life:1});
+    }
+    for(let k=h.trail.length-1;k>=0;k--){
+      h.trail[k].life-=.01;
+      if(h.trail[k].life<=0)h.trail.splice(k,1);
+    }
+
+    // Auto-transition to dock
+    if(h.state=='mine' && h.cargo>=10){
+      h.state='dock';
+      h.target=null;
+    }
+  }
+
+  // Pirates AI
+  for(let i=pirates.length-1;i>=0;i--){
+    const p=pirates[i];
+    p.age++;
+    // Find target hauler
+    let targetH=null;
+    let bestD=80*80;
+    for(const h of haulers){
+      if(h.docked)continue;
+      const d=dist2(p.x,p.y,h.x,h.y);
+      if(d<bestD){
+        bestD=d;targetH=h;
+      }
+    }
+    p.target=targetH;
+
+    if(p.target){
+      // Move toward
+      const ddx=p.target.x-p.x;
+      const ddy=p.target.y-p.y;
+      const dd=Math.hypot(ddx,ddy)||1;
+      p.vx+=ddx/dd*.005;
+      p.vy+=ddy/dd*.005;
+      p.vx=clamp(p.vx,-2,2);p.vy=clamp(p.vy,-2,2);
+      p.x+=p.vx;p.y+=p.vy;
+      p.angle=Math.atan2(p.vy,p.vx);
+      // Fire
+      p.cooldown--;
+      if(p.cooldown<=0 && dd<60){
+        const fAngle=Math.atan2(p.target.y-p.y,p.target.x-p.x);
+        const fx=p.x+Math.cos(fAngle)*15;
+        const fy=p.y+Math.sin(fAngle)*15;
+        createBeam(p.x,p.y,p.target.x,p.target.y,'rgba(255,80,80,.9>',1,.5);
+        // Damage hauler
+        p.target.health-=10;
+        addExplosion(p.target.x,p.target.y,5,'rgba(255,80,80,.9)',3);
+        p.cooldown=20;
+      }
+      if(p.target.health<=0){
+        addExplosion(p.target.x,p.target.y,30,'rgba(255,180,80,.9>',30);
+        haulers.splice(haulers.indexOf(p.target),1);
+        p.target=null;
+        stats.haulK++;
+        // Respawn
+        if(haulers.length<5){
+          const nh=spawnHauler();
+          nh.x=station.x;nh.y=station.y;nh.state='dock';
+        }
+      }
+    } else {
+      // Wander
+      p.vx+=Math.cos(p.age*.01)*.1;
+      p.vy+=Math.sin(p.age*.01)*.1;
+      p.x+=p.vx;p.y+=p.vy;
+    }
+
+    // Drone attacks pirate
+    for(const d of drones){
+      const dd=dist2(p.x,p.y,d.x,d.y);
+      if(dd<80*80){
+        d.target=p;
+      }
+    }
+
+    p.health-=0;
+  }
+
+  // Drones AI
+  for(const d of drones){
+    // Patrol around station
+    d.patrol+=.02;
+    const patrolX=station.x+Math.cos(d.patrol)*70;
+    const patrolY=station.y+Math.sin(d.patrol)*70;
+    let targetX=patrolX,targetY=patrolY;
+
+    d.target=null;
+    let bestDD=200*200;
+    for(const p of pirates){
+      const dd=dist2(p.x,p.y,d.x,d.y);
+      if(dd<bestDD){
+        bestDD=dd;d.target=p;
+      }
+    }
+    if(d.target){
+      targetX=d.target.x;
+      targetY=d.target.y;
+      // Fire
+      d.fireRecharge--;
+      if(d.fireRecharge<=0){
+        const dd=dist(d.target.x,d.target.y,d.x,d.y);
+        if(dd<80){
+          const fa=Math.atan2(d.target.y-d.y,d.target.x-d.x);
+          createBeam(d.x,d.y,d.target.x,d.target.y,'rgba(64,255,64,.9>',1,.1);
+          d.target.health-=8;
+          addExplosion(d.target.x,d.target.y,3,'rgba(64,255,64,.9>',3);
+          d.fireRecharge=15;
+          if(d.target.health<=0){
+            addExplosion(d.target.x,d.target.y,30,'rgba(64,255,64,.9>',30);
+            pirates.splice(pirates.indexOf(d.target),1);
+            stats.pK++;
+            d.target=null;
+          }
+        }
+      }
+    }
+
+    const ddx=targetX-d.x;
+    const ddy=targetY-d.y;
+    const dd=Math.hypot(ddx,ddy)||1;
+    d.x+=ddx/dd*.4;
+    d.y+=ddy/dd*.4;
+    d.angle=Math.atan2(ddy,ddx);
+  }
+
+  // Beams update
+  for(let i=beams.length-1;i>=0;i--){
+    const b=beams[i];
+    b.life-=.05;
+    if(b.life<=0){
+      beams.splice(i,1);
+    }
+  }
+
+  // Sparks
+  for(let i=sparks.length-1;i>=0;i--){
+    const s=sparks[i];
+    s.x+=s.vx;
+    s.y+=s.vy;
+    s.vx*=.95;s.vy*=.95;
+    s.life-=1/60;
+    if(s.life<=0){
+      sparks.splice(i,1);
+    }
+  }
+
+  // Popups
+  for(let i=popups.length-1;i>=0;i--){
+    const p=popups[i];
+    p.y+=p.vy;
+    p.vy*=.9;
+    p.life-=1/60;
+    if(p.life<=0){
+      popups.splice(i,1);
+    }
+  }
+
+  // Spawn cycles
+  if(asteroids.length<25 && Math.random()<.01){
+    const ang=rand(0,TAU);
+    const r=rand(BELT.rMin,BELT.rMax);
+    asteroids.push(spawnAsteroid(BELT.cx+Math.cos(ang)*r,BELT.cy+Math.sin(ang)*r,1));
+  }
+
+  // Pirates raid
+  if(pirates.length<2 && Math.random()<.004){
+    spawnPirate();
+    log('Pirate raid detected');
+  }
+
+  // Always ensure haulers
+  while(haulers.length<5){
+    spawnHauler();
+  }
+
+  world.time+=1/60;
+  world.elapsed+=1;
+}
+
+function findNearestAsteroid(x,y,maxd){
+  let best=null;
+  let bestD=maxd*maxd;
+  for(const a of asteroids){
+    const d=dist2(a.x,a.y,x,y);
+    if(d<bestD){bestD=d;best=a;}
+  }
+  return best;
+}
+
+function drawStars(){
+  ctx.save();
+  for(const s of stars){
+    const sx=s.x-cam.x*.2;
+    const sy=s.y-cam.y*.2;
+    // Wrap around
+    const wx=((sx+200)%400)-200;
+    const wy=((sy+200)%400)-200;
+    ctx.fillStyle=s.col;
+    ctx.globalAlpha=s.z;
+    ctx.beginPath();
+    ctx.arc(W/2+wx,W/2+wy,s.r,0,TAU);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawBackground(){
+  // Background gradient
+  const grad=ctx.createRadialGradient(W/2,H/2,0,W/2,H/2,Math.max(W,H)*.7);
+  grad.addColorStop(0,'#0d182d');
+  grad.addColorStop(1,'#070811');
+  ctx.fillStyle=grad;
+  ctx.fillRect(0,0,W,H);
+
+  // Belt hint ring
+  ctx.save();
+  ctx.translate(W/2-cam.x,H/2-cam.y);
+  ctx.strokeStyle='rgba(64,200,180,.05)';
+  ctx.lineWidth=400;
+  ctx.beginPath();
+  ctx.arc(BELT.cx,BELT.cy,BELT.rMin+200,0,TAU);
+  ctx.stroke();
+  ctx.strokeStyle='rgba(64,200,180,.04)';
+  ctx.lineWidth=400;
+  ctx.beginPath();
+  ctx.arc(BELT.cx,BELT.cy,(BELT.rMax+BELT.rMin)*.5,0,TAU);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawStation(){
+  ctx.save();
+  ctx.translate(W/2-cam.x,H/2-cam.y);
+  ctx.translate(station.x,station.y);
+  ctx.rotate(station.angle);
+  // Outer ring
+  ctx.strokeStyle='rgba(64,200,180,.15)';
+  ctx.lineWidth=2;
+  ctx.beginPath();
+  ctx.arc(0,0,80,0,TAU);
+  ctx.stroke();
+  ctx.strokeStyle='rgba(64,200,180,.08>';
+  ctx.lineWidth=1;
+  for(let i=0;i<8;i++){
+    const a=i*TAU/8;
+    ctx.beginPath();
+    ctx.arc(0,0,75,a,a+.06);
+    ctx.stroke();
+  }
+  ctx.strokeStyle='rgba(64,200,180,.4>';
+  ctx.lineWidth=4;
+  ctx.beginPath();
+  ctx.arc(0,0,60,0,TAU);
+  ctx.stroke();
+  // Inner disk
+  const grad=ctx.createRadialGradient(0,0,5,0,0,60);
+  grad.addColorStop(0,'rgba(64,200,180,.3>');
+  grad.addColorStop(1,'rgba(20,40,50,.5>');
+  ctx.fillStyle=grad;
+  ctx.beginPath();
+  ctx.arc(0,0,60,0,TAU);
+  ctx.fill();
+  // Spokes
+  ctx.strokeStyle='rgba(64,200,180,.35>';
+  ctx.lineWidth=2;
+  for(let i=0;i<6;i++){
+    const a=i*TAU/6+station.angle*2;
+    ctx.beginPath();
+    ctx.moveTo(0,0);
+    ctx.lineTo(Math.cos(a)*50,Math.sin(a)*50);
+    ctx.stroke();
+  }
+  // Docking ports
+  for(let i=0;i<4;i++){
+    const a=i*TAU/4+Math.PI/4;
+    const dx=Math.cos(a)*48;
+    const dy=Math.sin(a)*48;
+    ctx.fillStyle='rgba(64,200,180,.2>';
+    ctx.beginPath();
+    ctx.arc(dx,dy,4,0,TAU);
+    ctx.fill();
+    ctx.strokeStyle='rgba(64,200,180,.7>';
+    ctx.beginPath();
+    ctx.arc(dx,dy,4,0,TAU);
+    ctx.stroke();
+  }
+  // Center
+  ctx.fillStyle='rgba(64,200,180,.9>';
+  ctx.beginPath();
+  ctx.arc(0,0,8,0,TAU);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawAsteroid(a){
+  ctx.save();
+  ctx.translate(W/2-cam.x,H/2-cam.y);
+  ctx.translate(a.x,a.y);
+  ctx.rotate(a.rot);
+  // Outer shadow
+  const grad=ctx.createRadialGradient(0,0,a.r*.5,0,0,a.r*1.3);
+  grad.addColorStop(0,'rgba(0,0,0,.5>');
+  grad.addColorStop(1,'rgba(0,0,0,0>');
+  ctx.fillStyle=grad;
+  ctx.beginPath();
+  ctx.arc(0,0,a.r*1.3,0,TAU);
+  ctx.fill();
+  // Body
+  ctx.fillStyle='rgba(45,60,75,.95>';
+  ctx.beginPath();
+  ctx.arc(0,0,a.r,0,TAU);
+  ctx.fill();
+  // Inner highlight
+  const grad2=ctx.createRadialGradient(-a.r*.3,-a.r*.3,a.r*.5,-a.r*.3,-a.r*.3,a.r);
+  grad2.addColorStop(0,'rgba(120,140,160,.2>');
+  grad2.addColorStop(1,'rgba(45,60,75,0>');
+  ctx.fillStyle=grad2;
+  ctx.beginPath();
+  ctx.arc(0,0,a.r,0,TAU);
+  ctx.fill();
+  // Ore glints
+  if(a.ore){
+    ctx.save();
+    ctx.globalAlpha=.8;
+    ctx.fillStyle='rgba(64,200,180,.9>';
+    for(let i=0;i<3;i++){
+      const an=i*TAU/3+a.seed*5;
+      const dx=Math.cos(an)*a.r*.5;
+      const dy=Math.sin(an)*a.r*.5;
+      ctx.beginPath();
+      ctx.arc(dx,dy,Math.max(1,a.r*.05),0,TAU);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+  // Crack pattern
+  ctx.strokeStyle='rgba(20,30,40,.7>';
+  ctx.lineWidth=1;
+  for(let i=0;i<3;i++){
+    const an=i*TAU/3+a.seed;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(an)*a.r*.5,Math.sin(an)*a.r*.5);
+    ctx.lineTo(Math.cos(an+0.4)*a.r*.3,Math.sin(an+0.4)*a.r*.3);
+    ctx.stroke();
+  }
+  ctx.restore();
+  // Health bar
+  if(a.health<a.maxHealth*.5){
+    ctx.save();
+    ctx.translate(W/2-cam.x,H/2-cam.y);
+    ctx.translate(a.x,a.y);
+    ctx.fillStyle='rgba(0,0,0,.5>';
+    ctx.fillRect(-a.r,-a.r-10,a.r*2,2);
+    ctx.fillStyle='rgba(64,200,180,.9>';
+    ctx.fillRect(-a.r,-a.r-10,a.r*2*a.health/a.maxHealth,2);
+    ctx.restore();
+  }
+}
+
+function drawHauler(h){
+  ctx.save();
+  ctx.translate(W/2-cam.x,H/2-cam.y);
+  ctx.translate(h.x,h.y);
+  ctx.rotate(h.angle);
+  // Trail
+  for(const t of h.trail){
+    ctx.fillStyle=`rgba(64,200,180,${t.life*.5>)`;
+    ctx.beginPath();
+    ctx.arc(t.x-h.x,t.y-h.y,2*t.life,0,TAU);
+    ctx.fill();
+  }
+  // Ship body
+  const grad=ctx.createLinearGradient(-15,0,15,0);
+  grad.addColorStop(0,'rgba(20,40,50,.9>');
+  grad.addColorStop(1,'rgba(64,200,180,.9>');
+  ctx.fillStyle=grad;
+  ctx.beginPath();
+  ctx.moveTo(-15,-6);
+  ctx.lineTo(15,0);
+  ctx.lineTo(-15,6);
+  ctx.lineTo(-10,0);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle='rgba(64,200,180,.9>';
+  ctx.lineWidth=1;
+  ctx.stroke();
+  // Cargo indicator
+  if(h.cargo>0){
+    ctx.fillStyle='rgba(64,200,180,.9>';
+    ctx.font='10px JetBrains Mono';
+    ctx.textAlign='center';
+    ctx.fillText(h.cargo,0,-12);
+  }
+  ctx.restore();
+}
+
+function drawDrone(d){
+  ctx.save();
+  ctx.translate(W/2-cam.x,H/2-cam.y);
+  ctx.translate(d.x,d.y);
+  ctx.rotate(d.angle);
+  ctx.fillStyle='rgba(64,255,64,.9>';
+  ctx.beginPath();
+  ctx.arc(0,0,5,0,TAU);
+  ctx.fill();
+  ctx.strokeStyle='rgba(64,255,64,.9>';
+  ctx.lineWidth=1;
+  ctx.beginPath();
+  ctx.moveTo(5,0);
+  ctx.lineTo(10,0);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawPirate(p){
+  ctx.save();
+  ctx.translate(W/2-cam.x,H/2-cam.y);
+  ctx.translate(p.x,p.y);
+  ctx.rotate(p.angle);
+  ctx.fillStyle='rgba(255,80,80,.9>';
+  ctx.beginPath();
+  ctx.moveTo(-15,-6);
+  ctx.lineTo(15,0);
+  ctx.lineTo(-15,6);
+  ctx.lineTo(-10,0);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle='rgba(255,80,80,.9>';
+  ctx.lineWidth=1;
+  ctx.stroke();
+  // Glow
+  const grad=ctx.createRadialGradient(0,0,5,0,0,15);
+  grad.addColorStop(0,'rgba(255,80,80,.3>');
+  grad.addColorStop(1,'rgba(255,80,80,0>');
+  ctx.fillStyle=grad;
+  ctx.beginPath();
+  ctx.arc(0,0,15,0,TAU);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawChunk(c){
+  ctx.save();
+  ctx.translate(W/2-cam.x,H/2-cam.y);
+  ctx.translate(c.x,c.y);
+  ctx.rotate(c.rot);
+  // Glow
+  const grad=ctx.createRadialGradient(0,0,0,0,0,c.r*4);
+  grad.addColorStop(0,'rgba(64,200,180,.4>');
+  grad.addColorStop(1,'rgba(64,200,180,0>');
+  ctx.fillStyle=grad;
+  ctx.beginPath();
+  ctx.arc(0,0,c.r*4,0,TAU);
+  ctx.fill();
+  ctx.fillStyle='rgba(64,200,180,.9>';
+  ctx.beginPath();
+  ctx.arc(0,0,c.r,0,TAU);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawBeams(){
+  for(const b of beams){
+    ctx.save();
+    ctx.translate(W/2-cam.x,H/2-cam.y);
+    const alpha=b.life/b.life0;
+    ctx.strokeStyle=`rgba(64,200,180,${alpha*.9>)`;
+    ctx.lineWidth=b.width*3;
+    ctx.beginPath();
+    ctx.moveTo(b.x1,b.y1);
+    ctx.lineTo(b.x2,b.y2);
+    ctx.stroke();
+    ctx.strokeStyle=`rgba(64,200,180,${alpha*.5>)`;
+    ctx.lineWidth=b.width*8;
+    ctx.beginPath();
+    ctx.moveTo(b.x1,b.y1);
+    ctx.lineTo(b.x2,b.y2);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawSparks(){
+  for(const s of sparks){
+    ctx.save();
+    ctx.translate(W/2-cam.x,H/2-cam.y);
+    ctx.globalAlpha=s.life;
+    ctx.fillStyle=s.col;
+    ctx.beginPath();
+    ctx.arc(s.x,s.y,s.size,0,TAU);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawPopups(){
+  ctx.save();
+  ctx.translate(W/2-cam.x,H/2-cam.y);
+  ctx.font='12px JetBrains Mono';
+  ctx.textAlign='center';
+  for(const p of popups){
+    ctx.globalAlpha=p.life;
+    ctx.fillStyle=p.col;
+    ctx.fillText(p.text,p.x,p.y);
+  }
+  ctx.restore();
+}
+
+function draw(){
+  // Clear
+  ctx.fillStyle='#06080d';
+  ctx.fillRect(0,0,W,H);
+
+  drawBackground();
+  drawStars();
+  drawStation();
+  for(const a of asteroids)drawAsteroid(a);
+  for(const c of chunks)drawChunk(c);
+  for(const h of haulers)drawHauler(h);
+  for(const d of drones)drawDrone(d);
+  for(const p of pirates)drawPirate(p);
+  drawBeams();
+  drawSparks();
+  drawPopups();
+}
+
+function updateUI(){
+  document.getElementById('nH').textContent=haulers.length;
+  document.getElementById('nE').textContent=drones.length;
+  document.getElementById('nC').textContent=stats.cargo;
+  document.getElementById('cam').textContent=`${Math.round(cam.x)},${Math.round(cam.y)})`;
+  document.getElementById('nA').textContent=asteroids.length;
+  document.getElementById('nP').textContent=pirates.length;
+  document.getElementById('kP').textContent=stats.pK;
+}
+
+// Init
+function init(){
+  // Spawn initial asteroids
+  for(let i=0;i<30;i++){
+    const ang=Math.random()*TAU;
+    const r=rand(BELT.rMin,BELT.rMax);
+    const a=spawnAsteroid(BELT.cx+Math.cos(ang)*r,BELT.cy+Math.sin(ang)*r,1);
+    a.vx=Math.cos(ang+Math.PI/2)*rand(.2,.4);
+    a.vy=Math.sin(ang+Math.PI/2)*rand(.2,.4);
+    asteroids.push(a);
+  }
+  // Spawn haulers
+  for(let i=0;i<5;i++){
+    const h=spawnHauler();
+    h.name=`H-${String(i+1).padStart(2,'0')}`;
+    h.color=`hsl(${rand(180,210)},80%,60%)`;
+  }
+  // Spawn drones
+  spawnDrones();
+  // Spawn a pirate
+  spawnPirate();
+  log('Sim initialized');
+  log('5 haulers deployed');
+  log('2 escort drones active');
+}
+
+let lastFrame=0;
+function loop(t){
+  const dt=t-lastFrame;
+  lastFrame=t;
+  // Update at ~60fps regardless of dt
+  if(dt<200){
+    update();
+    draw();
+    updateUI();
+  }
+  requestAnimationFrame(loop);
+}
+
+init();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

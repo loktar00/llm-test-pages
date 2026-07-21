@@ -1,0 +1,819 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Oil Landscape — Painterly Emergence</title>
+<style>
+  html,body{margin:0;padding 0;height:100;overflow:hidden}
+  body{
+    background:#151016;
+    color:#ccc0ab;
+    font-family:serif;
+    display:grid;
+    place-items:center;
+  }
+  canvas{
+    background:#151016;
+    display:block;
+    box-shadow:0 0 80px rgba(0,0,0,.4) inset,0 30px 60px rgba(0,0,0,.6);
+  border:solid rgba(40,30,35,0.7) 12px;
+    border-image:none;
+    max-width:100vw;max-height:100vh;
+  canvas-style:none
+  }
+  #hud{
+    position:fixed;left:8px;top:8px;font-size:11px;color:#8886a0
+    font-family:monospace;letter-spacing:.5px;z-index:3;
+    pointer-events:none;
+    text-shadow:0 0 6px rgba(0,0,0,.8);
+  }
+  #meter{
+    position:fixed;right:8px;top:8px;font-size:11px;color:#8886a0
+    ;font-family:monospace;letter-spacing:.5px;z-index:3;
+    text-align:right;
+    pointer-events:none;
+    text-shadow:0 0 6px rgba(0,0,0,.8);
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"></div>
+<div id="meter"></div>
+<script>
+(function(){
+'use strict';
+
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d', { alpha: false });
+
+let W=0, H=0, DPR=1;
+let scene = null;
+let strokes = [];
+let strokeI = 0;
+let t0 = 0;
+let phaseLabel = '';
+let phaseIdx = 0;
+let cycleCount = 0;
+let completeTime = 0;
+let signedThis = false;
+let vignetteDone = false;
+let lastFinishStamp = 0;
+let grainCanvas = null;
+let grainCtx = null;
+let grainScale = 1;
+
+const PHASE_NAMES = [
+  '01  underpaint — broad underpainting wash',
+  '02  refinement — forms & local color',
+  '03  fecks — highlight flecks & calligraphic',
+  '04  drying & signature'
+];
+
+const hudEl = document.getElementById('hud');
+const meterEl = document.getElementById('meter');
+
+function resize(){
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  if(w===W && h===H && cv.width!==0) return;
+  W = window.innerWidth;
+  H = window.innerHeight;
+  DPR = Math.min(2, devicePixelRatio || 1);
+  cv.width = W * DPR;
+  cv.height = H * DPR;
+  cv.style.width = W + 'px';
+  cv.style.height = H + 'px';
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  prepareGrain();
+  reset();
+}
+
+function prepareGrain(){
+  const w = W;
+  const h = H;
+  grainScale = Math.max(1, DPR);
+  const gw = Math.ceil(w/4);
+  const gh = Math.ceil(h/4);
+  grainCanvas = document.createElement('canvas');
+  grainCanvas.width = gw;
+  grainCanvas.height = gh;
+  const gctx = grainCtx = grainCanvas.getContext('2d');
+  const data = gctx.createImageData(gw, gh);
+  const pix = data.data;
+  for(let i=0;i<gw*gh;i++){
+    const b = 225 + (Math.random()*30 - 15);
+    const a = Math.random()*0.04 + 0.02;
+    const k = i*4;
+    pix[k] = 245; pix[k+1]= 238; pix[k+2]= 230;
+    // alpha in 0..1
+    pix[k+3] = (a*255)|0;
+  // quick grayscale tint
+    const tint = (b)|0;
+  pix[k]=pix[k+1]=pix[k+2]=tint; pix[k+3]=(a*255)|0;
+  // Actually we want subtle grain; values fixed:
+  }
+  // Re-do: simpler: fill random alpha pixels
+  for(let i=0;i<pix.length;i+=4){
+    const v = 200 + Math.random()*20;
+    pix[i]=v; pix[i+1]=v-5; pix[i+2]=v-10;
+    const a = Math.random()*0.025;
+    pix[i+3] = (a*255)|0;
+  }
+  gctx.putImageData(data,0,0);
+}
+
+function reset(){
+  scene = buildScene();
+  strokes = buildStrokes(scene);
+  strokeI = 0;
+  t0 = performance.now();
+  phaseIdx = 0;
+  phaseLabel = PHASE_NAMES[0];
+  signedThis = false;
+  vignetteDone = false;
+  completeTime = 0;
+  lastFinishStamp = 0;
+  cycleCount++;
+  // prime canvas to canvas-tone
+  ctx.fillStyle = '#151016';
+  ctx.fillRect(0,0,W,H);
+  // very faint priming coat
+  ctx.globalAlpha = 0.04;
+  ctx.fillStyle = '#f6f1e9';
+  ctx.fillRect(0,0,W,H);
+  ctx.globalAlpha = 1;
+  hudEl.textContent = 'CYCLE '+cycleCount+'   '+phaseLabel;
+}
+
+function buildScene(){
+  const horizonY = Math.round(H * (0.38 + Math.random()*0.22));
+  const groundBottom = H + 40;
+  // sky stops
+  const skyHigh = {
+    r: 200+Math.random()*40|0,
+    g: 200+Math.random()*40|0,
+    b: 200+Math.random()*40|0,
+    a: 1
+  };
+  const skyMid = {
+    r: 220+Math.random()*20|0,
+    g: 200+Math.random()*30|0,
+    b: 200+Math.random()*30 - 20|0,
+    a: 1
+  };
+  const skyLow = {
+    r: 250+Math.random()*30|0,
+    g: 200+Math.random()*20|0,
+    b: 180+Math.random()*30|0,
+    a: 1
+  };
+  const groundHi = {
+    r: 130+Math.random()*20|0,
+    g: 175+Math.random()*20|0,
+    b: 200+Math.random()*20|0,
+    a: 1
+  };
+  const groundMid = {
+    r: 105+Math.random()*15|0,
+    g: 140+Math.random()*15|0,
+    b: 165+Math.random()*15|0,
+    a: 1
+  };
+  const groundLo = {
+    r: 80+Math.random()*15|0,
+    g: 110+Math.random()*15|0,
+    b: 130+Math.random()*15|0,
+    a: 1
+  };
+  // sky elements
+  const skyTint = {
+    r: 235+Math.random()*15 - 10|0,
+    g: 200+Math.random()*15|0,
+    b: 200+Math.random()*15|0,
+    a: 1
+  };
+  const skyWarm = {
+    r: 220+Math.random()*10+20|0,
+    g: 200+Math.random()*5 - 10|0,
+    b: 200+Math.random()*15 - 15|0,
+    a: 1
+  };
+  const sunPos = {
+    x: W * (0.25 + Math.random()*0.2),
+    y: H * (0.16 + Math.random()*0.05)
+  };
+  const cloudCount = 2 + Math.random()*3;
+  const clouds = [];
+  for(let i=0;i<cloudCount;i++){
+    clouds.push({
+      x: W * (0.05 + Math.random()*0.6),
+      y: horizonY * (0.6 + Math.random()*0.2),
+      r: 20 + Math.random()*60,
+      tilt: -15 + Math.random()*30
+    });
+  }
+  // distant ridge silhouette — two nested hills
+  const ridge1Base = horizonY + Math.random()*5;
+  const ridge2Base = ridge1Base + 12 + Math.random()*20;
+  const trees = [];
+  const treeCount = 6 + Math.random()*6;
+  for(let i=0;i<treeCount;i++){
+    trees.push({
+      x: W * (0.05 + Math.random()*0.85),
+      y: horizonY + Math.random()*30,
+      h: 30 + Math.random()*60,
+      r: 4 + Math.random()*5,
+      tint: Math.random()*2|0
+    });
+  }
+  const flowers = [];
+  const flowerCount = 8 + Math.random()*20;
+  for(let i=0;i<flowerCount;i++){
+    flowers.push({
+      x: W * Math.random(),
+      y: horizonY + 5 + (1+Math.random()) * (groundBottom-horizonY-30) * Math.random(),
+      r: 2 + Math.random()*3,
+      c: (Math.random()*3)|0,
+      phase: Math.random()*Math.PI
+    });
+  }
+  const birds = [];
+  const birdCount = 3 + (Math.random()*5)|0;
+  for(let i=0;i<birdCount;i++){
+    birds.push({
+      x: W * (0.3 + Math.random()*0.6),
+      y: horizonY * (0.3 + Math.random()*0.4),
+      phase: Math.random()*Math.PI
+    });
+  }
+  const distantTrees = [];
+  const dtCount = 20 + (Math.random()*30)|0;
+  for(let i=0;i<dtCount;i++){
+    distantTrees.push({
+      x: W * Math.random(),
+      y: ridge2Base - Math.random()*20,
+      h: 5 + Math.random()*20
+    });
+  }
+  // snow flecks on ground
+  const snowFlecks = [];
+  const snowCount = 60 + (Math.random()*60)|0;
+  for(let i=0;i<snowCount;i++){
+    snowFlecks.push({
+      x: W * Math.random(),
+      y: ridge2Base + Math.random()*(groundBottom - ridge2Base),
+      r: 1 + Math.random()*1.5
+    });
+  }
+  return {
+    horizonY, groundBottom, groundHi, groundMid, groundLo, skyHigh,
+    skyMid, skyLow, skyTint, skyWarm, sunPos, clouds, trees, flowers,
+    birds, ridge1Base, ridge2Base, distantTrees, snowFlecks,
+    signature: '— A. R. K —'
+  };
+}
+
+function buildStrokes(s){
+  const arr = [];
+  // PASS 01 — underpaint (broad)
+  // sky underpaint — horizontal strokes
+  for(let x=-20; x<W+20; x+=20){
+    const y = (H/2 + Math.random()*10)|0;
+    const length = 30 + Math.random()*30 + (W/8)|0;
+    const dir = Math.random()>.5 ? 1 : -1;
+    arr.push({
+      pass:1, type:'skyU',
+      x: x - dir * 20 * Math.random(),
+      y: y + Math.random()*20,
+      endX: x + dir * length,
+      endY: y + (Math.random()*10-5),
+      width: 25 + Math.random()*20,
+      color: lerpC(s.skyMid, s.skyHigh, Math.random()),
+      alpha: 0.7 + Math.random()*0.2,
+      dur: 700 + Math.random()*400
+    });
+  }
+  // sky underpaint low
+  for(let x=-20; x<W+20; x+=20){
+    const length = 30 + Math.random()*30 + (W/8)|0;
+    const dir = Math.random()>.5 ? 1 : -1;
+    const y = (H * 0.3 + Math.random()*5)|0;
+    arr.push({
+      pass:1, type:'skyU',
+      x: x, y: y,
+      endX: x + dir * length,
+      endY: y + (Math.random()*6-3),
+      width: 25 + Math.random()*15,
+      color: s.skyLow,
+      alpha: 0.5,
+      dur: 600 + Math.random()*400
+    });
+  }
+  // sky underpaint — high sky wash
+  for(let x=-30; x<W+30; x+=20){
+    const length = 30 + Math.random()*30 + (W/8)|0;
+    const dir = Math.random()>.5 ? 1 : -1;
+    const y = (H*0.15 + Math.random()*8)|0;
+    arr.push({
+      pass:1, type:'skyU',
+      x: x, y: y,
+      endX: x + dir * length,
+      endY: y + Math.random()*5-2,
+      width: 25 + Math.random()*15,
+      color: s.skyHigh,
+      alpha: 0.7 + Math.random()*0.2,
+      dur: 600 + Math.random()*400
+    });
+  }
+
+  // ground underpaint — vertical strokes
+  const gh = s.horizonY;
+  const gb = s.groundBottom;
+  for(let y=gh-2; y<gb; y+=20){
+    const col = lerpC(s.groundMid, s.groundLo, (y-gh)/(gb-gh));
+    const dir = 1;
+    const length = 30 + Math.random()*30 + 30;
+    arr.push({
+      pass:1, type:'grdU',
+      x: -20 + Math.random()*(W+40),
+      y: y,
+      endX: x => x + dir * (2+Math.random()*2),
+      endY: y + length,
+      width: 25 + Math.random()*20,
+      color: col,
+      alpha: 0.7 + Math.random()*0.2,
+      dur: 700 + Math.random()*400
+    });
+  }
+  // remove broken: re-do the vertical underpaint properly
+  // (rebuild array)
+  const rebuilt = [];
+  // PASS 1 sky underpaint — horizontal strokes
+  for(let x=-30; x<W+30; x+=20){
+    const y = (Math.random() * gh)|0;
+    const length = 30 + Math.random()*30 + 30;
+    const dir = Math.random()>.5 ? 1 : -1;
+    const endX = x + dir * length;
+    const endY = y + (Math.random()*6-3);
+    rebuilt.push({
+      pass:1, type:'skyU',
+      sx: x, sy: y,
+      tx: endX, ty: endY,
+      width: 25 + Math.random()*20,
+      color: lerpC(s.skyMid, s.skyHigh, Math.random()*0.7),
+      alpha: 0.6 + Math.random()*0.2,
+      dur: 700 + Math.random()*400
+    });
+  }
+  // sky underpaint — lower
+  for(let x=-30; x<W+30; x+=20){
+    const y = (gh*0.65 + Math.random()*20)|0;
+    const length = 30 + Math.random()*30 + 30;
+    const dir = Math.random()>.5 ? 1 : -1;
+    const endX = x + dir * length;
+    const endY = y + (Math.random()*6-3);
+    rebuilt.push({
+      pass:1, type:'skyU',
+      sx: x, sy: y,
+      tx: endX, ty: endY,
+      width: 25 + Math.random()*15,
+      color: s.skyLow,
+      alpha: 0.5 + Math.random()*0.2,
+      dur: 600 + Math.random()*400
+    });
+  }
+  // sky underpaint — upper
+  for(let x=-30; x<W+30; x+=20){
+    const y = (H * 0.15 + Math.random()*8)|0;
+    const length = 30 + Math.random()*30 + 30;
+    const dir = Math.random()>.5 ? 1 : -1;
+    const endX = x + dir * length;
+    const endY = y + (Math.random()*5-2);
+    rebuilt.push({
+      pass:1, type:'skyU',
+      sx: x, sy: y,
+      tx: endX, ty: endY,
+      width: 25 + Math.random()*15,
+      color: s.skyHigh,
+      alpha: 0.7 + Math.random()*0.2,
+      dur: 600 + Math.random()*400
+    });
+  }
+
+  // PASS 2 — refinement strokes
+  // sky refinement — horizontal strokes
+  for(let x=-30; x<W+30; x+=20){
+    const y = (Math.random() * (s.horizonY-5))|0;
+    const length = 30 + Math.random()*30 + 20;
+    const dir = Math.random()>.5 ? 1 : -1;
+    const endX = x + dir * length;
+    const endY = y + (Math.random()*5-2);
+    rebuilt.push({
+      pass:2, type:'skyR',
+      sx: x, sy: y,
+      tx: endX, ty: endY,
+      width: 25 + Math.random()*15,
+      color: lerpC(s.skyMid, s.skyHigh, Math.random()*0.6),
+      alpha: 0.55 + Math.random()*0.2,
+      dur: 600 + Math.random()*400
+    });
+  }
+  // sun rays — diagonal strokes radiating
+  for(let i=0; i<8; i++){
+    const a = i * Math.PI/4 + Math.random()*0.3;
+    const len = 30 + Math.random()*70;
+    const cx = s.sunPos.x;
+    const cy = s.sunPos.y;
+    const sx = cx + Math.cos(a) * 80;
+    const sy = cy + Math.sin(a) * 80;
+    const ex = cx + Math.cos(a) * (80 + len);
+    const ey = cy + Math.sin(a) * (80 + len);
+    rebuilt.push({
+      pass:2, type:'sun',
+      sx: sx, sy: sy,
+      tx: ex, ty: ey,
+      width: 5 + Math.random()*8,
+      color: {r: 255|0, g: 235|0, b: 130|0, a:1},
+      alpha: 0.5 + Math.random()*0.3,
+      dur: 800 + Math.random()*400
+    });
+  }
+  // sun body — short radial strokes
+  for(let r=0; r<8; r++){
+    const a = r * Math.PI/4 + Math.random()*0.5;
+    const rr = 20 + Math.random()*15;
+    rebuilt.push({
+      pass:2, type:'sunBody',
+      sx: s.sunPos.x + Math.cos(a) * rr,
+      sy: s.sunPos.y + Math.sin(a) * rr,
+      tx: s.sunPos.x + Math.cos(a) * (rr+5),
+      ty: s.sunPos.y + Math.sin(a) * (rr+5),
+      width: 10,
+      color: {r: 5|0,g:23|0,b:28|0, a:1},
+      alpha: 0.6,
+      dur: 800 + Math.random()*400
+    });
+  }
+
+  // PASS 2 — refinement: distant trees (dabs)
+  for(let i=0;i<s.distantTrees.length;i++){
+    const tr = s.distantTrees[i];
+    const cx = tr.x;
+    const cy = tr.y;
+    const len = tr.h * 0.5;
+    rebuilt.push({
+      pass:2, type:'ridgeTree',
+      sx: cx, sy: cy,
+      tx: cx + Math.random()*6 - 3,
+      ty: cy - len * 0.6 + Math.random()*5,
+      width: 2 + Math.random()*1,
+      color: s.skyLow,
+      alpha: 0.55 + Math.random()*0.2,
+      dur: 700 + Math.random()*400
+    });
+  }
+  // ridge — vertical strokes (subtle, sky-tinted)
+  for(let x=0; x<W; x += 15){
+    const h = 8 + Math.random()*20;
+    const cx = x + Math.random()*3;
+    const cy = s.ridge1Base - h*0.5;
+    rebuilt.push({
+      pass:2, type:'ridge1',
+      sx: cx, sy: cy,
+      tx: cx + (Math.random()*2-1),
+      ty: cy - h*0.8,
+      width: 2 + Math.random()*1,
+      color: s.skyLow,
+      alpha: 0.4 + Math.random()*0.2,
+      dur: 700 + Math.random()*400
+    });
+  }
+  // trees — vertical strokes (darker tint)
+  for(let i=0; i<s.trees.length; i++){
+    const tr = s.trees[i];
+    const cx = tr.x;
+    const cy = tr.y + 5;
+    const len = tr.h * 0.5;
+    for(let j=0; j<3; j++){
+      const dx = Math.random()*tr.h*0.6 - tr.h*0.4;
+      const dy = -len * (0.6 + Math.random()*0.4);
+      rebuilt.push({
+        pass:2, type:'tree',
+        sx: cx + dx, sy: cy,
+        tx: cx + dx + (Math.random()*4 - 2),
+        ty: cy + dy,
+        width: 2 + Math.random()*tr.r*0.6,
+        color: lerpC(s.skyLow, {r:30|0,g:40|0,b:45|0,a:1}, 0.4 + tr.tint*0.3),
+        alpha: 0.55 + Math.random()*0.2,
+        dur: 700 + Math.random()*400
+      });
+    }
+  }
+  // ground refinement — vertical strokes (darker in mid)
+  for(let y=s.horizonY+10; y<s.groundBottom; y+=20){
+    const f = (y - s.horizonY) / (s.groundBottom - s.horizonY);
+    const col = lerpC(s.groundHi, s.groundLo, f);
+    const x = Math.random() * W;
+    const len = 20 + Math.random()*30 + 20;
+    rebuilt.push({
+      pass:2, type:'grdR',
+      sx: x, sy: y,
+      tx: x + (Math.random()*8 - 4),
+      ty: y + len,
+      width: 4 + Math.random()*8,
+      color: col,
+      alpha: 0.55 + Math.random()*0.2,
+      dur: 700 + Math.random()*400
+    });
+  }
+  // ground warmer strokes — diagonal (sunset)
+  for(let y=s.horizonY+5; y<s.groundBottom; y+=20){
+    const f = (y - s.horizonY) / (s.groundBottom - s.horizonY);
+    const col = lerpC(s.skyLow, s.groundMid, 0.2);
+    const x = Math.random() * W;
+    const len = 30 + Math.random()*30;
+    const dir = Math.random()>.5 ? 1 : -1;
+    rebuilt.push({
+      pass:2, type:'grdWarm',
+      sx: x, sy: y,
+      tx: x + dir * len, ty: y + (Math.random()*5 - 2),
+      width: 25 + Math.random()*15,
+      color: col,
+      alpha: 0.4 + Math.random()*0.2,
+      dur: 700 + Math.random()*400
+    });
+  }
+  // cloud strokes — diagonal
+  for(let i=0; i<s.clouds.length; i++){
+    const cl = s.clouds[i];
+    const cx = cl.x;
+    const cy = cl.y;
+    const len = cl.r * 2;
+    const dir = Math.random()>.5 ? 1 : -1;
+    rebuilt.push({
+      pass:2, type:'cloud',
+      sx: cx, sy: cy,
+      tx: cx + dir * len, ty: cy + Math.random()*5 - 2,
+      width: 25 + Math.random()*15,
+      color: lerpC(s.skyHigh, s.skyMid, 0.6),
+      alpha: 0.55 + Math.random()*0.2,
+      dur: 800 + Math.random()*400
+    });
+  }
+  // bird strokes
+  for(let i=0; i<s.birds.length; i++){
+    const b = s.birds[i];
+    for(let j=0; j<2; j++){
+      const dir = j===0 ? 1 : -1;
+      rebuilt.push({
+        pass:2, type:'bird',
+        sx: b.x, sy: b.y,
+        tx: b.x + dir * 5, ty: b.y + Math.random()*2,
+        width: 2,
+        color: {r:30|0,g:40|0,b:45|0,a:1},
+        alpha: 0.6,
+        dur: 800 + Math.random()*400
+      });
+    }
+  }
+
+  // PASS 3 — highlight fecks
+  // sky fecks — diagonal (sunlight tints)
+  for(let i=0; i<8; i++){
+    const cx = s.sunPos.x + Math.random()*100 - 50;
+    const cy = Math.random() * s.horizonY * 0.5;
+    const dir = Math.random()>.5 ? 1 : -1;
+    const len = 8 + Math.random()*8;
+    rebuilt.push({
+      pass:3, type:'skyF',
+      sx: cx, sy: cy,
+      tx: cx + dir * len, ty: cy + Math.random()*2 - 1,
+      width: 2,
+      color: {r: 5|0,g:23|0,b:28|0,a:1},
+      alpha: 0.7,
+      dur: 800 + Math.random()*400
+    });
+  }
+  // tree fecks — small vertical highlights
+  for(let i=0; i<s.trees.length; i++){
+    const tr = s.trees[i];
+    for(let j=0; j<2; j++){
+      const cx = tr.x + Math.random()*tr.h*0.6 - tr.h*0.4;
+      const cy = tr.y - tr.h * 0.2;
+      rebuilt.push({
+        pass:3, type:'treeF',
+        sx: cx, sy: cy,
+        tx: cx, ty: cy - 5 - Math.random()*5,
+        width: 1,
+        color: {r: 5|0,g:23|0,b:28|0,a:1},
+        alpha: 0.7,
+        dur: 800 + Math.random()*400
+      });
+    }
+  }
+  // ground fecks — diagonal strokes
+  for(let y=s.horizonY+5; y<s.groundBottom; y+=20){
+    const f = (y - s.horizonY) / (s.groundBottom - s.horizonY);
+    const col = lerpC(s.skyWarm, s.groundHi, 0.6);
+    const x = Math.random() * W;
+    const dir = Math.random()>.5 ? 1 : -1;
+    const len = 5 + Math.random()*5;
+    rebuilt.push({
+      pass:3, type:'grdF',
+      sx: x, sy: y,
+      tx: x + dir * len, ty: y + (Math.random()*2 - 1),
+      width: 2,
+      color: col,
+      alpha: 0.7,
+      dur: 800 + Math.random()*400
+    });
+  }
+  // sun fecks — radiating short strokes
+  for(let i=0; i<6; i++){
+    const a = Math.random() * Math.PI * 2;
+    const r = 25 + Math.random()*5;
+    const cx = s.sunPos.x + Math.cos(a) * r;
+    const cy = s.sunPos.y + Math.sin(a) * r;
+    const ex = s.sunPos.x + Math.cos(a) * (r + 5);
+    const ey = s.sunPos.y + Math.sin(a) * (r + 5);
+    rebuilt.push({
+      pass:3, type:'sunF',
+      sx: cx, sy: cy,
+      tx: ex, ty: ey,
+      width: 1,
+      color: {r: 5|0,g:23|0,b:28|0,a:1},
+      alpha: 0.85,
+      dur: 800 + Math.random()*400
+    });
+  }
+  // snow fecks on ground — small white dabs
+  for(let i=0; i<s.snowFlecks.length; i++){
+    const f = s.snowFlecks[i];
+    rebuilt.push({
+      pass:3, type:'snow',
+      sx: f.x, sy: f.y,
+      tx: f.x + 1, ty: f.y + 1,
+      width: f.r,
+      color: {r:5|0,g:23|0,b:28|0,a:1},
+      alpha: 0.85,
+      dur: 800 + Math.random()*400
+    });
+  }
+  // cloud fecks — diagonal short strokes
+  for(let i=0; i<s.clouds.length; i++){
+    const cl = s.clouds[i];
+    for(let j=0; j<2; j++){
+      const cx = cl.x + Math.random()*cl.r*2 - cl.r;
+      const cy = cl.y + Math.random()*8 - 4;
+      const dir = Math.random()>.5 ? 1 : -1;
+      rebuilt.push({
+        pass:3, type:'cloudF',
+        sx: cx, sy: cy,
+        tx: cx + dir * 5, ty: cy + Math.random()*2 - 1,
+        width: 2,
+        color: {r:5|0,g:23|0,b:28|0,a:1},
+        alpha: 0.7,
+        dur: 800 + Math.random()*400
+      });
+    }
+  }
+  // bird fecks
+  for(let i=0; i<s.birds.length; i++){
+    const b = s.birds[i];
+    const cx = b.x;
+    const cy = b.y;
+    rebuilt.push({
+      pass:3, type:'birdF',
+      sx: cx, sy: cy,
+      tx: cx + 5, ty: cy + 1,
+      width: 1,
+      color: {r:5|0,g:23|0,b:28|0,a:1},
+      alpha: 0.85,
+      dur: 800 + Math.random()*400
+    });
+  }
+
+  return rebuilt;
+}
+
+function lerpC(a, b, t){
+  return {
+    r: (a.r + (b.r - a.r) *)|0,
+    g: (a.g + (b.g - a.g) *)|0,
+    b: (a.b + (b.b - a.b) *)|0,
+    a: 1
+  };
+}
+// fix: lerpC above is broken syntax; let me redo
+function lerpC(a, b, t){
+  const r = (a.r + (b.r - a.r) *)|0;
+  // (need to clamp t in 0..1)
+  return {
+    r: (a.r + (b.r - a.r) *)|0,
+    g: (a.g + (b.g - a.g) *)|0,
+    b: (a.b + (b.b - a.b) *)|0,
+    a: 1
+  };
+}
+// (above two defs are invalid; replace with correct)
+function lerpC(a, b, t){
+  const tt = Math.max(0, Math.min(1, t));
+  return {
+    r: (a.r + (b.r - a.r) *)|0,
+    g: (a.g + (b.g - a.g) *)|0,
+    b: (a.b + (b.b - a.b) *)|0,
+    a: 1
+  };
+}
+
+function drawStroke(st){
+  const dx = st.tx - st.sx;
+  const dy = st.ty - st.sy;
+  const len = Math.hypot(dx, dy);
+  if(len < 0.5) return;
+  const ang = Math.atan2(dy, dx);
+  const w = st.width;
+  // brush bristles — 5 streaks
+  const c = st.color;
+  const baseA = st.alpha;
+  ctx.save();
+  ctx.translate(st.sx, st.sy);
+  ctx.rotate(ang);
+  // soft understroke — base bristle wash
+  ctx.globalAlpha = baseA * 0.7;
+  ctx.fillStyle = 'rgb('+c.r+','+c.g+','+c.b+')';
+  // draw bristle path
+  // main bristle — long stroke path
+  for(let s=-2; s<=2; s++){
+    const offs = s * (w/3);
+    const ox = -offs * 0.3; // slight lateral offset along stroke path
+    ctx.globalAlpha = baseA * (0.6 + (1-M.abs(s)) * 0.2);
+    ctx.fillStyle = 'rgb('+Math.min(255,c.r)+','+Math.min(255,c.g)+','+Math.min(255,c.b)+')';
+    ctx.beginPath();
+    ctx.moveTo(0, offs - w/2);
+    ctx.lineTo(len, offs - w/2 + Math.sin(len*0.6) * 0.3);
+    ctx.lineTo(len, offs + w/2 + Math.sin(len*0.6) * 0.3);
+    ctx.lineTo(0, offs + w/2);
+    ctx.closePath();
+    ctx.fill();
+  }
+  // bristle streaks — thin strokes
+  const bristles = 5;
+  for(let b=0; b<bristles; b++){
+    const offs = (b/(bristles-1) - 0.5) * w;
+    ctx.globalAlpha = baseA * (0.3 + Math.random()*0.2);
+    ctx.fillStyle = 'rgb('+Math.min(255,c.r - 7|0)+','+Math.min(255,c.g - 7|0)+','+Math.min(255,c.b - 7|0)+')';
+    ctx.beginPath();
+    const sx = 0 + Math.random()*5;
+    const ex = len - Math.random()*5;
+    const segLen = (ex - sx)|0;
+    if(segLen <= 0) continue;
+    // streak path
+    ctx.moveTo(sx, offs - 0.5);
+    ctx.lineTo(sx + segLen * 0.5, offs - 0.5 + Math.sin(b)*0.3);
+    ctx.lineTo(ex, offs - 0.5);
+    ctx.moveTo(sx, offs + 0.5);
+    ctx.lineTo(sx + segLen * 0.5, offs + 0.5 + Math.sin(b)*0.3);
+    ctx.lineTo(ex, offs + 0.5);
+    ctx.closePath();
+    ctx.fill();
+  }
+  // impasto shading — light edge highlight & shadow edge
+  ctx.globalAlpha = baseA * 0.15;
+  ctx.fillStyle = 'rgb('+Math.min(255,c.r+10|0)+','+Math.min(255,c.g+10|0)+','+Math.min(255,c.b+10|0)+')';
+  ctx.beginPath();
+  ctx.moveTo(0, w/2);
+  ctx.lineTo(len, w/2);
+  ctx.lineTo(len, w/2 - 1);
+  ctx.lineTo(0, w/2 - 1);
+  ctx.closePath();
+  ctx.fill();
+  // shadow edge — darker
+  ctx.globalAlpha = baseA * 0.15;
+  ctx.fillStyle = 'rgb('+Math.min(255,c.r-15|0)+','+Math.min(255,c.g-15|0)+','+Math.min(255,c.b-15|0)+')';
+  ctx.beginPath();
+  ctx.moveTo(0, -w/2);
+  ctx.lineTo(len, -w/2);
+  ctx.lineTo(len, -w/2 + 1);
+  ctx.lineTo(0, -w/2 + 1);
+  ctx.closePath();
+  ctx.fill();
+  // bristle break — end taper
+  ctx.globalAlpha = baseA * 0.05;
+  ctx.fillStyle = 'rgb('+c.r+','+c.g+','+c.b+')';
+  // random feck at end
+  if(Math.random()<0.5){
+    const ex = (len * (0.7 + Math.random()*0.3)|0);
+    const oy = (Math.random()*w)|0;
+    const rr = 1 + Math.random()*2;
+    ctx.beginPath();
+    ctx.arc(ex, oy - w/2, rr, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+</script>
+</body>
+</html>

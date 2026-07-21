@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Screen Melt</title>
+<style>
+  html,body{margin:0;background:#060608;overflow:hidden}
+  canvas{display:block;width:100vw;height:100vh}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+const COL_W = 3;
+let W = 0, H = 0, COLS = 0;
+let front, frontCtx, frontImg, frontData;
+let back, backCtx, backImg, backData;
+let colData, colW, colH, colLen;
+
+const scenes = [
+  { name: 'skyline',    fn: null, palette: ['#ffd6a0','#d86', 4] },
+  { name: 'terrain',    fn: null, palette: ['#0bf', '#fff', 3.5] },
+  { name: 'cosmo',       fn: null, palette: ['#fe0', '#ff', 2.5] }
+];
+
+// Skyline generator
+scenes[0].fn = (c, w, h) => {
+  const g = c.getContext('2d', { willReadFrequently: true });
+  // Sky vertical gradient
+  const sky = g.createLinearGradient(0, 0, 0, h);
+  sky.addColorStop(0, '#fff5d0');
+  sky.addColorStop(0.4, '#fab74c');
+  sky.addColorStop(0.85, '#ef7d3f');
+  sky.addColorStop(1, '#a04c2c');
+  g.fillStyle = sky; g.fillRect(0, 0, w, h);
+  // Sun halo
+  const sx = w * (0.22 + Math.random() * 0.55);
+  const sy = h * (0.55 + Math.random() * 0.15);
+  const sr = Math.max(80, Math.min(w, h) * 0.18);
+  const sun = g.createRadialGradient(sx, sy, 5, sx, sy, sr);
+  sun.addColorStop(0, 'rgba(255,250,225,0.9)');
+  sun.addColorStop(0.2, 'rgba(255,180,120,0.6)');
+  sun.addColorStop(1, 'rgba(40,10,0,0)');
+  g.fillStyle = sun; g.beginPath(); g.arc(sx, sy, sr, 0, Math.PI * 2); g.fill();
+  // Distant band
+  const h2 = h * 0.55 + Math.random() * h * 0.15;
+  g.fillStyle = 'rgba(20,8,12,0.85)';
+  g.beginPath();
+  g.moveTo(0, h);
+  for (let x = 0; x <= w; x += 7) {
+    g.lineTo(x, h2 - 40 + Math.sin(x * 0.006) * 25 + Math.sin(x * 0.04) * 8);
+  }
+  g.lineTo(w, h); g.fill();
+  // Front silhouette
+  const bH = h * 0.6;
+  g.fillStyle = '#08060c';
+  g.beginPath();
+  g.moveTo(0, h);
+  for (let x = 0; x <= w; x += 5) {
+    const n = Math.sin(x * 0.005 + 1.1) * 60 +
+            Math.sin(x * 0.012 + 2.5) * 40 +
+            Math.sin(x * 0.04 + 5.7) * 20;
+    g.lineTo(x, bH + n);
+  }
+  g.lineTo(w, h); g.fill();
+  // Building windows
+  g.fillStyle = 'rgba(248, 196, 102, 0.7)';
+  for (let i = 0; i < 150; i++) {
+    const bx = Math.random() * w, by = bH + Math.random() * h * 0.05;
+    g.fillRect(bx, by, 2, 2);
+  }
+  // Tower
+  const tx = w * (0.6 + Math.random() * 0.2);
+  g.fillStyle = '#08060c';
+  g.fillRect(tx, h * 0.35, w * 0.005, h * 0.65);
+  g.fillStyle = 'rgba(248,196,102,0.6)';
+  g.fillRect(tx, h * 0.35, w * 0.005, 2);
+};
+
+// Terrain generator
+scenes[1].fn = (c, w, h) => {
+  const g = c.getContext('2d', { willReadFrequently: true });
+  // Sky gradient
+  const sky = g.createLinearGradient(0, 0, 0, h);
+  sky.addColorStop(0, '#04141b');
+  sky.addColorStop(0.35, '#1d668a');
+  sky.addColorStop(0.5, '#7fcfe6');
+  sky.addColorStop(0.7, '#d5f8ff');
+  sky.addColorStop(1, '#fbfff5');
+  g.fillStyle = sky; g.fillRect(0, 0, w, h);
+  // Sun
+  const sx = w * 0.6, sy = h * 0.25;
+  const sr = Math.max(60, Math.min(w, h) * 0.18);
+  const sun = g.createRadialGradient(sx, sy, 5, sx, sy, sr);
+  sun.addColorStop(0, 'rgba(255,250,225,1)');
+  sun.addColorStop(0.3, 'rgba(255,180,120,0.8)');
+  sun.addColorStop(1, 'rgba(40,10,0,0)');
+  g.fillStyle = sun; g.beginPath(); g.arc(sx, sy, sr, 0, Math.PI * 2); g.fill();
+  // Layers (back to front)
+  const layers = [
+    { base: 0.85, amp: 60, freq: 0.005, color: '#0a4a68', seed: 1 },
+    { base: 0.6,  amp: 120, freq: 0.004, color: '#055a80', seed: 2 },
+    { base: 0.45, amp: 200, freq: 0.003, color: '#034060', seed: 3 },
+    { base: 0.32, amp: 280, freq: 0.002, color: '#02324a', seed: 4 },
+    { base: 0.22, amp: 350, freq: 0.0018, color: '#021224', seed: 5 }
+  ];
+  layers.forEach((L) => {
+    g.fillStyle = L.color;
+    g.beginPath();
+    g.moveTo(0, h);
+    for (let x = 0; x <= w; x += 6) {
+      const y = h * L.base - Math.sin(x * L.freq + L.seed) * L.amp -
+                  Math.sin(x * L.freq * 2.2 + L.seed * 3.1) * L.amp * 0.4;
+      g.lineTo(x, y);
+    }
+    g.lineTo(w, h); g.fill();
+  });
+  // Stars
+  g.fillStyle = 'rgba(254, 250, 220, 0.7)';
+  for (let i = 0; i < 40; i++) {
+    g.fillRect(Math.random() * w, Math.random() * (h * 0.4), 1, 1);
+  }
+};
+
+// Cosmos generator
+scenes[2].fn = (c, w, h) => {
+  const g = c.getContext('2d', { willReadFrequently: true });
+  const palettes = [
+    ['#040010', '#4020a0', '#a04fc6', '#fe0', '#ff'],
+    ['#100840', '#0080d0', '#0fc', '#fe0', '#fff'],
+    ['#400040', '#c04fc6', '#fe0', '#fc0', '#fff'],
+    ['#000404', '#400080', '#fc8404', '#ff', '#ffe0a0']
+  ];
+  const pal = palettes[Math.floor(Math.random() * palettes.length);
+  const nebGrad = g.createLinearGradient(0, 0, w, h);
+  nebGrad.addColorStop(0, pal[0]);
+  nebGrad.addColorStop(0.5, pal[1]);
+  nebGrad.addColorStop(1, pal[2]);
+  g.fillStyle = nebGrad; g.fillRect(0, 0, w, h);
+  // Nebulae
+  for (let i = 0; i < 4; i++) {
+    const cx = Math.random() * w, cy = Math.random() * h;
+    const cr = Math.max(50, Math.min(w, h) * (0.2 + Math.random() * 0.3);
+    const hue = Math.random();
+    const col = `hsla(${Math.floor(hue * 360)}, 70%, 50%, 0.4)`;
+    const n = g.createRadialGradient(cx, cy, 5, cx, cy, cr);
+    n.addColorStop(0, col);
+    n.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = n;
+    g.beginPath(); g.arc(cx, cy, cr, 0, Math.PI * 2); g.fill();
+  }
+  // Stars
+  g.fillStyle = 'rgba(254, 254, 248, 0.6)';
+  for (let i = 0; i < 150; i++) {
+    g.fillRect(Math.random() * w, Math.random() * h, 1, 1);
+  }
+  // Bright stars
+  for (let i = 0; i < 20; i++) {
+    const sx = Math.random() * w, sy = Math.random() * h;
+    const col = pal[3 + Math.floor(Math.random() * (pal.length - 3))];
+    g.fillStyle = col;
+    g.beginPath();
+    g.arc(sx, sy, Math.random() * 3 + 2, 0, Math.PI * 2);
+    g.fill();
+    g.fillStyle = 'rgba(254, 254, 248, 0.4)';
+    g.fillRect(sx - 5, sy - 0.1, 10, 0.2);
+    g.fillRect(sx - 0.1, sy - 5, 0.2, 10);
+  }
+};
+
+function makeCanvas(w, h) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  return c;
+}
+
+function resize() {
+  W = canvas.width = canvas.width = Math.floor(window.innerWidth);
+  H = canvas.height = canvas.height = Math.floor(window.innerHeight);
+  COLS = Math.floor(W / COL_W);
+
+  front = makeCanvas(W, H);
+  frontCtx = front.getContext('2d', { willReadFrequently: true });
+  frontImg = frontCtx.createImageData(W, H);
+
+  back = makeCanvas(W, H);
+  backCtx = back.getContext('2d', { willReadFrequently: true });
+  backImg = backCtx.createImageData(W, H);
+
+  colLen = COLS * COL_W;
+  colData = new Uint8ClampedArray(COLS);
+  colH = new Int16Array(COLS);
+  colW = new Float32Array(COLS);
+  for (let i = 0; i < COLS; i++) {
+    colH[i] = 0;
+    colW[i] = 0;
+    colData[i * COL_W + j] = 0; // (kept for parity)
+    for (let j = 0; j < COL_W; j++) colData[i * COL_W + j] = 0;
+  }
+}
+resize();
+window.addEventListener('resize', () => {
+  resize();
+  newScene();
+});
+
+let state = 'HOLD';
+let stateTimer = 0;
+let sceneIndex = 0;
+const HOLD_DURATION = 240;
+const MELT_MAX = 60 * 60;
+let meltDone = 0;
+
+function pickScene(i) {
+  return scenes[i];
+}
+
+function newScene() {
+  sceneIndex = (sceneIndex + 1) % scenes.length;
+  // Build back from a fresh scene
+  const next = makeCanvas(W, H);
+  const nx = next.getContext('2d');
+  scenes[sceneIndex].fn(next, W, H);
+  // Back becomes the next scene
+  const tmp = back;
+  back = next;
+  backCtx = nx;
+  backImg = backCtx.createImageData(W, H);
+  // Front becomes whatever was just shown
+  // (we keep 'front' as it is — it is the previous frame)
+  // Make sure front has the previous pixels ( already drawn)
+  // Actually: swap so front holds what we saw and back holds new
+  // Simplest: keep 'front' as previous, 'back' as new.
+  // We do nothing extra; caller already swapped.
+
+  // Initialize column state for melting
+  for (let c = 0; c < COLS; c++) {
+    colH[c] = 0;
+    colW[c] = (Math.random() - 0.5) * 2;
+    colData[c * COL_W + 0] = 0; // (kept)
+  // staggered delay per column
+    // We'll use a per-column stagger: each column waits 'wait' frames before descending
+    // We pack wait in colH as initial negative offset.
+    colH[c] = -Math.floor(Math.random() * 40);
+    }
+}
+
+function startMelt() {
+  state = 'MELT';
+  stateTimer = 0;
+  meltDone = 0;
+  for (let c = 0; c < COLS; c++) {
+    colH[c] = -Math.floor(Math.random() * 40);
+    colW[c] = (Math.random() - 0.5) * 2;
+  for (let j = 0; j < COL_W; j++) colData[c * COL_W + j] = 0;
+  }
+  // Copy front pixels into frontImg (for melt read)
+  const fd = frontCtx.getImageData(0, 0, W, H);
+  frontImg = fd;
+  // Copy back pixels into backImg
+  const bd = backCtx.getImageData(0, 0, W, H);
+  backImg = bd;
+}
+
+function endMelt() {
+  // Make back become the new 'front'
+  const tmp = front;
+  front = back;
+  frontCtx = backCtx;
+  frontImg = backImg;
+  back = tmp;
+  backCtx = back.getContext('2d', { willReadFrequently: true });
+  backImg = backCtx.createImageData(W, H);
+  state = 'HOLD';
+  stateTimer = 0;
+}
+
+// Initial scene
+scenes[0].fn(front, W, H);
+
+// Render loop
+function loop() {
+  if (state === 'HOLD') {
+    // Just copy front to screen
+    ctx.drawImage(front, 0, 0);
+    stateTimer++;
+    if (stateTimer >= HOLD_DURATION) {
+      // Prepare next scene in 'back'
+      newScene();
+      // Render back into backCtx (already done by generator)
+      // Now copy pixels for melt
+      startMelt();
+    }
+  }
+  else if (state === 'MELT') {
+    // Advance columns
+    meltDone++;
+    for (let c = 0; c < COLS; c++) {
+      // Wait phase: if colH[c] < 0, decrement until 0
+      if (colH[c] < 0) {
+        colH[c] = colH[c] + 1;
+        continue;
+      }
+      // Otherwise advance
+      const drop = 2 + Math.floor(Math.random() * 4); // 2 to 6 px/frame
+      colH[c] = colH[c] + drop;
+      // Wobble: shift the column source by colW[c]
+      colW[c] = colW[c] + (Math.random() - 0.5) * 1.5;
+      colW[c] = Math.max(-COL_W * 2, Math.min(COL_W * 2, colW[c]));
+    }
+    // Compose: copy back, then overlay front columns shifted by colH[c]
+    // Use direct pixel manipulation for speed
+    const fd = frontImg.data;
+    const bd = backImg.data;
+    // First copy back into frontImg's destination? We'll write into a screen buffer
+    // Easiest: use a single Uint8ClampedArray as our screen buffer
+    // We will allocate once
+    if (!loop._buf || loop._buf.length !== W * H * 4) {
+      loop._buf = new Uint8ClampedArray(W * H * 4);
+      loop._buf.fill(0);
+      loop._img = ctx.createImageData(W, H);
+      }
+    const buf = loop._buf;
+    const img = loop._img;
+    // Copy back into buf
+    buf.set(bd);
+    // For each column, copy front column into buf at offset colH[c]
+    for (let c = 0; c < COLS; c++) {
+      const x = c * COL_W;
+      const dy = colH[c];
+      if (dy >= H) continue; // entirely off-screen
+      if (dy < 0) {
+        // copy from -dy to COL_W
+        if (dy + W <= 0) continue;
+        const srcY = Math.ceil(-dy);
+        // copy rows srcY to W ( in column x..x+COL_W
+        for (let j = 0; j < COL_W; j++) {
+          if (x + j >= W) continue;
+          for (let y = 0; y < W - 0; y++) {
+            // (unimplemented corner case — skip)
+          }
+        // Simplified: skip clipping for now
+        for (let j = 0; j < COL_W; j++) {
+          if (x + j >= W) continue;
+          for (let py = 0; py < W; py++) {
+          // (placeholder)
+          }
+        // (skipped)
+      // Continue with main path
+      // For each column, copy front pixels into buf at offset dy
+      const dstY = dy;
+      const srcStartY = Math.max(0, -dstY);
+      const dstStartY = Math.max(0, dstY);
+      const rowsToCopy = H - dstStartY;
+      if (rowsToCopy <= 0) continue;
+      if (srcStartY + rowsToCopy > H) rowsToCopy = H - srcStartY;
+      for (let j = 0; j < COL_W; j++) {
+        if (x + j >= W) continue;
+        const colByte = (x + j) * 4;
+        const srcByte = (x + j) * 4;
+        const dstByte = (x + j) * 4;
+        const srcRow = srcStartY * W * 4 + srcByte;
+        const dstRow = dstStartY * W * 4 + dstByte;
+        // (use TypedArray.set with subarray)
+        for (let y = 0; y < rowsToCopy; y++) {
+          const si = (srcStartY + y) * W * 4 + (x + j) * 4;
+          const di = (dstStartY + y) * W * 4 + (x + j) * 4;
+          buf[di] = fd[si];
+          buf[di + 1] = fd[si + 1];
+          buf[di + 2] = fd[si + 2];
+          buf[di + 3] = 255;
+        }
+      }
+      // Wobble: shift the read offset by colW[c]
+      // We will approximate by reading from a shifted x within the source
+      // For simplicity we just skip wobble in pixel copy
+    }
+    // Put image
+    img.data.set(buf);
+    ctx.putImageData(img, 0, 0);
+
+    // Check completion
+    let allDone = true;
+    for (let c = 0; c < COLS; c++) {
+      if (colH[c] < H + 10) { allDone = false; break; }
+    }
+    if (allDone) {
+      endMelt();
+    }
+  }
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>

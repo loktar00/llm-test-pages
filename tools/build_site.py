@@ -29,6 +29,7 @@ CSS = """
   .b.complete { background: rgba(63,185,80,.12); color: #3fb950; border: 1px solid rgba(63,185,80,.35); }
   .b.truncated { background: rgba(210,153,34,.12); color: #d29922; border: 1px solid rgba(210,153,34,.35); }
   .b.degenerated { background: rgba(248,81,73,.12); color: #f85149; border: 1px solid rgba(248,81,73,.35); }
+  .b.repaired { background: rgba(210,153,34,.12); color: #d29922; border: 1px solid rgba(210,153,34,.35); }
   footer { color: #6e7681; font-size: .8rem; margin-top: 3rem; }
   /* live-thumbnail grid (section pages) */
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1rem; margin-top: 2rem; }

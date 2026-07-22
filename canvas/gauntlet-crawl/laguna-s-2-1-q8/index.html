@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Gauntlet Crawl</title>
+  <style>
+    html,body{margin:0;padding:0;background:#000;overflow:hidden;}
+    canvas{display:block;width:100vw;height:100vh;}
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+// ==Asset Manifest==
+window.ASSET_MANIFEST = {
+  floor:     { file: "assets/floor.png",     prompt: "A seamless 512x512 dungeon floor tile, stone bricks, dark gray mottled texture, top-down, game asset, fantasy RPG, neutral lighting, no borders" },
+  wall:      { file: "assets/wall.png",      prompt: "A seamless 512x512 dungeon wall tile, rough grey stone blocks, top-down view, game asset, fantasy RPG, cracked surface, dimly lit, no borders" },
+  hero:      { file: "assets/hero.png",      prompt: "Top-down hero character sprite, armored warrior holding a sword, centered, facing up, plain dark background, game asset, pixel art style, fantasy RPG" },
+  ghost:     { file: "assets/ghost.png",     prompt: "Top-down enemy ghost sprite, translucent floating wraith, plain dark background, game asset, fantasy RPG, glowing eyes, ethereal" },
+  grunt:     { file: "assets/grunt.png",     prompt: "Top-down enemy grunt sprite, armored zombie-like creature, plain dark background, game asset, fantasy RPG, menacing" },
+  generator: { file: "assets/generator.png", prompt: "Top-down monster generator object, stone altar with swirling energy, plain dark background, game asset, fantasy RPG, glowing runes" },
+  key:       { file: "assets/key.png",       prompt: "Top-down golden key item, ornate medieval style, plain dark background, game asset, fantasy RPG, bright gold" },
+  food:      { file: "assets/food.png",      prompt: "Top-down food item, roasted turkey drumstick, plain dark background, game asset, fantasy RPG, brownish" },
+  treasure:  { file: "assets/treasure.png",  prompt: "Top-down treasure chest, ornate wooden chest with metal trim, plain dark background, game asset, fantasy RPG, golden highlights" },
+  exit:      { file: "assets/exit.png",      prompt: "Top-down glowing exit portal, swirling blue energy, plain dark background, game asset, fantasy RPG, magical" }
+};
+
+(function(){
+const canvas=document.getElementById('c');
+const ctx=canvas.getContext('2d');
+
+// --- Resize ---
+function resize(){
+  canvas.width=window.innerWidth;
+  canvas.height=window.innerHeight;
+}
+window.addEventListener('resize',resize);
+resize();
+
+const TILE=64;
+const COLS=Math.ceil(canvas.width/TILE);
+const ROWS=Math.ceil(canvas.height/TILE);
+
+// --- Images ---
+const images={};
+let imagesLoaded=0;
+
+function loadImages(){
+  for(const key in window.ASSET_MANIFEST){
+    const img=new Image();
+    img.onload=()=>{images[key]=img;imagesLoaded++;};
+    img.onerror=()=>{/* fallback to procedural */imagesLoaded++;};
+    img.src=window.ASSET_MANIFEST[key].file;
+  }
+}
+loadImages();
+
+// --- Procedural Art Fallback ---
+function procFloor(s){
+  s.fillStyle='#444';
+  s.fillRect(0,0,TILE,TILE);
+  s.strokeStyle='#333';
+  s.lineWidth=2;
+  s.beginPath();
+  s.moveTo(0,0);s.lineTo(TILE,TILE);
+  s.moveTo(TILE,0);s.lineTo(0,TILE);
+  s.stroke();
+}
+function procWall(s){
+  s.fillStyle='#888';
+  s.fillRect(0,0,TILE,TILE);
+  s.strokeStyle='#aaa';
+  s.lineWidth=4;
+  s.strokeRect(0,0,TILE,TILE);
+  s.fillStyle='#aaa';
+  s.fillRect(8,8,TILE-16,16);
+}
+function procHero(s){
+  s.fillStyle='#4af';
+  s.beginPath();
+  s.arc(TILE/2,TILE/2,TILE/4,0,Math.PI*2);
+  s.fill();
+}
+function procEnemy(s,color){
+  s.fillStyle=color;
+  s.beginPath();
+  s.arc(TILE/2,TILE/2,TILE/4,0,Math.PI*2);
+  s.fill();
+}
+function procGenerator(s){
+  s.fillStyle='#f80';
+  s.fillRect(TILE/2-TILE/5,TILE/2-TILE/5,TILE*2/5,TILE*2/5);
+}
+function procKey(s){
+  s.fillStyle='#fc0';
+  s.fillRect(TILE/2-TILE/8,TILE/4,TILE/4,TILE/3);
+  s.fillRect(TILE/2-TILE/16,TILE/4+2,TILE/6,TILE/10);
+}
+function procFood(s){
+  s.fillStyle='#c63';
+  s.fillRect(TILE/3,TILE/3,TILE/3,TILE*0.4);
+}
+function procTreasure(s){
+  s.fillStyle='#ca6';
+  s.fillRect(TILE/3,TILE/3,TILE/3,TILE*0.5);
+  s.fillRect(TILE/2-TILE/12,TILE/3-8,TILE/6,8);
+}
+function procExit(s){
+  s.fillStyle='#0af';
+  s.globalAlpha=0.8;
+  s.beginPath();
+  s.arc(TILE/2,TILE/2,TILE/4,0,Math.PI*2);
+  s.fill();
+  s.globalAlpha=1;
+}
+
+function drawSprite(name,x,y){
+  const img=images[name];
+  if(img && img.complete){
+    ctx.drawImage(img,x*TILE,y*TILE,TILE,TILE);
+  } else {
+    const s=ctx;
+    s.save();
+    s.translate(x*TILE+TILE/2,y*TILE+TILE/2);
+    switch(name){
+      case 'floor': procFloor(s); break;
+      case 'wall': procWall(s); break;
+      case 'hero': procHero(s); break;
+      case 'ghost': procEnemy(s,'#aaf'); break;
+      case 'grunt': procEnemy(s,'#a55'); break;
+      case 'generator': procGenerator(s); break;
+      case 'key': procKey(s); break;
+      case 'food': procFood(s); break;
+      case 'treasure': procTreasure(s); break;
+      case 'exit': procExit(s); break;
+    }
+    s.restore();
+  }
+}
+
+// --- Game State ---
+const TILE_MAP={EMPTY:0,FLOOR:1,WALL:2,DOOR:3,LOCKED:4,EXIT:5};
+let gameState=null;
+
+const DIRECTIONS=[[0,-1],[1,0],[0,1],[-1,0]];
+
+function createLevel(){
+  const map=[];
+  for(let y=0;y<ROWS;y++){
+    const row=[];
+    for(let x=0;x<COLS;x++){
+      row.push(TILE_MAP.WALL);
+    }
+    map.push(row);
+  }
+  // Carve rooms and corridors
+  const rooms=[];
+  const roomCount=8;
+  for(let i=0;i<roomCount;i++){
+    const w=Math.floor(Math.random()*5)+4;
+    const h=Math.floor(Math.random()*5)+4;
+    const x=Math.floor(Math.random()*(COLS-w-2))+1;
+    const y=Math.floor(Math.random()*(ROWS-h-2))+1;
+    const room={x,y,w,h};
+    rooms.push(room);
+    for(let dy=0;dy<h;dy++){
+      for(let dx=0;dx<w;dx++){
+        map[y+dy][x+dx]=TILE_MAP.FLOOR;
+      }
+    }
+    // Connect to previous room
+    if(i>0){
+      const prev=rooms[i-1];
+      const px=prev.x+Math.floor(prev.w/2);
+      const py=prev.y+Math.floor(prev.h/2);
+      const cx=room.x+Math.floor(room.w/2);
+      const cy=room.y+Math.floor(room.h/2);
+      let cx1=px,cy1=py;
+      while(cx1<cx){cx1++;map[cy1][cx1]=TILE_MAP.FLOOR;}
+      while(cx1>cx){cx1--;map[cy1][cx1]=TILE_MAP.FLOOR;}
+      while(cy1<cy){cy1++;map[cy1][cx1]=TILE_MAP.FLOOR;}
+      while(cy1>cy){cy1--;map[cy1][cx1]=TILE_MAP.FLOOR;}
+    }
+  }
+  // Randomly place locked doors on some floor tiles adjacent to walls
+  for(let y=1;y<ROWS-1;y++){
+    for(let x=1;x<COLS-1;x++){
+      if(map[y][x]===TILE_MAP.FLOOR){
+        for(const [dx,dy] of DIRECTIONS){
+          const nx=x+dx,ny=y+dy;
+          if(map[ny]&&map[ny][nx]===TILE_MAP.WALL && Math.random()<0.02){
+            map[ny][nx]=TILE_MAP.LOCKED;
+          }
+        }
+      }
+    }
+  }
+  const startRoom=rooms[0];
+  const exitRoom=rooms[rooms.length-1];
+  // Exit
+  let ex=exitRoom.x+Math.floor(exitRoom.w/2);
+  let ey=exitRoom.y+Math.floor(exitRoom.h/2);
+  map[ey][ex]=TILE_MAP.EXIT;
+  const items=[];
+  const enemies=[];
+  const generators=[];
+  // Hero start center
+  let hx=startRoom.x+Math.floor(startRoom.w/2);
+  let hy=startRoom.y+Math.floor(startRoom.h/2);
+  // Place items
+  for(let i=0;i<10;i++){
+    const t=Math.random()<0.5?'treasure':'food';
+    const r=rooms[Math.floor(Math.random()*rooms.length)];
+    const ix=r.x+Math.floor(Math.random()*(r.w-2))+1;
+    const iy=r.y+Math.floor(Math.random()*(r.h-2))+1;
+    if(map[iy][ix]===TILE_MAP.FLOOR && !(ix===hx&&iy===hy) && !(ix===ex&&iy===ey)){
+      items.push({x:ix,y:iy,type:t,collected:false});
+    }
+  }
+  // keys
+  for(let i=0;i<5;i++){
+    const r=rooms[Math.floor(Math.random()*rooms.length)];
+    const kx=r.x+Math.floor(Math.random()*(r.w-2))+1;
+    const ky=r.y+Math.floor(Math.random()*(r.h-2))+1;
+    if(map[ky][kx]===TILE_MAP.FLOOR && !(kx===hx&&ky===hy)){
+      items.push({x:kx,y:ky,type:'key',collected:false});
+    }
+  }
+  // generators
+  for(let i=0;i<4;i++){
+    const r=rooms[Math.floor(Math.random()*(rooms.length-1))+1];
+    const gx=r.x+Math.floor(Math.random()*(r.w-2))+1;
+    const gy=r.y+Math.floor(Math.random()*(r.h-2))+1;
+    if(map[gy][gx]===TILE_MAP.FLOOR && Math.random()<0.7){
+      generators.push({x:gx,y:gy,health:3,lastSpawn:0});
+    }
+  }
+  return {map,items,enemies,generators,hero:{x:hx,y:hy,health:100,maxHealth:100,keys:0},start:{x:hx,y:hy},exit:{x:ex,y:ey},score:0,level:1,projectiles:[],lastDir:1,spawnTimer:0};
+}
+
+gameState=createLevel();
+
+// --- Input ---
+let keysDown={};
+let playerControl=false;
+let lastInputTime=0;
+const INPUT_TIMEOUT=10000;
+
+window.addEventListener('keydown',e=>{
+  keysDown[e.code]=true;
+  if(!playerControl){
+    playerControl=true;
+  }
+  lastInputTime=Date.now();
+  if(e.code==='Space'&&gameState.hero){
+    fireProjectile();
+    e.preventDefault();
+  }
+});
+window.addEventListener('keyup',e=>{
+  delete keysDown[e.code];
+});
+
+function fireProjectile(){
+  const h=gameState.hero;
+  const d=gameState.lastDir||1;
+  const dx=[0,-1,0,1][d],dy=[-1,0,1,0][d];
+  gameState.projectiles.push({x:h.x,y:h.y,dx:dx,dy:dy,life:10,owner:'hero'});
+}
+
+// --- Attract Mode AI ---
+function aiStep(){
+  const g=gameState;
+  if(!g.hero) return;
+  const target=g.exit;
+  let tx=target.x,ty=target.y;
+  let bestDist=9999,bestItem=null;
+  for(const item of g.items){
+    if(item.collected) continue;
+    const dist=Math.abs(item.x-g.hero.x)+Math.abs(item.y-g.hero.y);
+    if(dist<bestDist){bestDist=dist;bestItem=item;}
+  }
+  if(bestItem){
+    tx=bestItem.x;ty=bestItem.y;
+  }
+  const dirX=tx>g.hero.x?1:tx<g.hero.x?-1:0;
+  const dirY=ty>g.hero.y?1:ty<g.hero.y?-1:0;
+  let moved=false;
+  if(Math.random()<0.7){
+    if(dirX!==0){
+      const nx=g.hero.x+dirX,ny=g.hero.y;
+      if(canMove(nx,ny)){
+        g.hero.x=nx;
+        g.hero.y=ny;
+        g.lastDir=dirX>0?1:3;
+        moved=true;
+      }
+    }
+    if(!moved&&dirY!==0){
+      const nx=g.hero.x,ny=g.hero.y+dirY;
+      if(canMove(nx,ny)){
+        g.hero.x=nx;
+        g.hero.y=ny;
+        g.lastDir=dirY>0?2:0;
+        moved=true;
+      }
+    }
+  }
+  if(Math.random()<0.15){
+    fireProjectile();
+  }
+  if(!moved && Math.random()<0.3){
+    const dirs=[[0,-1],[1,0],[0,1],[-1,0]];
+    const rd=dirs[Math.floor(Math.random()*4)];
+    const nx=g.hero.x+rd[0],ny=g.hero.y+rd[1];
+    if(canMove(nx,ny)){
+      g.hero.x=nx;
+      g.hero.y=ny;
+      g.lastDir=dirs.indexOf(rd);
+    }
+  }
+}
+
+function canMove(x,y){
+  const g=gameState;
+  if(!g.map[y]||!g.map[y][x]) return false;
+  const t=g.map[y][x];
+  if(t===TILE_MAP.FLOOR||t===TILE_MAP.EXIT) return true;
+  if(t===TILE_MAP.LOCKED){
+    if(g.hero.keys>0){
+      g.map[y][x]=TILE_MAP.FLOOR;
+      g.hero.keys--;
+      return true;
+    }
+    return false;
+  }
+  if(t===TILE_MAP.DOOR){
+    if(g.hero.keys>0){
+      g.hero.keys--;
+      g.map[y][x]=TILE_MAP.FLOOR;
+    }
+    return true;
+  }
+  return false;
+}
+
+// --- Game Logic ---
+let lastTime=0;
+
+function update(delta){
+  if(!gameState.hero) return;
+  const g=gameState;
+  // Health drain
+  g.hero.health-=delta*0.3;
+  // Input handling
+  if(playerControl){
+    if(Date.now()-lastInputTime>INPUT_TIMEOUT){
+      playerControl=false;
+    }
+    if(keysDown['ArrowUp']||keysDown['w']){moveHero(0,-1);g.lastDir=0;}
+    if(keysDown['ArrowRight']||keysDown['d']){moveHero(1,0);g.lastDir=1;}
+    if(keysDown['ArrowDown']||keysDown['s']){moveHero(0,1);g.lastDir=2;}
+    if(keysDown['ArrowLeft']||keysDown['a']){moveHero(-1,0);g.lastDir=3;}
+  } else {
+    aiStep();
+  }
+  // Projectiles
+  for(const p of g.projectiles){
+    p.x+=p.dx*0.5;
+    p.y+=p.dy*0.5;
+    const tx=Math.floor(p.x),ty=Math.floor(p.y);
+    if(g.map[ty]&&g.map[ty][tx]&&g.map[ty][tx]===TILE_MAP.WALL){
+      p.life=0;
+    }
+  }
+  g.projectiles=g.projectiles.filter(p=>p.life>0 && p.x>-1 && p.x<COLS && p.y>-1 && p.y<ROWS);
+  // Generator spawning
+  g.spawnTimer+=delta;
+  if(g.spawnTimer>2000){
+    for(const gen of g.generators){
+      if(Math.random()<0.3){
+        for(let i=0;i<DIRECTIONS.length;i++){
+          const nx=gen.x+DIRECTIONS[i][0],ny=gen.y+DIRECTIONS[i][1];
+          if(g.map[ny]&&g.map[ny][nx]&&g.map[ny][nx]===TILE_MAP.FLOOR){
+            g.enemies.push({x:nx,y:ny,type:Math.random()<0.5?'ghost':'grunt',health:20});
+            break;
+          }
+        }
+      }
+    }
+    g.spawnTimer=0;
+  }
+  // Enemies chase hero
+  for(const e of g.enemies){
+    const dx=g.hero.x-e.x,dy=g.hero.y-e.y;
+    let nx=e.x,ny=e.y;
+    if(Math.abs(dx)>Math.abs(dy)){
+      nx=e.x+(dx>0?1:-1);
+    } else {
+      ny=e.y+(dy>0?1:-1);
+    }
+    if(canEnemyMove(nx,ny,e)){
+      e.x=nx;e.y=ny;
+    }
+    if(Math.abs(e.x-g.hero.x)<1&&Math.abs(e.y-g.hero.y)<1){
+      g.hero.health-=delta*0.05;
+    }
+  }
+  // Hero attacks enemies via projectiles
+  for(const p of g.projectiles){
+    for(const e of g.enemies){
+      if(Math.abs(p.x-e.x)<0.5&&Math.abs(p.y-e.y)<0.5){
+        e.health-=20;
+        p.life=0;
+      }
+    }
+  }
+  g.enemies=g.enemies.filter(e=>e.health>0);
+  // Collect items
+  for(const item of g.items){
+    if(!item.collected && Math.abs(item.x-g.hero.x)<1 && Math.abs(item.y-g.hero.y)<1){
+      if(item.type==='food'){
+        g.hero.health=Math.min(g.hero.maxHealth,g.hero.health+30);
+      } else if(item.type==='key'){
+        g.hero.keys++;
+      } else if(item.type==='treasure'){
+        g.score+=100;
+      }
+      item.collected=true;
+    }
+  }
+  // Exit
+  if(Math.abs(g.exit.x-g.hero.x)<1 && Math.abs(g.exit.y-g.hero.y)<1){
+    g.level++;
+    g.score+=g.level*1000;
+    const savedScore=g.score;
+    const savedLevel=g.level;
+    gameState=createLevel();
+    gameState.score=savedScore;
+    gameState.level=savedLevel;
+  }
+}
+
+function moveHero(dx,dy){
+  const h=gameState.hero;
+  const nx=h.x+dx,ny=h.y+dy;
+  if(canMove(nx,ny)){
+    h.x=nx;h.y=ny;
+  }
+}
+
+function canEnemyMove(x,y,enemy){
+  const g=gameState;
+  if(!g.map[y]||!g.map[y][x]) return false;
+  const t=g.map[y][x];
+  return t===TILE_MAP.FLOOR||t==TILE_MAP.EXIT;
+}
+
+// --- Render ---
+function render(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  const g=gameState;
+  if(!g) return;
+  // Draw map
+  for(let y=0;y<ROWS;y++){
+    for(let x=0;x<COLS;x++){
+      const t=g.map[y][x];
+      if(t===TILE_MAP.FLOOR||t===TILE_MAP.EXIT){
+        drawSprite('floor',x,y);
+      }
+      if(t===TILE_MAP.WALL||t===TILE_MAP.LOCKED||t===TILE_MAP.DOOR){
+        drawSprite('wall',x,y);
+      }
+    }
+  }
+  // Draw features
+  drawSprite('exit',g.exit.x,g.exit.y);
+  // Items
+  for(const item of g.items){
+    if(!item.collected){
+      drawSprite(item.type,item.x,item.y);
+    }
+  }
+  // Generators
+  for(const gen of g.generators){
+    drawSprite('generator',gen.x,gen.y);
+  }
+  // Enemies
+  for(const e of g.enemies){
+    drawSprite(e.type,e.x,e.y);
+  }
+  // Projectiles
+  for(const p of g.projectiles){
+    ctx.fillStyle='#ff0';
+    ctx.beginPath();
+    ctx.arc(p.x*TILE+TILE/2,p.y*TILE+TILE/2,TILE/8,0,Math.PI*2);
+    ctx.fill();
+  }
+  // Hero
+  drawSprite('hero',g.hero.x,g.hero.y);
+  // HUD
+  ctx.fillStyle='#fff';
+  ctx.font='16px monospace';
+  ctx.fillText('HP: '+Math.floor(g.hero.health),10,20);
+  ctx.fillText('Score: '+g.score,10,40);
+  ctx.fillText('Keys: '+g.hero.keys,10,60);
+  ctx.fillText('Level: '+g.level,10,80);
+  if(!playerControl){
+    ctx.fillText('Attract Mode - Press any key',10,100);
+  } else {
+    ctx.fillText('Player Control',10,100);
+  }
+  if(g.hero.health<=0){
+    ctx.fillStyle='#f00';
+    ctx.font='48px monospace';
+    ctx.textAlign='center';
+    ctx.fillText('GAME OVER',canvas.width/2,canvas.height/2);
+    ctx.textAlign='left';
+  }
+}
+
+// --- Main Loop ---
+function loop(timestamp){
+  if(!lastTime) lastTime=timestamp;
+  const delta=timestamp-lastTime;
+  lastTime=timestamp;
+  if(gameState.hero && gameState.hero.health>0){
+    update(delta);
+  }
+  render();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

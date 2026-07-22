@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Junction 07 — Dusk Traffic Simulation</title>
+<style>
+  :root{
+    --disp:"Avenir Next Condensed","Arial Narrow","Helvetica Neue",Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
+    --amber:#ffb45c; --ink:#c9d2e2; --dim:#77809a;
+  }
+  html,body{margin:0;height:100%;overflow:hidden;background:#0b0d13}
+  canvas{display:block;position:fixed;inset:0;cursor:crosshair}
+  #hud{
+    position:fixed;top:14px;left:14px;width:242px;z-index:5;pointer-events:none;user-select:none;
+    background:rgba(9,11,17,.84);border:1px solid #262d3d;border-left:3px solid var(--amber);
+    padding:11px 13px 10px;color:var(--ink);font:11px/1.5 var(--mono);letter-spacing:.02em;
+    box-shadow:0 8px 30px rgba(0,0,0,.45);
+  }
+  #hud .top{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px}
+  #hud .ttl{font:700 15px/1 var(--disp);letter-spacing:.14em;color:#eef2fa}
+  #hud .live{font:700 9px/1 var(--disp);letter-spacing:.18em;color:#ff7a5c;display:flex;align-items:center;gap:4px}
+  #hud .live i{width:6px;height:6px;border-radius:50%;background:#ff7a5c;animation:pulse 1.6s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+  #hud .clock{display:flex;justify-content:space-between;align-items:baseline;border-bottom:1px solid #212839;padding-bottom:7px;margin-bottom:8px}
+  #hud .clock b{font:600 19px/1 var(--mono);color:#f2f5fb}
+  #hud .clock span{font:700 9px/1 var(--disp);letter-spacing:.22em;color:var(--amber)}
+  #hud .phase{display:flex;justify-content:space-between;align-items:baseline}
+  #hud .pn{font:700 11px/1 var(--disp);letter-spacing:.12em;color:var(--amber)}
+  #hud .pn.yellow{color:#ffd07a}#hud .pn.allred{color:#ff8a7a}
+  #hud .pt{color:var(--dim)}
+  #hud .bar{height:4px;background:#161b28;margin:6px 0 8px;position:relative;overflow:hidden}
+  #hud .bar i{position:absolute;inset:0;right:auto;background:var(--amber);transition:width .12s linear}
+  #hud .bar i.yellow{background:#ffd07a}#hud .bar i.allred{background:#ff6b5e}
+  #hud .seq{display:grid;grid-template-columns:repeat(4,1fr);gap:3px;margin-bottom:9px}
+  #hud .sq{border:1px solid #232a3a;text-align:center;padding:3px 0 2px;font:700 8.5px/1 var(--disp);letter-spacing:.1em;color:#5b6478;transition:all .2s}
+  #hud .sq.green{border-color:var(--amber);color:var(--amber);background:rgba(255,180,92,.10)}
+  #hud .sq.yellow{border-color:#ffd07a;color:#ffd07a;background:rgba(255,208,122,.12);animation:pulse .5s infinite}
+  #hud .sq.allred{border-color:#ff6b5e;color:#ff6b5e}
+  #hud .qhead{font:700 9px/1 var(--disp);letter-spacing:.22em;color:var(--dim);margin-bottom:5px}
+  #hud .qrow{display:grid;grid-template-columns:16px 1fr 20px 44px;gap:7px;align-items:center;padding:2.5px 4px;margin:0 -4px;transition:background .15s}
+  #hud .qrow.hot{background:#1b2233}
+  #hud .qrow b{font:700 12px/1 var(--disp);color:#aeb8cc}
+  #hud .qb{height:5px;background:#161b28;position:relative}
+  #hud .qb i{position:absolute;inset:0;right:auto;background:#8fa3c4;transition:width .25s}
+  #hud .qn{text-align:right;color:#e8edf6}
+  #hud .qp{font-size:9px;color:#7fd0c8;text-align:right}
+  #hud .bus{display:flex;justify-content:space-between;border-top:1px solid #212839;margin-top:7px;padding-top:7px}
+  #hud .bus b{font:700 10px/1.4 var(--disp);letter-spacing:.14em;color:#7fd0c8}
+  #hud .bus span{color:var(--dim)}
+  #hud .note{margin-top:7px;font-size:8.5px;color:#525b70;letter-spacing:.06em}
+  #hint{position:fixed;right:14px;bottom:12px;z-index:5;pointer-events:none;user-select:none;
+    font:10px/1 var(--mono);color:#6a7388;background:rgba(9,11,17,.7);border:1px solid #232a3a;padding:6px 9px;letter-spacing:.05em}
+  #paused{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:6;display:none;
+    font:700 12px/1 var(--disp);letter-spacing:.3em;color:#ffd07a;background:rgba(9,11,17,.85);
+    border:1px solid #3a3220;padding:8px 16px}
+  body.paused #paused{display:block}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="hud">
+  <div class="top"><span class="ttl">JUNCTION 07</span><span class="live"><i></i>LIVE</span></div>
+  <div class="clock"><b id="clk">19:42:00</b><span id="amb">DUSK</span></div>
+  <div class="phase"><span class="pn" id="phName">—</span><span class="pt" id="phTime">0.0s</span></div>
+  <div class="bar"><i id="phBar"></i></div>
+  <div class="seq">
+    <div class="sq" id="sq0">NS·L</div><div class="sq" id="sq1">NS·T</div>
+    <div class="sq" id="sq2">EW·L</div><div class="sq" id="sq3">EW·T</div>
+  </div>
+  <div class="qhead">APPROACH DEMAND</div>
+  <div class="qrow" data-d="N"><b>N</b><div class="qb"><i></i></div><span class="qn">0</span><span class="qp"></span></div>
+  <div class="qrow" data-d="S"><b>S</b><div class="qb"><i></i></div><span class="qn">0</span><span class="qp"></span></div>
+  <div class="qrow" data-d="E"><b>E</b><div class="qb"><i></i></div><span class="qn">0</span><span class="qp"></span></div>
+  <div class="qrow" data-d="W"><b>W</b><div class="qb"><i></i></div><span class="qn">0</span><span class="qp"></span></div>
+  <div class="bus"><b>BUS 42</b><span id="busSt">DUE SOON</span></div>
+  <div class="note">signal timing adapts to queue demand</div>
+</div>
+<div id="hint">CLICK spawn car &nbsp;·&nbsp; SPACE pause</div>
+<div id="paused">PAUSED</div>
+
+<script>
+'use strict';
+/* ============================ JUNCTION 07 ============================
+   Top-down four-way intersection at dusk. IDM car-following, protected/
+   permissive left turns, adaptive signal controller, pedestrians, a
+   docking bus, and the occasional late-yellow runner. Runs forever.
+====================================================================== */
+const cv=document.getElementById('c'),ctx=cv.getContext('2d');
+const bg=document.createElement('canvas'),bctx=bg.getContext('2d');
+const vig=document.createElement('canvas'),vctx=vig.getContext('2d');
+const DISP='"Avenir Next Condensed","Arial Narrow",Arial,sans-serif';
+const MONO='ui-monospace,"SF Mono",Menlo,Consolas,monospace';
+const TAU=Math.PI*2;
+const rand=(a,b)=>a+Math.random()*(b-a);
+const irand=(a,b)=>Math.floor(rand(a,b+1));
+const clamp=(v,a,b)=>v<a?a:v>b?b:v;
+const pick=a=>a[Math.floor(Math.random()*a.length)];
+const smooth=t=>t*t*(3-2*t);
+const f2=n=>String(n).padStart(2,'0');
+const angDiff=(a,b)=>{let d=Math.abs(a-b)%TAU;return d>Math.PI?TAU-d:d;};
+const lerpAng=(a,b,t)=>{let d=(b-a)%TAU;if(d>Math.PI)d-=TAU;if(d<-Math.PI)d+=TAU;return a+d*t;};
+
+const U={N:{x:0,y:-1},S:{x:0,y:1},E:{x:1,y:0},W:{x:-1,y:0}};
+const rp=u=>({x:-u.y,y:u.x});   // right-perp (right-hand traffic)
+const lp=u=>({x:u.y,y:-u.x});   // left-perp
+const DIRS=['N','S','E','W'];
+const OPP={N:'S',S:'N',E:'W',W:'E'};
+
+let W=0,H=0,DPR=1,cx=0,cy=0,laneW=24,roadHalf=72,crossW=29,stopOff=100;
+let XW={},SIGPOS={},bayGeo={};
+let cars=[],peds=[],ripples=[],lamps=[],windows=[],signs=[],clouds=[];
+let tG=0,simT=0,night=0,paused=false,hot='N',busT=8,rz=null;
+const clockBase=19*3600+42*60;
+const spawnT={N:1,S:2,E:3,W:1.5};let pedT=2;
+
+/* ---------------- sprites ---------------- */
+function radialSprite(size,inner,outer){const c=document.createElement('canvas');c.width=c.height=size;
+  const g=c.getContext('2d'),gr=g.createRadialGradient(size/2,size/2,0,size/2,size/2,size/2);
+  gr.addColorStop(0,inner);gr.addColorStop(1,outer);g.fillStyle=gr;g.fillRect(0,0,size,size);return c;}
+const lampSpr=radialSprite(256,'rgba(255,190,115,0.85)','rgba(255,170,90,0)');
+const redSpr=radialSprite(64,'rgba(255,64,44,0.8)','rgba(255,64,44,0)');
+const cloudSpr=radialSprite(256,'rgba(5,8,15,1)','rgba(5,8,15,0)');
+const coneSpr=(()=>{const c=document.createElement('canvas');c.width=170;c.height=120;const g=c.getContext('2d');
+  const gr=g.createLinearGradient(0,0,170,0);
+  gr.addColorStop(0,'rgba(255,241,196,0.32)');gr.addColorStop(0.55,'rgba(255,238,190,0.11)');gr.addColorStop(1,'rgba(255,236,186,0)');
+  g.fillStyle=gr;g.beginPath();g.moveTo(0,52);g.lineTo(170,6);g.lineTo(170,114);g.lineTo(0,68);g.closePath();g.fill();return c;})();
+
+function rr(x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();}
+function brr(g,x,y,w,h,r){g.beginPath();g.moveTo(x+r,y);g.arcTo(x+w,y,x+w,y+h,r);g.arcTo(x+w,y+h,x,y+h,r);g.arcTo(x,y+h,x,y,r);g.arcTo(x,y,x+w,y,r);g.closePath();}
+
+/* ---------------- geometry / static scenery ---------------- */
+function resize(){
+  DPR=Math.min(devicePixelRatio||1,2);
+  W=innerWidth;H=innerHeight;
+  cv.width=W*DPR;cv.height=H*DPR;cv.style.width=W+'px';cv.style.height=H+'px';
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  cx=W/2;cy=H/2;
+  laneW=clamp(Math.min(W,H)/27,15,32);
+  roadHalf=3*laneW;crossW=laneW*1.2;stopOff=roadHalf+crossW+5;
+  const xo=roadHalf+crossW/2,yo=roadHalf+crossW/2;
+  XW={
+    NS_e:{axis:'NS',x:cx+xo,y0:cy-roadHalf-4,y1:cy+roadHalf+4},
+    NS_w:{axis:'NS',x:cx-xo,y0:cy-roadHalf-4,y1:cy+roadHalf+4},
+    EW_n:{axis:'EW',y:cy-yo,x0:cx-roadHalf-4,x1:cx+roadHalf+4},
+    EW_s:{axis:'EW',y:cy+yo,x0:cx-roadHalf-4,x1:cx+roadHalf+4}
+  };
+  SIGPOS={S:{x:cx-roadHalf-crossW-11,y:cy-stopOff},N:{x:cx+roadHalf+crossW+11,y:cy+stopOff},
+          E:{x:cx-stopOff,y:cy+roadHalf+crossW+11},W:{x:cx+stopOff,y:cy-roadHalf-crossW-11}};
+  const bw=laneW*1.15,bx=cx+roadHalf+3,by0=cy-roadHalf-laneW*5.8,by1=cy-roadHalf-laneW*0.7;
+  bayGeo={bx,bw,by0,by1,sx:bx+bw+5,sy:(by0+by1)/2-laneW*1.1};
+}
+
+function pavementArrow(g,x,y,ang,type){
+  g.save();g.translate(x,y);g.rotate(ang);
+  g.strokeStyle='rgba(222,228,238,0.30)';g.fillStyle='rgba(222,228,238,0.30)';
+  g.lineWidth=3;g.lineCap='round';
+  const l=laneW*0.75,r=laneW*0.42;
+  const head=(hx,hy,ha)=>{g.save();g.translate(hx,hy);g.rotate(ha);
+    g.beginPath();g.moveTo(4.5,0);g.lineTo(-3,-3.6);g.lineTo(-3,3.6);g.closePath();g.fill();g.restore();};
+  if(type==='T'){g.beginPath();g.moveTo(-l,0);g.lineTo(0,0);g.stroke();head(0,0,0);}
+  else if(type==='L'){g.beginPath();g.moveTo(-l,0);g.lineTo(-r,0);g.stroke();
+    g.beginPath();g.arc(0,0,r,Math.PI,Math.PI*1.5);g.stroke();head(0,-r,-Math.PI/2);}
+  else{g.beginPath();g.moveTo(-l,0);g.lineTo(l*0.15,0);g.stroke();head(l*0.15,0,0);
+    g.beginPath();g.moveTo(-r,0);g.arc(0,0,r,Math.PI,Math.PI/2,true);g.stroke();head(0,r,Math.PI/2);}
+  g.restore();
+}
+
+function paintBG(){
+  bg.width=W*DPR;bg.height=H*DPR;bctx.setTransform(DPR,0,0,DPR,0,0);
+  const g=bctx;
+  g.fillStyle='#20242e';g.fillRect(0,0,W,H);
+  g.strokeStyle='rgba(0,0,0,0.15)';g.lineWidth=1;
+  for(let x=0;x<W;x+=52){g.beginPath();g.moveTo(x+.5,0);g.lineTo(x+.5,H);g.stroke();}
+  for(let y=0;y<H;y+=52){g.beginPath();g.moveTo(0,y+.5);g.lineTo(W,y+.5);g.stroke();}
+  for(let i=0;i<260;i++){g.fillStyle=Math.random()<.5?'rgba(0,0,0,0.05)':'rgba(255,255,255,0.02)';
+    g.fillRect(rand(0,W),rand(0,H),rand(1,3),rand(1,3));}
+
+  /* buildings */
+  windows.length=0;signs.length=0;
+  const m=roadHalf+crossW+16;
+  const quads=[[0,0,cx-m,cy-m],[cx+m,0,W-cx-m,cy-m],[0,cy+m,cx-m,H-cy-m],[cx+m,cy+m,W-cx-m,H-cy-m]];
+  for(const[qx,qy,qw,qh]of quads){
+    if(qw<40||qh<40)continue;
+    g.fillStyle='#141824';g.fillRect(qx,qy,qw,qh);
+    g.strokeStyle='#0a0d15';g.lineWidth=3;g.strokeRect(qx+1.5,qy+1.5,qw-3,qh-3);
+    g.strokeStyle='#242c3e';g.lineWidth=1;g.strokeRect(qx+6.5,qy+6.5,qw-13,qh-13);
+    for(let i=0;i<3;i++){g.fillStyle='rgba(255,255,255,0.02)';
+      g.fillRect(qx+rand(10,qw*.5),qy+rand(10,qh*.5),rand(20,qw*.4),rand(16,qh*.4));}
+    const n=irand(2,5);
+    for(let i=0;i<n;i++){const ax=qx+rand(14,qw-28),ay=qy+rand(14,qh-28),as=rand(8,13);
+      g.fillStyle='#1b2130';g.fillRect(ax,ay,as,as);
+      g.strokeStyle='#2a3348';g.lineWidth=1;g.strokeRect(ax+.5,ay+.5,as-1,as-1);
+      g.beginPath();g.arc(ax+as/2,ay+as/2,as*.28,0,TAU);g.strokeStyle='#333e58';g.stroke();}
+    const cols=Math.floor((qw-24)/20),rows=Math.floor((qh-24)/18);
+    for(let i=0;i<cols;i++)for(let j=0;j<rows;j++){
+      if(Math.random()<0.68)continue;
+      windows.push({x:qx+14+i*20+rand(-2,2),y:qy+14+j*18+rand(-2,2),w:8,h:5.5,
+        c:pick(['#ffd9a0','#ffe9c4','#c9dcff','#ffcf8f','#e8c7ff']),a:rand(.25,.75),f:Math.random()<.1,ph:rand(0,9)});
+    }
+  }
+  signs.push({x:cx+m+10,y:cy-Math.max(40,m*.55),w:6,h:34,c:'#59d7ff',sp:1.3,ph:1});
+  signs.push({x:cx-Math.max(60,m*.6),y:cy+m+10,w:34,h:6,c:'#ff9d5c',sp:.9,ph:4});
+
+  /* roads */
+  const rw=roadHalf*2;
+  g.fillStyle='#2a2e39';g.fillRect(cx-roadHalf,0,rw,H);g.fillRect(0,cy-roadHalf,W,rw);
+  g.fillStyle='rgba(0,0,0,0.10)';g.fillRect(cx-roadHalf,cy-roadHalf,rw,rw);
+  g.fillStyle='rgba(0,0,0,0.35)';
+  g.fillRect(cx-roadHalf-2,0,2,H);g.fillRect(cx+roadHalf,0,2,H);
+  g.fillRect(0,cy-roadHalf-2,W,2);g.fillRect(0,cy+roadHalf,W,2);
+  g.fillStyle='rgba(255,255,255,0.05)';
+  g.fillRect(cx-roadHalf-4,0,2,H);g.fillRect(cx+roadHalf+2,0,2,H);
+  g.fillRect(0,cy-roadHalf-4,W,2);g.fillRect(0,cy+roadHalf+2,W,2);
+  g.fillStyle='rgba(0,0,0,0.055)';
+  for(const s of[-2.5,-1.5,-.5,.5,1.5,2.5]){
+    g.fillRect(cx+s*laneW-laneW*.3,0,laneW*.6,H);
+    g.fillRect(0,cy+s*laneW-laneW*.3,W,laneW*.6);
+  }
+  /* double yellow centrelines */
+  g.fillStyle='rgba(198,160,64,0.5)';
+  const cg=roadHalf+crossW+4;
+  g.fillRect(cx-3.5,0,2,cy-cg);g.fillRect(cx+1.5,0,2,cy-cg);
+  g.fillRect(cx-3.5,cy+cg,2,H);g.fillRect(cx+1.5,cy+cg,2,H);
+  g.fillRect(0,cy-3.5,cx-cg,2);g.fillRect(0,cy+1.5,cx-cg,2);
+  g.fillRect(cx+cg,cy-3.5,W,2);g.fillRect(cx+cg,cy+1.5,W,2);
+  /* lane lines: turn-lane solid, others dashed */
+  g.lineWidth=2;
+  g.strokeStyle='rgba(214,220,230,0.30)';
+  const arm=(x0,y0,x1,y1)=>{g.beginPath();g.moveTo(x0,y0);g.lineTo(x1,y1);g.stroke();};
+  arm(cx+laneW,0,cx+laneW,cy-stopOff);arm(cx+laneW,cy+stopOff,cx+laneW,H);
+  arm(cx-laneW,0,cx-laneW,cy-stopOff);arm(cx-laneW,cy+stopOff,cx-laneW,H);
+  arm(0,cy+laneW,cx-stopOff,cy+laneW);arm(cx+stopOff,cy+laneW,W,cy+laneW);
+  arm(0,cy-laneW,cx-stopOff,cy-laneW);arm(cx+stopOff,cy-laneW,W,cy-laneW);
+  g.strokeStyle='rgba(214,220,230,0.24)';g.setLineDash([15,17]);
+  arm(cx+2*laneW,0,cx+2*laneW,cy-stopOff);arm(cx+2*laneW,cy+stopOff,cx+2*laneW,H);
+  arm(cx-2*laneW,0,cx-2*laneW,cy-stopOff);arm(cx-2*laneW,cy+stopOff,cx-2*laneW,H);
+  arm(0,cy+2*laneW,cx-stopOff,cy+2*laneW);arm(cx+stopOff,cy+2*laneW,W,cy+2*laneW);
+  arm(0,cy-2*laneW,cx-stopOff,cy-2*laneW);arm(cx+stopOff,cy-2*laneW,W,cy-2*laneW);
+  g.setLineDash([]);
+  /* pavement arrows */
+  for(const d of DIRS){const u=U[d],r=rp(u);
+    for(let i=0;i<3;i++){const o=(i+.5)*laneW;
+      pavementArrow(g,cx+r.x*o-u.x*(stopOff+laneW*2),cy+r.y*o-u.y*(stopOff+laneW*2),
+        Math.atan2(u.y,u.x),i===0?'L':i===1?'T':'TR');}}
+  /* stop bars */
+  g.fillStyle='rgba(226,230,238,0.5)';
+  g.fillRect(cx-roadHalf+3,cy-stopOff-2.5,roadHalf-6,5);
+  g.fillRect(cx+3,cy+stopOff-2.5,roadHalf-6,5);
+  g.fillRect(cx-stopOff-2.5,cy+3,5,roadHalf-6);
+  g.fillRect(cx+stopOff-2.5,cy-roadHalf+3,5,roadHalf-6);
+  /* zebras (stripes run with the walking direction) */
+  const zebra=(b,vertical)=>{const n=Math.max(3,Math.round(crossW/9)),step=crossW/n;
+    for(let i=0;i<n;i++){g.fillStyle=`rgba(215,221,231,${rand(.22,.4)})`;
+      if(vertical)g.fillRect(b+i*step+step*.22,cy-roadHalf+3,step*.56,rw-6);
+      else g.fillRect(cx-roadHalf+3,b+i*step+step*.22,rw-6,step*.56);}};
+  zebra(cx+roadHalf+2,true);zebra(cx-roadHalf-crossW-2,true);
+  zebra(cy+roadHalf+2,false);zebra(cy-roadHalf-crossW-2,false);
+  /* manholes + wear */
+  g.strokeStyle='rgba(0,0,0,0.25)';g.lineWidth=2;
+  for(let i=0;i<3;i++){g.beginPath();g.arc(cx+rand(-roadHalf*.6,roadHalf*.6),cy+rand(-roadHalf*.6,roadHalf*.6),laneW*.22,0,TAU);g.stroke();}
+  /* bus bay */
+  const{bx,bw,by0,by1,sx,sy}=bayGeo;
+  g.fillStyle='#242834';g.fillRect(bx,by0,bw,by1-by0);
+  g.strokeStyle='rgba(228,182,64,0.45)';g.lineWidth=2;g.setLineDash([9,7]);
+  g.strokeRect(bx+1.5,by0+1.5,bw-3,by1-by0-3);g.setLineDash([]);
+  g.save();g.translate(bx+bw/2,(by0+by1)/2);g.rotate(-Math.PI/2);
+  g.font=`700 ${laneW*.72}px ${DISP}`;g.textAlign='center';g.textBaseline='middle';
+  g.fillStyle='rgba(228,232,242,0.22)';g.fillText('BUS',0,0);g.restore();
+  g.fillStyle='#1a2030';g.fillRect(sx,sy,laneW*.95,laneW*2.2);
+  g.strokeStyle='#2c3550';g.lineWidth=1;g.strokeRect(sx+.5,sy+.5,laneW*.95-1,laneW*2.2-1);
+  g.fillStyle='#232b40';g.fillRect(sx+2,sy+2,laneW*.95-4,3);
+  g.fillStyle='#2b5fb8';brr(g,sx+laneW*.475-5,sy-20,10,11,2);g.fill();
+  g.fillStyle='#e8eefc';g.font='700 7px '+MONO;g.textAlign='center';g.textBaseline='middle';
+  g.fillText('B',sx+laneW*.475,sy-14.5);
+}
+
+function buildLamps(){
+  lamps.length=0;const o=roadHalf+crossW+10;
+  for(const[x,y]of[[cx-o,cy-o],[cx+o,cy-o],[cx-o,cy+o],[cx+o,cy+o]])
+    lamps.push({x,y,r:laneW*8.5,a:.5,ph:rand(0,9),flick:false});
+  lamps[3].flick=true;
+  const D=Math.min(W,H)*.42;
+  for(const[x,y]of[[cx+o,cy-D],[cx-o,cy+D],[cx-D,cy+o],[cx+D,cy-o]])
+    lamps.push({x,y,r:laneW*7,a:.38,ph:rand(0,9),flick:false});
+}
+function makeVig(){
+  vig.width=W*DPR;vig.height=H*DPR;vctx.setTransform(DPR,0,0,DPR,0,0);
+  const gr=vctx.createRadialGradient(cx,cy,Math.min(W,H)*.35,cx,cy,Math.hypot(W,H)*.62);
+  gr.addColorStop(0,'rgba(4,6,12,0)');gr.addColorStop(1,'rgba(3,5,10,0.62)');
+  vctx.fillStyle=gr;vctx.fillRect(0,0,W,H);
+  const lg=vctx.createLinearGradient(0,0,W,0);
+  lg.addColorStop(0,'rgba(255,120,50,0.05)');lg.addColorStop(.5,'rgba(255,120,50,0)');
+  vctx.fillStyle=lg;vctx.fillRect(0,0,W,H);
+}
+
+/* ---------------- paths ---------------- */
+function buildPath(pts){const cum=[0];
+  for(let i=1;i<pts.length;i++)cum[i]=cum[i-1]+Math.hypot(pts[i].x-pts[i-1].x,pts[i].y-pts[i-1].y);
+  return{pts,cum,len:cum[cum.length-1]};}
+function rawAt(p,s){s=clamp(s,0,p.len);let i=0;
+  while(i<p.cum.length-2&&s>p.cum[i+1])i++;
+  const t=(s-p.cum[i])/((p.cum[i+1]-p.cum[i])||1),a=p.pts[i],b=p.pts[i+1];
+  return{x:a.x+(b.x-a.x)*t,y:a.y+(b.y-a.y)*t,a:Math.atan2(b.y-a.y,b.x-a.x)};}
+function posAt(p,s,c){s=clamp(s,0,p.len);let i=c.seg||0;
+  while(i<p.cum.length-2&&s>p.cum[i+1])i++;
+  while(i>0&&s<p.cum[i])i--;c.seg=i;
+  const t=(s-p.cum[i])/((p.cum[i+1]-p.cum[i])||1),a=p.pts[i],b=p.pts[i+1];
+  return{x:a.x+(b.x-a.x)*t,y:a.y+(b.y-a.y)*t,a:Math.atan2(b.y-a.y,b.x-a.x)};}
+
+function makePath(dir,lane,intent){
+  const u=U[dir],r=rp(u),o=(lane+.5)*laneW;
+  const edge=(u.x!==0?W:H)/2+70;
+  const pts=[{x:cx+r.x*o-u.x*edge,y:cy+r.y*o-u.y*edge}];
+  let iE=0,iX=0;
+  if(intent==='T'){pts.push({x:cx+r.x*o+u.x*edge,y:cy+r.y*o+u.y*edge});}
+  else if(intent==='R'){
+    const w=rp(u);
+    const entry={x:cx+r.x*o-u.x*roadHalf,y:cy+r.y*o-u.y*roadHalf};
+    pts.push(entry);iE=pts.length-1;
+    const corner={x:cx-u.x*roadHalf+r.x*roadHalf,y:cy-u.y*roadHalf+r.y*roadHalf};
+    const th0=Math.atan2(entry.y-corner.y,entry.x-corner.x),R=.5*laneW;
+    for(let k=1;k<=9;k++){const th=th0+Math.PI/2*k/9;
+      pts.push({x:corner.x+R*Math.cos(th),y:corner.y+R*Math.sin(th)});}
+    iX=pts.length-1;
+    const exit={x:corner.x+u.x*R,y:corner.y+u.y*R};
+    pts.push({x:exit.x+w.x*edge*2,y:exit.y+w.y*edge*2});
+  }else{
+    const w=lp(u),r2=rp(w),o2=.5*laneW;
+    const entry={x:cx+r.x*o-u.x*roadHalf,y:cy+r.y*o-u.y*roadHalf};
+    const exit={x:cx+r2.x*o2+w.x*roadHalf,y:cy+r2.y*o2+w.y*roadHalf};
+    pts.push(entry);iE=pts.length-1;
+    const k=roadHalf*1.2;
+    const p1={x:entry.x+u.x*k,y:entry.y+u.y*k},p2={x:exit.x-w.x*k,y:exit.y-w.y*k};
+    for(let i=1;i<=22;i++){const t=i/22,m=1-t;
+      pts.push({x:m*m*m*entry.x+3*m*m*t*p1.x+3*m*t*t*p2.x+t*t*t*exit.x,
+                y:m*m*m*entry.y+3*m*m*t*p1.y+3*m*t*t*p2.y+t*t*t*exit.y});}
+    iX=pts.length-1;
+    pts.push({x:exit.x+w.x*edge*2,y:exit.y+w.y*edge*2});
+  }
+  const path=buildPath(pts);
+  path.sStop=edge-stopOff;
+  let bi=path.len,bo=path.len;
+  for(let s=0;s<=path.len;s+=7){const P=rawAt(path,s);
+    if(Math.abs(P.x-cx)<=roadHalf&&Math.abs(P.y-cy)<=roadHalf){if(bi===path.len)bi=s;bo=s;}}
+  path.sBoxIn=bi;path.sBoxOut=bo;
+  path.turnS0=path.cum[iE];path.turnS1=path.cum[iX];
+  path.turnSide=intent==='R'?1:intent==='L'?-1:0;
+  return path;
+}
+
+/* ---------------- vehicles ---------------- */
+const CARCOLS=['#8a93a6','#b7bcc7','#5f6d80','#7a4a44','#46626e','#94846b','#3f4a5c','#c7c2b4','#6e7b8a','#54435a'];
+function makeCar(dir,lane,intent,s0,vf){
+  const path=makePath(dir,lane,intent);
+  const c={dir,lane,intent,path,s:Math.min(s0,path.len-12),v:0,seg:0,
+    len:laneW*1.62,wid:laneW*.7,v0:laneW*rand(5.6,7),aggr:Math.random(),
+    col:Math.random()<.08?'#d9a441':pick(CARCOLS),
+    runner:false,stopped:false,brake:false,blink:0,dead:false,x:0,y:0,ang:0,cos:1,sin:0};
+  setPos(c);c.v=c.v0*vf;return c;
+}
+function setPos(c){const P=posAt(c.path,c.s,c);c.x=P.x;c.y=P.y;c.ang=P.a;c.cos=Math.cos(c.ang);c.sin=Math.sin(c.ang);}
+
+function trySpawn(dir,force){
+  if(cars.length>88)return;
+  for(let tries=0;tries<3;tries++){
+    const r=Math.random(),lane=r<.24?0:r<.62?1:2;
+    const intent=lane===0?'L':lane===1?'T':(Math.random()<.55?'R':'T');
+    let blocked=false;
+    for(const o of cars)if(o.dir===dir&&o.lane===lane&&o.s<laneW*8){blocked=true;break;}
+    if(blocked)continue;
+    cars.push(makeCar(dir,lane,intent,rand(6,40),rand(.5,.8)));
+    return;
+  }
+}
+
+/* ---------------- signal controller ---------------- */
+const ctrl={seq:['NSL','NST','EWL','EWT'],idx:1,stage:'green',t:0,dur:9,ext:false};
+const NAMES={NSL:'NS LEFT ARROW',NST:'NS THRU + RIGHT',EWL:'EW LEFT ARROW',EWT:'EW THRU + RIGHT'};
+const axisOf=d=>(d==='N'||d==='S')?'NS':'EW';
+function queued(c){return c.v<c.v0*.35&&(c.sStop-c.s)<laneW*12&&c.s<c.sStop+c.len;}
+function queueFor(ph){const ax=ph.slice(0,2),ty=ph[2];let q=0;
+  for(const c of cars){if(c.isBus)continue;if(axisOf(c.dir)!==ax)continue;
+    if(ty==='L'?c.intent!=='L':c.intent==='L')continue;if(queued(c))q++;}
+  if(ty==='T')for(const p of peds)if(p.state==='wait'&&XW[p.cross].axis===ax)q+=1.6;
+  return q;}
+function leftQueue(ax){let q=0;for(const c of cars)
+  if(!c.isBus&&axisOf(c.dir)===ax&&c.intent==='L'&&queued(c))q++;return q;}
+function startGreen(i){ctrl.idx=i;ctrl.stage='green';ctrl.t=0;ctrl.ext=false;
+  const ph=ctrl.seq[i],q=queueFor(ph);
+  ctrl.dur=ph[2]==='L'?clamp(4.5+q*1.1,4.5,11):clamp(7+q*1.15,6.5,19);
+  for(const c of cars)c.runner=false;}
+function decideYellow(){const ph=ctrl.seq[ctrl.idx],ax=ph.slice(0,2),ty=ph[2];
+  for(const c of cars){
+    const match=axisOf(c.dir)===ax&&(ty==='L'?c.intent==='L':c.intent!=='L');
+    if(!match)continue;const d=c.sStop-(c.s+c.len/2);
+    if(d<0){c.runner=true;continue;}
+    const sd=c.v*c.v/(2*laneW*1.9);
+    c.runner=d<sd*.9||(d<c.v*1.5&&Math.random()<c.aggr*.8);}}
+function ctrlUpdate(dt){ctrl.t+=dt;
+  if(ctrl.stage==='green'&&!ctrl.ext&&ctrl.t>ctrl.dur-.7&&queueFor(ctrl.seq[ctrl.idx])>=5){
+    ctrl.dur=Math.min(ctrl.dur+3.5,ctrl.seq[ctrl.idx][2]==='L'?13:22);ctrl.ext=true;}
+  if(ctrl.t<ctrl.dur)return;
+  if(ctrl.stage==='green'){ctrl.stage='yellow';ctrl.t=0;ctrl.dur=3;decideYellow();}
+  else if(ctrl.stage==='yellow'){ctrl.stage='allred';ctrl.t=0;ctrl.dur=1.15;}
+  else{let i=(ctrl.idx+1)%4;
+    if(ctrl.seq[i][2]==='L'&&leftQueue(ctrl.seq[i].slice(0,2))<1)i=(i+1)%4;
+    startGreen(i);}}
+function signalFor(c){
+  const ph=ctrl.seq[ctrl.idx],ax=ph.slice(0,2),ty=ph[2];
+  const match=axisOf(c.dir)===ax&&(ty==='L'?c.intent==='L':c.intent!=='L');
+  if(ctrl.stage==='green')return match?'go':'stop';
+  if(ctrl.stage==='yellow')return(match&&c.runner)?'go':'stop';
+  return 'stop';}
+
+/* ---------------- gap logic ---------------- */
+function computeGap(c){
+  let gap=1e9,vLead=c.v;
+  for(const o of cars){if(o===c)continue;
+    const dx=o.x-c.x,dy=o.y-c.y,f=dx*c.cos+dy*c.sin;
+    if(f<=0||f>laneW*10)continue;
+    if(Math.abs(-dx*c.sin+dy*c.cos)>laneW*.95)continue;
+    const g=f-(c.len+o.len)/2;if(g<gap){gap=g;vLead=o.v;}}
+  for(const p of peds){if(p.state!=='cross')continue;
+    const dx=p.x-c.x,dy=p.y-c.y,f=dx*c.cos+dy*c.sin;
+    if(f<=0||f>laneW*6.5)continue;
+    if(Math.abs(-dx*c.sin+dy*c.cos)>laneW*1.25)continue;
+    const g=f-c.len/2-8;if(g<gap){gap=g;vLead=0;}}
+  return{gap,vLead};
+}
+function yieldClear(c){
+  if(c.sStop-(c.s+c.len/2)>laneW*3.5)return false;
+  let worst=1e9;
+  for(const o of cars){if(o===c||o.dir!==OPP[c.dir]||o.intent==='L')continue;
+    if(signalFor(o)!=='go')continue;
+    const d2=o.sStop-(o.s+o.len/2);
+    if(d2<-o.len){if(Math.abs(o.x-cx)<roadHalf&&Math.abs(o.y-cy)<roadHalf)return false;continue;}
+    if(d2<laneW*2.2&&o.v>laneW*.8)return false;
+    worst=Math.min(worst,d2/Math.max(o.v,3));}
+  return worst>3.9;}
+function rtorClear(c){
+  if(!c.stopped)return false;
+  for(const o of cars){if(o===c||o.dir===c.dir)continue;
+    if(signalFor(o)!=='go')continue;
+    if(Math.hypot(o.x-cx,o.y-cy)<roadHalf+laneW*6.5)return false;}
+  return true;}
+function idm(v,v0,gap,dv){
+  const s0=laneW*.55,T=1.4,a=laneW*1.15,b=laneW*1.7;
+  const sstar=s0+Math.max(0,v*T+v*dv/(2*Math.sqrt(a*b)));
+  return a*(1-Math.pow(v/Math.max(v0,.1),4)-(gap>0?Math.pow(sstar/gap,2):3));}
+
+function updateCar(c,dt){
+  let{gap,vLead:vl}=computeGap(c);
+  const front=c.s+c.len/2,dLine=c.sStop-front;
+  const st=signalFor(c);
+  let must=false;
+  if(st==='stop'){if(c.intent==='R')must=!rtorClear(c);else must=true;}
+  else if(st==='yield')must=!yieldClear(c);
+  if(must){if(dLine>-2&&dLine<gap){gap=dLine;vl=0;}
+    if(dLine<6&&c.v<laneW*.15)c.stopped=true;}
+  if(front<c.sBoxIn&&gap<(c.sBoxOut-front)+c.len+8&&dLine>-2&&dLine<gap){gap=dLine;vl=0;}
+  if(front>c.sBoxIn-42&&front<c.sBoxIn+10&&dLine>-2){
+    for(const o of cars){if(o===c)continue;
+      if(Math.abs(o.x-cx)<roadHalf*.95&&Math.abs(o.y-cy)<roadHalf*.95){
+        const ad=angDiff(o.ang,c.ang);
+        if(ad>.6&&ad<2.6){gap=Math.min(gap,Math.max(.5,c.sBoxIn+4-front));vl=0;break;}}}}
+  const v0=(c.runner&&ctrl.stage==='yellow')?c.v0*1.22:c.v0;
+  let a=clamp(idm(c.v,v0,gap,c.v-vl),-laneW*3.4,laneW*1.4);
+  c.v=Math.max(0,c.v+a*dt);c.s+=c.v*dt;
+  c.brake=a<-laneW*.8;
+  setPos(c);
+  if(c.s>c.path.len-2)c.dead=true;
+  c.blink=(c.s>c.path.turnS0&&c.s<c.path.turnS1)?c.path.turnSide:0;
+}
+
+/* ---------------- bus ---------------- */
+function spawnBus(){
+  const o=2.5*laneW,laneX=cx+o,spawnY=cy+H/2+80;
+  const path=buildPath([{x:laneX,y:spawnY},{x:laneX,y:cy-H/2-80}]);
+  path.sStop=H/2+80-stopOff;path.sBoxIn=path.sStop+crossW+5;path.sBoxOut=path.sBoxIn+2*roadHalf;
+  path.turnS0=path.turnS1=0;path.turnSide=0;
+  const b={isBus:true,dir:'N',lane:2,intent:'T',path,s:0,seg:0,
+    len:laneW*3.5,wid:laneW*.82,v0:laneW*4.6,v:laneW*3,aggr:0,col:'#37806f',
+    runner:false,stopped:false,brake:false,dead:false,
+    x:laneX,y:spawnY,ang:-Math.PI/2,cos:0,sin:-1,
+    bst:'drive',off:0,bayOff:(roadHalf+3+bayGeo.bw/2)-o,
+    spawnY,stopY:cy-roadHalf-laneW*4.8,dockY:cy-roadHalf-laneW*.5,
+    dwell:0,pullT:0,blinkSide:0,blink:0,boarders:[]};
+  cars.push(b);
+}
+function updateBus(b,dt){
+  let{gap,vLead:vl}=computeGap(b);
+  const front=b.s+b.len/2,dLine=b.sStop-front;
+  if(signalFor(b)==='stop'&&dLine>-2&&dLine<gap){gap=dLine;vl=0;}
+  if(front<b.sBoxIn&&gap<(b.sBoxOut-front)+b.len+8&&dLine>-2&&dLine<gap){gap=dLine;vl=0;}
+  const y=b.spawnY-b.s;
+  let v0p=b.v0;
+  switch(b.bst){
+    case'drive':if(b.s>b.sBoxOut+laneW){b.bst='dock';b.blinkSide=1;}break;
+    case'dock':{
+      v0p=clamp(Math.max(0,y-b.stopY)*.12,0,b.v0*.55);
+      b.off=b.bayOff*smooth(clamp((b.dockY+laneW*4-y)/(laneW*4),0,1));
+      if(y<=b.stopY+2&&b.v<3){b.bst='dwell';b.dwell=rand(4.5,7);b.v=0;b.off=b.bayOff;
+        const door={x:b.x+b.wid/2+2,y:b.y-b.len*.12};
+        b.boarders=[0,1].map(i=>({x0:bayGeo.sx+4,y0:bayGeo.sy+laneW*(0.9+i*.7),
+          x1:door.x,y1:door.y,t:-i*.9,col:pick(PEDCOLS)}));}
+      break;}
+    case'dwell':
+      b.dwell-=dt;b.v=0;v0p=0;
+      for(const bd of b.boarders)bd.t+=dt*.55;
+      if(b.dwell<=0){b.bst='pull';b.blinkSide=-1;b.pullT=0;b.boarders=[];}
+      break;
+    case'pull':{
+      let clear=true;
+      for(const o of cars){if(o===b||o.dir!=='N')continue;
+        const dy2=o.y-b.y;
+        if((dy2>0&&dy2<laneW*9&&o.v>1)||(dy2<=0&&dy2>-laneW*2.5)){clear=false;break;}}
+      if(clear){b.pullT+=dt;b.off=b.bayOff*(1-smooth(clamp(b.pullT/2.4,0,1)));
+        v0p=b.v0*clamp(b.pullT/2,.2,1);
+        if(b.pullT>=2.4){b.bst='drive';b.off=0;b.blinkSide=0;}}
+      else{v0p=0;b.pullT=0;}
+      break;}
+  }
+  let a=idm(b.v,Math.max(v0p,.01),gap,b.v-vl);
+  a=Math.min(a,(v0p-b.v)*2+laneW*.4);
+  a=clamp(a,-laneW*2.6,laneW*1.1);
+  b.v=Math.max(0,b.v+a*dt);b.s+=b.v*dt;b.brake=a<-laneW*.7;
+  const ny=b.spawnY-b.s,nx=cx+2.5*laneW+b.off;
+  const dxp=nx-b.x,dyp=ny-b.y;
+  if(Math.hypot(dxp,dyp)>.4)b.ang=lerpAng(b.ang,Math.atan2(dyp,dxp),.25);
+  else b.ang=lerpAng(b.ang,-Math.PI/2,.2);
+  b.x=nx;b.y=ny;b.cos=Math.cos(b.ang);b.sin=Math.sin(b.ang);
+  b.blink=b.blinkSide;
+  if(ny<-90){b.dead=true;busT=rand(13,24);}
+}
+
+/* ---------------- pedestrians ---------------- */
+const PEDCOLS=['#b06a5a','#5a7fa0','#c0a060','#7a5a8a','#5a8a70','#a05a70','#8a8a94','#b8926a'];
+function pedSignal(k){const ph=ctrl.seq[ctrl.idx];
+  if(ph.slice(0,2)===XW[k].axis&&ph[2]==='T')return ctrl.stage==='green'?'walk':'flash';
+  return'stop';}
+function spawnPed(){
+  if(peds.length>26)return;
+  const keys=Object.keys(XW);
+  const ws=keys.map(k=>pedSignal(k)==='walk'?4:pedSignal(k)==='flash'?1:1.1);
+  let tot=ws.reduce((a,b)=>a+b,0),r=Math.random()*tot,k=keys[0];
+  for(let i=0;i<keys.length;i++){if(r<ws[i]){k=keys[i];break;}r-=ws[i];}
+  let w=0;for(const p of peds)if(p.cross===k&&p.state==='wait')w++;
+  if(w>6)return;
+  const X=XW[k];let x0,y0,x1,y1;
+  if(X.axis==='NS'){const x=X.x+rand(-crossW*.25,crossW*.25);
+    if(Math.random()<.5){x0=x;y0=X.y0-6;x1=x;y1=X.y1+6;}
+    else{x0=x;y0=X.y1+6;x1=x;y1=X.y0-6;}}
+  else{const y=X.y+rand(-crossW*.25,crossW*.25);
+    if(Math.random()<.5){x0=X.x0-6;y0=y;x1=X.x1+6;y1=y;}
+    else{x0=X.x1+6;y0=y;x1=X.x0-6;y1=y;}}
+  peds.push({cross:k,x0,y0,x1,y1,len:Math.hypot(x1-x0,y1-y0),t:0,state:'wait',
+    speed:laneW*rand(.6,.85),ph:rand(0,9),col:pick(PEDCOLS),
+    wx:x0+rand(-5,5),wy:y0+rand(-5,5),x:x0,y:y0,dead:false});
+}
+function chainPed(p){
+  const k2=pick({NS_e:['EW_n','EW_s'],NS_w:['EW_n','EW_s'],EW_n:['NS_e','NS_w'],EW_s:['NS_e','NS_w']}[p.cross]);
+  const X2=XW[k2];let ends;
+  if(X2.axis==='NS'){const x=X2.x+rand(-3,3);
+    ends=[[x,X2.y0-6,x,X2.y1+6],[x,X2.y1+6,x,X2.y0-6]];}
+  else{const y=X2.y+rand(-3,3);
+    ends=[[X2.x0-6,y,X2.x1+6,y],[X2.x1+6,y,X2.x0-6,y]];}
+  const e=Math.hypot(ends[0][0]-p.x1,ends[0][1]-p.y1)<Math.hypot(ends[1][0]-p.x1,ends[1][1]-p.y1)?ends[0]:ends[1];
+  p.cross=k2;p.x0=e[0];p.y0=e[1];p.x1=e[2];p.y1=e[3];
+  p.len=Math.hypot(e[2]-e[0],e[3]-e[1]);p.t=0;p.state='wait';
+  p.wx=p.x0+rand(-5,5);p.wy=p.y0+rand(-5,5);
+}
+function updatePed(p,dt){
+  const sg=pedSignal(p.cross);
+  if(p.state==='wait'){if(sg==='walk')p.state='cross';p.x=p.wx;p.y=p.wy;return;}
+  const mult=sg==='flash'?1.55:sg==='stop'?1.25:1;
+  p.t+=p.speed*mult*dt/p.len;p.ph+=dt*p.speed*.35;
+  p.x=p.x0+(p.x1-p.x0)*p.t;p.y=p.y0+(p.y1-p.y0)*p.t;
+  if(p.t>=1){if(Math.random()<.45)chainPed(p);else p.dead=true;}
+}
+
+/* ---------------- simulation step ---------------- */
+function step(dt){
+  simT+=dt;night=clamp(simT/240,0,1);
+  ctrlUpdate(dt);
+  for(const d of DIRS){spawnT[d]-=dt;if(spawnT[d]<=0){spawnT[d]=rand(2.4,6.6);trySpawn(d);}}
+  if(!cars.some(c=>c.isBus)){busT-=dt;if(busT<=0)spawnBus();}
+  for(const c of cars)c.isBus?updateBus(c,dt):updateCar(c,dt);
+  cars=cars.filter(c=>!c.dead);
+  pedT-=dt;if(pedT<=0){pedT=rand(1.4,3.6);spawnPed();}
+  for(const p of peds)updatePed(p,dt);
+  peds=peds.filter(p=>!p.dead);
+  for(const cl of clouds){cl.x+=cl.vx*dt;cl.y+=cl.vy*dt;
+    if(cl.x-cl.r>W)cl.x=-cl.r;if(cl.y-cl.r>H)cl.y=-cl.r;}
+  for(const r of ripples)r.age+=dt;
+  ripples=ripples.filter(r=>r.age<.8);
+}
+
+/* ---------------- rendering ---------------- */
+function lightPass(){
+  ctx.save();ctx.globalCompositeOperation='lighter';
+  const li=.45+.55*night;
+  for(const l of lamps){
+    const fl=l.flick?(Math.sin(tG*17+l.ph)>-.9?1:.35):1;
+    ctx.globalAlpha=l.a*li*fl*(.93+.07*Math.sin(tG*1.9+l.ph));
+    ctx.drawImage(lampSpr,l.x-l.r,l.y-l.r,l.r*2,l.r*2);}
+  const ph=ctrl.seq[ctrl.idx],ax=ph.slice(0,2);
+  const colG='rgba(120,255,160,0.09)',colR='rgba(255,84,64,0.08)',colY='rgba(255,196,90,0.13)';
+  ctx.globalAlpha=1;
+  for(const d of DIRS){
+    let col=colR;
+    if(axisOf(d)===ax)col=ctrl.stage==='green'?colG:ctrl.stage==='yellow'?colY:colR;
+    const p=SIGPOS[d];ctx.fillStyle=col;ctx.beginPath();
+    if(d==='N'||d==='S')ctx.ellipse(cx+(d==='S'?-roadHalf:roadHalf)/2,p.y,roadHalf*.48,laneW*1.15,0,0,TAU);
+    else ctx.ellipse(p.x,cy+(d==='E'?roadHalf:-roadHalf)/2,laneW*1.15,roadHalf*.48,0,0,TAU);
+    ctx.fill();}
+  if(ctrl.stage==='green'&&ph[2]==='L'){
+    ctx.fillStyle='rgba(120,255,160,0.5)';
+    for(const d of DIRS){if(axisOf(d)!==ax)continue;
+      const u=U[d],r=rp(u);
+      ctx.save();ctx.translate(cx+r.x*.5*laneW-u.x*stopOff,cy+r.y*.5*laneW-u.y*stopOff);
+      ctx.rotate(Math.atan2(u.y,u.x));
+      ctx.beginPath();ctx.moveTo(6,0);ctx.lineTo(-2,-4.5);ctx.lineTo(-2,4.5);ctx.closePath();ctx.fill();
+      ctx.fillRect(-8,-1.5,6,3);ctx.restore();}}
+  for(const c of cars){
+    const sc=(c.isBus?1.75:1)*(.7+.5*night);
+    ctx.globalAlpha=.9;
+    for(const sd of[-1,1]){
+      ctx.save();ctx.translate(c.x,c.y);ctx.rotate(c.ang);
+      ctx.translate(c.len/2-1,sd*c.wid*.3);
+      ctx.drawImage(coneSpr,0,-60*sc,170*sc,120*sc);ctx.restore();}
+    if(c.brake){ctx.globalAlpha=.55;
+      ctx.save();ctx.translate(c.x,c.y);ctx.rotate(c.ang);ctx.translate(-c.len/2,0);
+      ctx.drawImage(redSpr,-24,-24,48,48);ctx.restore();}}
+  for(const s of signs){ctx.globalAlpha=(.25+.3*night)*(.7+.3*Math.sin(tG*s.sp+s.ph));
+    ctx.drawImage(lampSpr,s.x+s.w/2-30,s.y+s.h/2-30,60,60);}
+  ctx.restore();ctx.globalAlpha=1;
+}
+function drawCar(c){
+  const L=c.len,Wd=c.wid;
+  ctx.save();ctx.translate(c.x,c.y);ctx.rotate(c.ang);
+  ctx.fillStyle='rgba(0,0,0,0.34)';brr(ctx,-L/2+1.5,-Wd/2+2.5,L,Wd,4);ctx.fill();
+  ctx.fillStyle=c.col;brr(ctx,-L/2,-Wd/2,L,Wd,4);ctx.fill();
+  ctx.lineWidth=1;ctx.strokeStyle='rgba(8,10,16,0.55)';ctx.stroke();
+  ctx.fillStyle='rgba(255,255,255,0.08)';brr(ctx,-L/2+2,-Wd/2+1.5,L-4,2,1);ctx.fill();
+  ctx.fillStyle='rgba(14,18,28,0.88)';
+  brr(ctx,L*.10,-Wd/2+2.5,L*.15,Wd-5,2);ctx.fill();
+  brr(ctx,-L*.36,-Wd/2+2.5,L*.11,Wd-5,2);ctx.fill();
+  ctx.fillStyle='rgba(0,0,0,0.20)';brr(ctx,-L*.20,-Wd/2+2,L*.24,Wd-4,2);ctx.fill();
+  ctx.fillStyle='#fff2c4';
+  ctx.fillRect(L/2-2.6,-Wd/2+1.8,2.4,2.2);ctx.fillRect(L/2-2.6,Wd/2-4,2.4,2.2);
+  ctx.fillStyle=c.brake?'#ff5d4a':'#93302a';
+  ctx.fillRect(-L/2+.4,-Wd/2+1.8,2,2.2);ctx.fillRect(-L/2+.4,Wd/2-4,2,2.2);
+  if(c.blink&&Math.floor(tG*2.6)%2===0){ctx.fillStyle='#ffb648';const s=c.blink;
+    ctx.fillRect(L/2-2.6,s>0?Wd/2-2.2:-Wd/2+.2,2.4,2);
+    ctx.fillRect(-L/2+.4,s>0?Wd/2-2.2:-Wd/2+.2,2,2);}
+  ctx.restore();
+}
+function drawBus(b){
+  const L=b.len,Wd=b.wid;
+  ctx.save();ctx.translate(b.x,b.y);ctx.rotate(b.ang);
+  ctx.fillStyle='rgba(0,0,0,0.36)';brr(ctx,-L/2+2,-Wd/2+3,L,Wd,5);ctx.fill();
+  ctx.fillStyle='#33786b';brr(ctx,-L/2,-Wd/2,L,Wd,5);ctx.fill();
+  ctx.lineWidth=1;ctx.strokeStyle='rgba(8,10,16,0.6)';ctx.stroke();
+  ctx.fillStyle='rgba(232,240,238,0.16)';brr(ctx,-L/2+4,-Wd*.18,L-8,Wd*.36,3);ctx.fill();
+  ctx.fillStyle='rgba(12,16,26,0.9)';brr(ctx,L/2-L*.09,-Wd/2+2.5,L*.07,Wd-5,2);ctx.fill();
+  ctx.fillStyle='rgba(150,190,205,0.35)';
+  for(let i=0;i<5;i++){brr(ctx,-L*.36+i*L*.13,-Wd/2+1.6,L*.08,2.2,1);ctx.fill();
+    brr(ctx,-L*.36+i*L*.13,Wd/2-3.8,L*.08,2.2,1);ctx.fill();}
+  ctx.fillStyle='#1a1206';ctx.fillRect(L/2-L*.075,-3.5,L*.055,7);
+  ctx.fillStyle='#ffcf6a';ctx.font='700 5px '+MONO;ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText('42',L/2-L*.048,0);
+  if(b.bst==='dwell'){ctx.fillStyle='rgba(10,13,20,0.9)';ctx.fillRect(L*.10,Wd/2-2.5,L*.14,2.5);}
+  ctx.fillStyle='#fff2c4';ctx.fillRect(L/2-2.6,-Wd/2+2,2.4,2.4);ctx.fillRect(L/2-2.6,Wd/2-4.4,2.4,2.4);
+  ctx.fillStyle=b.brake?'#ff5d4a':'#93302a';
+  ctx.fillRect(-L/2+.4,-Wd/2+2,2,2.4);ctx.fillRect(-L/2+.4,Wd/2-4.4,2,2.4);
+  if(b.blink&&Math.floor(tG*2.6)%2===0){ctx.fillStyle='#ffb648';const s=b.blink;
+    ctx.fillRect(L/2-2.6,s>0?Wd/2-2.4:-Wd/2+.2,2.4,2.2);
+    ctx.fillRect(-L/2+.4,s>0?Wd/2-2.4:-Wd/2+.2,2,2.2);}
+  ctx.restore();
+}
+function drawPed(p){
+  const r=laneW*.16;
+  ctx.save();ctx.translate(p.x,p.y);
+  ctx.fillStyle='rgba(0,0,0,0.3)';ctx.beginPath();ctx.ellipse(1,1.5,r*1.2,r*.8,0,0,TAU);ctx.fill();
+  const ang=Math.atan2(p.y1-p.y0,p.x1-p.x0);
+  const sway=p.state==='cross'?Math.sin(p.ph*9)*r*.5:0;
+  const px=-Math.sin(ang)*sway,py=Math.cos(ang)*sway;
+  ctx.fillStyle=p.col;ctx.beginPath();ctx.arc(px,py,r,0,TAU);ctx.fill();
+  ctx.fillStyle='rgba(226,214,196,0.9)';
+  ctx.beginPath();ctx.arc(px+Math.cos(ang)*r*.35,py+Math.sin(ang)*r*.35,r*.55,0,TAU);ctx.fill();
+  ctx.restore();
+}
+function drawDot(x,y,col){ctx.fillStyle=col;ctx.beginPath();ctx.arc(x,y,laneW*.14,0,TAU);ctx.fill();}
+function drawBusStop(){
+  drawDot(bayGeo.sx+4,bayGeo.sy+laneW*.9,'#8a8a94');
+  drawDot(bayGeo.sx+4,bayGeo.sy+laneW*1.5,'#b06a5a');
+  const b=cars.find(c=>c.isBus);
+  if(b)for(const bd of b.boarders)if(bd.t>0)drawDot(
+    bd.x0+(bd.x1-bd.x0)*Math.min(1,bd.t),bd.y0+(bd.y1-bd.y0)*Math.min(1,bd.t),bd.col);
+}
+function drawSignals(){
+  for(const d of DIRS){
+    const p=SIGPOS[d];
+    const lit=ctrl.seq[ctrl.idx].slice(0,2)===axisOf(d)
+      ?(ctrl.stage==='green'?'g':ctrl.stage==='yellow'?'y':'r'):'r';
+    ctx.fillStyle='#0c0f16';ctx.strokeStyle='#2a3242';ctx.lineWidth=1;
+    brr(ctx,p.x-6.5,p.y-14,13,28,3);ctx.fill();ctx.stroke();
+    for(const[k,c,yy]of[['r','#ff5347',p.y-8],['y','#ffc257',p.y],['g','#5ee38b',p.y+8]]){
+      ctx.beginPath();ctx.arc(p.x,yy,3.1,0,TAU);
+      if(lit===k){ctx.fillStyle=c;ctx.shadowColor=c;ctx.shadowBlur=9;}
+      else{ctx.shadowBlur=0;ctx.fillStyle=k==='r'?'#3a2020':k==='y'?'#3a3220':'#1f3a28';}
+      ctx.fill();}
+    ctx.shadowBlur=0;}
+}
+function drawPedSignals(){
+  for(const k of Object.keys(XW)){
+    const X=XW[k],sg=pedSignal(k);
+    const blink=sg!=='flash'||Math.floor(tG*3)%2===0;
+    let pts;
+    if(X.axis==='NS')pts=[[X.x+crossW*.5+5,X.y0-15],[X.x-crossW*.5-12,X.y1+6]];
+    else pts=[[X.x0-13,X.y+crossW*.5+5],[X.x1+6,X.y-crossW*.5-12]];
+    for(const[px,py]of pts){
+      ctx.fillStyle='#0c0f16';ctx.strokeStyle='#2a3242';ctx.lineWidth=1;
+      brr(ctx,px,py,7,9,1.5);ctx.fill();ctx.stroke();
+      if(sg==='walk'&&blink){ctx.fillStyle='#57e08a';
+        ctx.beginPath();ctx.arc(px+3.5,py+2.8,1.4,0,TAU);ctx.fill();
+        ctx.strokeStyle='#57e08a';ctx.lineWidth=1.2;
+        ctx.beginPath();ctx.moveTo(px+3.5,py+4.2);ctx.lineTo(px+3.5,py+7);ctx.stroke();}
+      else{ctx.fillStyle=blink?'#ff9a3c':'#5a3a1c';
+        brr(ctx,px+2,py+2.2,3,4.6,1);ctx.fill();}}}
+}
+function render(){
+  ctx.drawImage(bg,0,0,W,H);
+  for(const w of windows){
+    let a=w.a*(.7+.3*Math.sin(tG*.6+w.ph));
+    if(w.f&&Math.sin(tG*11+w.ph*7)<-.9)a*=.2;
+    ctx.globalAlpha=a*(.55+.45*night);ctx.fillStyle=w.c;ctx.fillRect(w.x,w.y,w.w,w.h);}
+  ctx.globalAlpha=1;
+  for(const s of signs){ctx.globalAlpha=(.5+.5*night)*(.65+.35*Math.sin(tG*s.sp+s.ph));
+    ctx.fillStyle=s.c;ctx.shadowColor=s.c;ctx.shadowBlur=12;
+    ctx.fillRect(s.x,s.y,s.w,s.h);ctx.shadowBlur=0;}
+  ctx.globalAlpha=1;
+  for(const cl of clouds){ctx.globalAlpha=.06;
+    ctx.drawImage(cloudSpr,cl.x-cl.r,cl.y-cl.r,cl.r*2,cl.r*2);}
+  ctx.globalAlpha=1;
+  lightPass();
+  for(const c of cars)c.isBus?drawBus(c):drawCar(c);
+  drawBusStop();
+  for(const p of peds)drawPed(p);
+  drawSignals();drawPedSignals();
+  for(const r of ripples){ctx.globalAlpha=(1-r.age/.8)*.5;
+    ctx.strokeStyle='#ffb45c';ctx.lineWidth=2;
+    ctx.beginPath();ctx.arc(r.x,r.y,4+r.age*70,0,TAU);ctx.stroke();}
+  ctx.globalAlpha=1;
+  ctx.drawImage(vig,0,0,W,H);
+}
+
+/* ---------------- HUD ---------------- */
+const $=id=>document.getElementById(id);
+const clk=$('clk'),amb=$('amb'),phName=$('phName'),phTime=$('phTime'),phBar=$('phBar'),busSt=$('busSt');
+const seqEls=[$('sq0'),$('sq1'),$('sq2'),$('sq3')];
+const rowEl={},qEls={};
+for(const d of DIRS){const row=document.querySelector(`.qrow[data-d="${d}"]`);
+  rowEl[d]=row;qEls[d]={bar:row.querySelector('.qb i'),num:row.querySelector('.qn'),ped:row.querySelector('.qp')};}
+function hudUpdate(){
+  const tt=clockBase+simT*10;
+  clk.textContent=f2(Math.floor(tt/3600)%24)+':'+f2(Math.floor(tt/60)%60)+':'+f2(Math.floor(tt)%60);
+  amb.textContent=night<.35?'DUSK':night<.75?'EVENING':'NIGHT';
+  const ph=ctrl.seq[ctrl.idx];
+  phName.textContent=NAMES[ph]+(ctrl.stage==='yellow'?' · YELLOW':ctrl.stage==='allred'?' · CLEARANCE':'');
+  phName.className='pn '+ctrl.stage;
+  const rem=Math.max(0,ctrl.dur-ctrl.t);
+  phTime.textContent=rem.toFixed(1)+'s';
+  phBar.style.width=(100*rem/ctrl.dur)+'%';phBar.className=ctrl.stage;
+  seqEls.forEach((el,i)=>el.className='sq'+(i===ctrl.idx?' '+ctrl.stage:''));
+  const q={N:0,S:0,E:0,W:0},pw={N:0,S:0,E:0,W:0};
+  for(const c of cars)if(!c.isBus&&queued(c))q[c.dir]++;
+  for(const p of peds)if(p.state==='wait')pw[{NS_e:'E',NS_w:'W',EW_n:'N',EW_s:'S'}[p.cross]]++;
+  for(const d of DIRS){qEls[d].bar.style.width=Math.min(100,q[d]/12*100)+'%';
+    qEls[d].num.textContent=q[d];qEls[d].ped.textContent=pw[d]?'ped '+pw[d]:'';}
+  const b=cars.find(c=>c.isBus);
+  busSt.textContent=b?{drive:'EN ROUTE',dock:'DOCKING',dwell:'DWELLING',pull:'MERGING'}[b.bst]:'DUE SOON';
+}
+
+/* ---------------- init / loop / input ---------------- */
+function initTraffic(){
+  cars=[];peds=[];ripples=[];
+  for(const d of DIRS)for(let lane=0;lane<3;lane++){
+    const n=lane===0?irand(0,2):irand(1,3);
+    for(let k=0;k<n;k++){
+      const intent=lane===0?'L':lane===1?'T':(Math.random()<.55?'R':'T');
+      const red=axisOf(d)==='EW';
+      const path=makePath(d,lane,intent);
+      const s=red?Math.max(8,path.sStop-14-k*(laneW*1.62+9)-rand(0,6)):rand(80,700);
+      const c=makeCar(d,lane,intent,s,red?0:rand(.6,.85));
+      cars.push(c);}}
+  for(let i=0;i<4;i++)spawnPed();
+  for(let i=0;i<2;i++){spawnPed();const p=peds[peds.length-1];
+    if(p){p.state='cross';p.t=rand(.25,.6);}}
+  spawnBus();
+  const b=cars[cars.length-1];b.s=b.spawnY-(cy+H*.28);setPos(b);b.x=cx+2.5*laneW;b.v=b.v0;
+  startGreen(1);
+}
+function init(){
+  resize();paintBG();buildLamps();makeVig();
+  clouds=[0,1,2].map(()=>({x:rand(0,W),y:rand(0,H),r:rand(280,460),vx:rand(5,11),vy:rand(1.5,4)}));
+  initTraffic();
+}
+const STEP=1/60;
+let last=performance.now(),acc=0;
+function frame(now){
+  requestAnimationFrame(frame);
+  let dt=Math.min((now-last)/1000,.1);last=now;tG+=dt;
+  if(!paused){acc+=dt;let n=0;
+    while(acc>STEP&&n<3){step(STEP);acc-=STEP;n++;}
+    if(n===3)acc=0;}
+  render();hudUpdate();
+}
+addEventListener('resize',()=>{clearTimeout(rz);rz=setTimeout(init,180);});
+addEventListener('keydown',e=>{if(e.code==='Space'){e.preventDefault();
+  paused=!paused;document.body.classList.toggle('paused',paused);}});
+cv.addEventListener('pointerdown',e=>{
+  trySpawn(pick(DIRS),true);ripples.push({x:e.clientX,y:e.clientY,age:0});});
+addEventListener('pointermove',e=>{
+  const dx=e.clientX-cx,dy=e.clientY-cy;
+  const d=Math.abs(dx)>Math.abs(dy)?(dx>0?'E':'W'):(dy>0?'S':'N');
+  if(d!==hot){hot=d;for(const k of DIRS)rowEl[k].classList.toggle('hot',k===hot);}});
+
+init();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Gravity Painting</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;overflow:hidden;background:#04060d}
+  body{cursor:none;-webkit-user-select:none;user-select:none}
+  canvas{position:fixed;inset:0;display:block}
+  .hud{position:fixed;z-index:2;pointer-events:none;color:#c9d6f2}
+  .plate{left:26px;bottom:24px;opacity:0;animation:rise 2.4s .5s cubic-bezier(.2,.7,.2,1) forwards}
+  .plate h1{
+    margin:0;
+    font:600 14px/1 "Avenir Next",Avenir,Futura,"Century Gothic","Trebuchet MS",sans-serif;
+    letter-spacing:.48em;text-transform:uppercase;
+    color:rgba(226,235,255,.85);
+    text-shadow:0 0 20px rgba(120,165,255,.4),0 0 44px rgba(90,200,190,.18);
+  }
+  .plate p{
+    margin:8px 0 0 2px;
+    font:italic 400 11.5px/1.4 Georgia,"Times New Roman",serif;
+    letter-spacing:.05em;color:rgba(168,187,224,.52);
+  }
+  .readout{
+    right:26px;bottom:27px;display:flex;align-items:center;gap:9px;
+    font:500 10.5px/1 ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    letter-spacing:.16em;text-transform:uppercase;color:rgba(190,206,240,.55);
+    opacity:0;animation:rise 2.4s 1.2s cubic-bezier(.2,.7,.2,1) forwards;
+    font-variant-numeric:tabular-nums;
+  }
+  .dot{width:6px;height:6px;border-radius:50%;background:#7fd8c9;box-shadow:0 0 10px #7fd8c9;animation:pulse 2.6s ease-in-out infinite}
+  @keyframes rise{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+  @keyframes pulse{0%,100%{opacity:.4;transform:scale(.78)}50%{opacity:1;transform:scale(1.15)}}
+  @media (max-width:640px){.plate{left:16px;bottom:16px}.readout{right:16px;bottom:16px}}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<header class="hud plate">
+  <h1>Gravity Painting</h1>
+  <p>an n-body screensaver &mdash; dust, wells &amp; time</p>
+</header>
+<div class="hud readout"><span class="dot"></span><span id="stats">wells &mdash; &middot; stream &mdash; &middot; captured 0</span></div>
+
+<script>
+'use strict';
+const TAU = Math.PI * 2;
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha: false });
+const statsEl = document.getElementById('stats');
+
+/* ---------- tunables ---------- */
+const MAXP   = 4200;
+const G      = 1.5e6;   // particle gravity
+const SOFT2  = 1000;    // softening (px^2)
+const AMAX   = 1500;    // accel cap per well
+const VMAX   = 520;     // particle speed cap
+const CAP2   = 196;     // capture radius^2
+const GW     = 2.4e5;   // well-well attraction
+const WDAMP  = 0.25;    // well drag
+const WVCAP  = 70;      // well speed cap
+const WAND   = 9;       // wander acceleration
+const TETHER = 0.055;   // pull toward screen center
+
+/* ---------- state ---------- */
+let W = 0, H = 0, DPR = 1, bgGrad = null, pool = 0, R0 = 0;
+let simT = 0, frameNo = 0, captured = 0, splitT = 16, emitCur = 0, sparkCur = 0;
+
+const px = new Float32Array(MAXP), py = new Float32Array(MAXP);
+const ox = new Float32Array(MAXP), oy = new Float32Array(MAXP);
+const vx = new Float32Array(MAXP), vy = new Float32Array(MAXP);
+const life = new Float32Array(MAXP), maxLife = new Float32Array(MAXP);
+const hueA = new Float32Array(MAXP);
+
+const wells = [];
+const emitters = [];
+const buckets = new Map();
+
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+
+/* ---------- background ---------- */
+function makeGradient() {
+  const g = ctx.createRadialGradient(W * .5, H * .42, 0, W * .5, H * .5, Math.hypot(W, H) * .62);
+  g.addColorStop(0, '#0a1020');
+  g.addColorStop(.55, '#060a16');
+  g.addColorStop(1, '#03040a');
+  return g;
+}
+
+/* ---------- geometry of the frame ---------- */
+function edgePoint(s) {
+  const P = 2 * (W + H);
+  let d = s * P;
+  if (d < W) return { x: d, y: 0, nx: 0, ny: 1, tx: 1, ty: 0 };
+  d -= W;
+  if (d < H) return { x: W, y: d, nx: -1, ny: 0, tx: 0, ty: 1 };
+  d -= H;
+  if (d < W) return { x: W - d, y: H, nx: 0, ny: -1, tx: -1, ty: 0 };
+  d -= W;
+  return { x: 0, y: H - d, nx: 1, ny: 0, tx: 0, ty: -1 };
+}
+
+/* ---------- wells ---------- */
+function addWell(x, y, m, wx, wy) {
+  wells.push({ x, y, m, vx: wx, vy: wy,
+    f1: .05 + Math.random() * .09, f2: .05 + Math.random() * .09,
+    p1: Math.random() * TAU, p2: Math.random() * TAU, grace: 0 });
+}
+function seedWells() {
+  wells.length = 0;
+  const n = 3 + ((Math.random() * 3) | 0);
+  for (let i = 0; i < n; i++)
+    addWell(W * (.22 + .56 * Math.random()), H * (.22 + .56 * Math.random()),
+            .9 + Math.random() * .8, (Math.random() - .5) * 24, (Math.random() - .5) * 24);
+}
+function largestWell() {
+  let best = null;
+  for (const w of wells) if (!best || w.m > best.m) best = w;
+  return best;
+}
+function splitWell(w, t) {
+  const m = w.m / 2, ang = Math.random() * TAU, nx = Math.cos(ang), ny = Math.sin(ang);
+  const sep = 30 + Math.random() * 26, off = 12;
+  w.m = m; w.x -= nx * off; w.y -= ny * off; w.vx -= nx * sep; w.vy -= ny * sep; w.grace = 2.4;
+  const nw = { x: w.x + nx * off * 2, y: w.y + ny * off * 2, m,
+    vx: w.vx + nx * sep * 2, vy: w.vy + ny * sep * 2,
+    f1: .05 + Math.random() * .09, f2: .05 + Math.random() * .09,
+    p1: Math.random() * TAU, p2: Math.random() * TAU, grace: 2.4 };
+  wells.push(nw);
+  burst(w.x, w.y, 34, false);
+  burst(nw.x, nw.y, 34, false);
+}
+function spawnWell() {
+  const e = edgePoint(Math.random());
+  const x = clamp(e.x + e.nx * W * .3, W * .1, W * .9);
+  const y = clamp(e.y + e.ny * H * .3, H * .1, H * .9);
+  addWell(x, y, .9 + Math.random() * .7, (Math.random() - .5) * 30, (Math.random() - .5) * 30);
+  burst(x, y, 40, false);
+}
+function updateWells(dt, t) {
+  const cx = W / 2, cy = H / 2, n = wells.length;
+  for (let i = 0; i < n; i++) {
+    const w = wells[i];
+    if (w.grace > 0) w.grace -= dt;
+    let ax = WAND * (1.6 * Math.sin(t * w.f1 + w.p1) + Math.sin(t * .041 + w.p2));
+    let ay = WAND * (1.6 * Math.cos(t * w.f2 + w.p2) + Math.cos(t * .033 + w.p1));
+    const cdx = cx - w.x, cdy = cy - w.y, cd = Math.hypot(cdx, cdy);
+    if (cd > R0 && cd > 1) { const k = TETHER * (cd - R0) / cd; ax += cdx * k; ay += cdy * k; }
+    for (let j = 0; j < n; j++) {
+      if (j === i) continue;
+      const o = wells[j], dx = o.x - w.x, dy = o.y - w.y;
+      const d2 = dx * dx + dy * dy + 400, d = Math.sqrt(d2);
+      const f = GW * o.m / d2 / d;
+      ax += dx * f; ay += dy * f;
+    }
+    w.vx = (w.vx + ax * dt) * (1 - WDAMP * dt);
+    w.vy = (w.vy + ay * dt) * (1 - WDAMP * dt);
+    const sp = Math.hypot(w.vx, w.vy);
+    if (sp > WVCAP) { w.vx *= WVCAP / sp; w.vy *= WVCAP / sp; }
+    w.x += w.vx * dt; w.y += w.vy * dt;
+  }
+  /* merges */
+  for (let i = 0; i < wells.length; i++) {
+    for (let j = i + 1; j < wells.length; j++) {
+      const a = wells[i], b = wells[j];
+      if (a.grace > 0 || b.grace > 0) continue;
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const rr = 20 * (Math.sqrt(a.m) + Math.sqrt(b.m));
+      if (dx * dx + dy * dy < rr * rr) {
+        const m = a.m + b.m;
+        const mx = (a.x * a.m + b.x * b.m) / m, my = (a.y * a.m + b.y * b.m) / m;
+        const mvx = (a.vx * a.m + b.vx * b.m) / m, mvy = (a.vy * a.m + b.vy * b.m) / m;
+        burst(mx, my, Math.min(140, (46 * m + 40) | 0), true);
+        a.x = mx; a.y = my; a.vx = mvx; a.vy = mvy; a.m = m; a.grace = .6;
+        wells.splice(j, 1); j--;
+      }
+    }
+  }
+  while (wells.length < 3) {
+    const w = largestWell();
+    if (w && w.m >= 1.5) splitWell(w, t); else spawnWell();
+  }
+}
+
+/* ---------- emitters (sweep along the frame edges) ---------- */
+function initEmitters() {
+  emitters.length = 0;
+  const n = 6;
+  for (let i = 0; i < n; i++) {
+    emitters.push({
+      s: i / n + Math.random() * .06,
+      speed: (.006 + Math.random() * .012) * (Math.random() < .5 ? -1 : 1),
+      spread: .5 + Math.random() * .5,
+      hueOff: (i * 137.508) % 360,
+      wp: Math.random() * TAU,
+      acc: 0
+    });
+  }
+}
+
+/* ---------- particles ---------- */
+function respawn(i, baseHue) {
+  const em = emitters[(Math.random() * emitters.length) | 0];
+  const e = edgePoint(em.s);
+  const jit = (Math.random() - .5) * em.spread;
+  const ca = Math.cos(jit), sa = Math.sin(jit);
+  const dx = e.nx * ca - e.ny * sa, dy = e.nx * sa + e.ny * ca;
+  const sp = 24 + Math.random() * 72;
+  const tv = em.speed * 2 * (W + H) * .5;
+  px[i] = e.x + e.nx * 3 + (Math.random() - .5) * 4;
+  py[i] = e.y + e.ny * 3 + (Math.random() - .5) * 4;
+  vx[i] = dx * sp + e.tx * tv;
+  vy[i] = dy * sp + e.ty * tv;
+  ox[i] = px[i]; oy[i] = py[i];
+  life[i] = maxLife[i] = 6 + Math.random() * 8;
+  hueA[i] = (baseHue + em.hueOff + (Math.random() - .5) * 26 + 720) % 360;
+}
+function burst(x, y, n, big) {
+  for (let k = 0; k < n; k++) {
+    const i = sparkCur++ % pool;
+    const a = Math.random() * TAU;
+    const sp = (big ? 70 : 40) + Math.random() * (big ? 280 : 160);
+    px[i] = x + Math.cos(a) * 3; py[i] = y + Math.sin(a) * 3;
+    vx[i] = Math.cos(a) * sp; vy[i] = Math.sin(a) * sp;
+    ox[i] = px[i]; oy[i] = py[i];
+    life[i] = maxLife[i] = .5 + Math.random() * (big ? 1.1 : .7);
+    hueA[i] = -1;
+  }
+}
+function bucketKey(h, sp) {
+  if (h < 0) return 'hsla(45,100%,88%,0.6)';
+  const hue = (((h / 15) | 0) % 24) * 15 + 7;
+  if (sp > 330) return 'hsla(' + hue + ',100%,80%,0.5)';
+  if (sp > 150) return 'hsla(' + hue + ',92%,63%,0.38)';
+  return 'hsla(' + hue + ',85%,52%,0.27)';
+}
+function updateParticles(dt, t, draw) {
+  const baseHue = t * 5;
+  const wn = wells.length, margin = 90;
+  if (draw) buckets.clear();
+  for (let i = 0; i < pool; i++) {
+    let x = px[i], y = py[i], nvx = vx[i], nvy = vy[i];
+    let ax = 0, ay = 0, cap = false;
+    for (let k = 0; k < wn; k++) {
+      const w = wells[k];
+      const dx = w.x - x, dy = w.y - y;
+      const d2r = dx * dx + dy * dy;
+      if (d2r < CAP2) { cap = true; break; }
+      const d2 = d2r + SOFT2, d = Math.sqrt(d2);
+      let f = G * w.m / d2 / d;
+      if (f > AMAX) f = AMAX;
+      ax += dx * f; ay += dy * f;
+    }
+    if (cap) {
+      captured++;
+      respawn(i, baseHue);
+      continue;
+    }
+    nvx += ax * dt; nvy += ay * dt;
+    const sp2 = nvx * nvx + nvy * nvy;
+    if (sp2 > VMAX * VMAX) { const s = VMAX / Math.sqrt(sp2); nvx *= s; nvy *= s; }
+    x += nvx * dt; y += nvy * dt;
+    life[i] -= dt;
+    if (life[i] <= 0 || x < -margin || x > W + margin || y < -margin || y > H + margin) {
+      respawn(i, baseHue);
+      continue;
+    }
+    px[i] = x; py[i] = y; vx[i] = nvx; vy[i] = nvy;
+    if (!draw) continue;
+    const X = ox[i], Y = oy[i];
+    ox[i] = x; oy[i] = y;
+    const sdx = x - X, sdy = y - Y;
+    if (sdx * sdx + sdy * sdy > 6400) continue;
+    const key = bucketKey(hueA[i], Math.sqrt(sp2));
+    let b = buckets.get(key);
+    if (!b) { b = []; buckets.set(key, b); }
+    b.push(X, Y, x, y);
+  }
+  if (!draw) return;
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.lineWidth = 1.1;
+  for (const [key, seg] of buckets) {
+    ctx.strokeStyle = key;
+    ctx.beginPath();
+    for (let i = 0; i < seg.length; i += 4) {
+      ctx.moveTo(seg[i], seg[i + 1]);
+      ctx.lineTo(seg[i + 2], seg[i + 3]);
+    }
+    ctx.stroke();
+  }
+}
+
+/* ---------- simulation step ---------- */
+function step(dt, draw) {
+  simT += dt;
+  splitT -= dt;
+  if (splitT <= 0) {
+    splitT = 12 + Math.random() * 20;
+    if (wells.length < 5) {
+      const w = largestWell();
+      if (w && w.m >= 2.1) splitWell(w, simT);
+    }
+  }
+  updateWells(dt, simT);
+  for (const em of emitters) {
+    em.s += (em.speed + .025 * Math.sin(simT * .23 + em.wp)) * dt;
+    em.s -= Math.floor(em.s);
+  }
+  if (draw) {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1 - Math.pow(.986, dt * 60);
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, W, H);
+    frameNo++;
+    if (frameNo % 70 === 0) { ctx.globalAlpha = .07; ctx.fillRect(0, 0, W, H); }
+    ctx.globalAlpha = 1;
+  }
+  updateParticles(dt, simT, draw);
+}
+function warm(n) { for (let k = 0; k < n; k++) step(1 / 60, false); }
+
+/* ---------- boot & resize ---------- */
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 1.75);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR);
+  canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.lineCap = 'round';
+  bgGrad = makeGradient();
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, W, H);
+  R0 = Math.min(W, H) * .34;
+  pool = clamp(Math.round(W * H / 650), 1600, MAXP);
+}
+resize();
+seedWells();
+initEmitters();
+for (let i = 0; i < pool; i++) { respawn(i, 0); life[i] = Math.random() * maxLife[i]; }
+warm(300);
+
+let last = performance.now();
+function loop(now) {
+  requestAnimationFrame(loop);
+  const dt = clamp((now - last) / 1000, .001, .033);
+  last = now;
+  step(dt, true);
+}
+requestAnimationFrame(loop);
+
+let rsT;
+window.addEventListener('resize', () => {
+  clearTimeout(rsT);
+  rsT = setTimeout(() => { resize(); warm(60); }, 120);
+});
+
+setInterval(() => {
+  statsEl.textContent = 'wells ' + wells.length +
+    ' \u00b7 stream ' + pool +
+    ' \u00b7 captured ' + captured.toLocaleString('en-US');
+}, 500);
+</script>
+</body>
+</html>

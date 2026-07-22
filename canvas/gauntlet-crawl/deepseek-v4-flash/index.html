@@ -1,0 +1,1382 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dungeon Crawler — Gauntlet</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            background: #000;
+            overflow: hidden;
+            font-family: monospace;
+            touch-action: none;
+        }
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+            background: #111;
+            image-rendering: pixelated;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="game"></canvas>
+    <script>
+        // ─── ASSET MANIFEST ───────────────────────────────────────────────
+        window.ASSET_MANIFEST = {
+            floor: { file: "assets/floor.png", prompt: "A seamless top-down dungeon floor tile made of cracked grey stone slabs, 512x512, dark moody lighting, game asset, pixel art style, no background, square tile." },
+            wall: { file: "assets/wall.png", prompt: "A top-down dungeon wall tile of rough dark brown stone blocks with deep mortar lines, 512x512, moody atmosphere, game asset, pixel art, seamless." },
+            hero: { file: "assets/hero.png", prompt: "A top-down hero sprite, a knight in blue tunic with sword and shield, centered on plain dark background, 512x512, pixel game art, 3/4 view, no background." },
+            ghost: { file: "assets/ghost.png", prompt: "A top-down ghost enemy sprite, translucent white wispy shape with glowing eyes, 512x512, pixel game art, dark plain background, spooky." },
+            grunt: { file: "assets/grunt.png", prompt: "A top-down grunt enemy sprite, a brutish orange ogre with horns, 512x512, pixel game art, dark plain background, menacing." },
+            generator: { file: "assets/generator.png", prompt: "A top-down monster generator, a glowing purple runic circle on a stone pedestal, 512x512, pixel game art, dark background, magical." },
+            key: { file: "assets/key.png", prompt: "A top-down golden key on dark stone floor, 512x512, pixel game art, shiny, simple, game asset." },
+            food: { file: "assets/food.png", prompt: "A top-down roasted turkey leg on dark stone, 512x512, pixel game art, warm tones, game asset, appetizing." },
+            treasure: { file: "assets/treasure.png", prompt: "A top-down treasure chest overflowing with gold coins, 512x512, pixel game art, dark background, loot." },
+            exit: { file: "assets/exit.png", prompt: "A top-down glowing green magical portal swirl on dark stone floor, 512x512, pixel game art, bright, mysterious." }
+        };
+
+        // ─── CANVAS SETUP ────────────────────────────────────────────────
+        const canvas = document.getElementById('game');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // ─── IMAGE LOADING ───────────────────────────────────────────────
+        const images = {};
+        const manifest = window.ASSET_MANIFEST;
+
+        function loadImages() {
+            for (const [key, entry] of Object.entries(manifest)) {
+                const img = new Image();
+                img.crossOrigin = 'anonymous';
+                img.onload = () => { images[key] = img; };
+                img.onerror = () => { /* silently use vector fallback */ };
+                img.src = entry.file;
+            }
+        }
+        loadImages();
+
+        function drawImageOrFallback(slot, ctx, x, y, w, h, drawFallback) {
+            if (images[slot]) {
+                try { ctx.drawImage(images[slot], x, y, w, h); return; } catch (e) { /* fall through */ }
+            }
+            drawFallback(ctx, x, y, w, h);
+        }
+
+        // ─── CONSTANTS ────────────────────────────────────────────────────
+        const TILE = 48;
+        const MAP_W = 48;
+        const MAP_H = 48;
+        const HALF_TILE = TILE / 2;
+        const DRAIN_RATE = 0.6; // health per second
+        const FOOD_HEAL = 25;
+        const TREASURE_SCORE = 100;
+        const KEY_SCORE = 50;
+        const PROJECTILE_SPEED = 240;
+        const HERO_SPEED = 120;
+        const GHOST_SPEED = 40;
+        const GRUNT_SPEED = 55;
+        const SHOOT_COOLDOWN = 0.35;
+        const GENERATOR_SPAWN_INTERVAL = 4.0;
+        const AI_IDLE_TIMEOUT = 10.0;
+        const GAME_OVER_DURATION = 2.5;
+
+        const TILE_FLOOR = 0;
+        const TILE_WALL = 1;
+        const TILE_DOOR = 2;
+        const TILE_EXIT = 3;
+
+        // ─── GAME STATE ──────────────────────────────────────────────────
+        let game = null;
+        let aiActive = true;
+        let lastInputTime = 0;
+        let gameOverTimer = 0;
+        let gameOver = false;
+        let keysDown = {};
+
+        // ─── UTILITY ──────────────────────────────────────────────────────
+        function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+
+        function tileAt(map, x, y) {
+            if (x < 0 || x >= MAP_W || y < 0 || y >= MAP_H) return TILE_WALL;
+            return map[y][x];
+        }
+
+        function isWalkable(map, x, y, hasKey) {
+            const t = tileAt(map, x, y);
+            if (t === TILE_WALL) return false;
+            if (t === TILE_DOOR) return hasKey;
+            return true;
+        }
+
+        function randomInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+
+        function randomChoice(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+
+        // ─── DUNGEON GENERATION ───────────────────────────────────────────
+        function generateDungeon(level) {
+            const map = [];
+            for (let y = 0; y < MAP_H; y++) {
+                map[y] = new Uint8Array(MAP_W);
+                for (let x = 0; x < MAP_W; x++) map[y][x] = TILE_WALL;
+            }
+
+            const rooms = [];
+            const numRooms = Math.min(8 + Math.floor(level / 2), 16);
+            let attempts = 0;
+            while (rooms.length < numRooms && attempts < 200) {
+                attempts++;
+                const w = randomInt(4, 8);
+                const h = randomInt(3, 7);
+                const x = randomInt(1, MAP_W - w - 2);
+                const y = randomInt(1, MAP_H - h - 2);
+                let overlap = false;
+                for (const r of rooms) {
+                    if (x < r.x + r.w + 1 && x + w + 1 > r.x - 1 &&
+                        y < r.y + r.h + 1 && y + h + 1 > r.y - 1) { overlap = true; break; }
+                }
+                if (!overlap) {
+                    for (let ry = y; ry < y + h; ry++)
+                        for (let rx = x; rx < x + w; rx++)
+                            map[ry][rx] = TILE_FLOOR;
+                    rooms.push({ x, y, w, h, cx: Math.floor(x + w / 2), cy: Math.floor(y + h / 2) });
+                }
+            }
+
+            // Connect rooms
+            for (let i = 1; i < rooms.length; i++) {
+                const a = rooms[i - 1];
+                const b = rooms[i];
+                let cx = a.cx,
+                    cy = a.cy;
+                const tx = b.cx,
+                    ty = b.cy;
+                // horizontal then vertical
+                for (let x = Math.min(cx, tx); x <= Math.max(cx, tx); x++)
+                    if (map[cy][x] === TILE_WALL) map[cy][x] = TILE_FLOOR;
+                for (let y = Math.min(cy, ty); y <= Math.max(cy, ty); y++)
+                    if (map[y][tx] === TILE_WALL) map[y][tx] = TILE_FLOOR;
+                // extra connection for variety
+                if (Math.random() < 0.3 && i > 2) {
+                    const c = rooms[Math.floor(Math.random() * i)];
+                    for (let x = Math.min(c.cx, a.cx); x <= Math.max(c.cx, a.cx); x++)
+                        if (map[c.cy][x] === TILE_WALL) map[c.cy][x] = TILE_FLOOR;
+                    for (let y = Math.min(c.cy, a.cy); y <= Math.max(c.cy, a.cy); y++)
+                        if (map[y][a.cx] === TILE_WALL) map[y][a.cx] = TILE_FLOOR;
+                }
+            }
+
+            // Place locked doors at some corridor chokepoints
+            const doors = [];
+            for (let i = 1; i < rooms.length; i++) {
+                if (Math.random() < 0.4) {
+                    const a = rooms[i - 1];
+                    const b = rooms[i];
+                    const mx = Math.floor((a.cx + b.cx) / 2);
+                    const my = Math.floor((a.cy + b.cy) / 2);
+                    if (map[my] && map[my][mx] === TILE_FLOOR) {
+                        map[my][mx] = TILE_DOOR;
+                        doors.push({ x: mx, y: my });
+                    }
+                }
+            }
+
+            // Place exit in furthest room from first room
+            let furthest = rooms[rooms.length - 1];
+            let maxDist = 0;
+            for (const r of rooms) {
+                const d = dist(r.cx, r.cy, rooms[0].cx, rooms[0].cy);
+                if (d > maxDist) { maxDist = d;
+                    furthest = r; }
+            }
+            map[furthest.cy][furthest.cx] = TILE_EXIT;
+            const exitPos = { x: furthest.cx, y: furthest.cy };
+
+            // Hero start
+            const start = { x: rooms[0].cx, y: rooms[0].cy };
+
+            // Place items
+            const items = [];
+            // Keys: one per 2 levels + 1
+            const numKeys = Math.min(1 + Math.floor(level / 2), 4);
+            for (let i = 0; i < numKeys; i++) {
+                const r = rooms[Math.floor(Math.random() * rooms.length)];
+                if (r.cx !== start.x || r.cy !== start.y) {
+                    items.push({ type: 'key', x: r.cx, y: r.cy });
+                }
+            }
+            // Food: 3 + level
+            const numFood = 3 + Math.floor(level / 2);
+            for (let i = 0; i < numFood; i++) {
+                const r = rooms[Math.floor(Math.random() * rooms.length)];
+                let px = randomInt(r.x, r.x + r.w - 1);
+                let py = randomInt(r.y, r.y + r.h - 1);
+                if (map[py][px] === TILE_FLOOR && !(px === start.x && py === start.y)) {
+                    items.push({ type: 'food', x: px, y: py });
+                }
+            }
+            // Treasure: 2 + level
+            const numTreasure = 2 + Math.floor(level / 2);
+            for (let i = 0; i < numTreasure; i++) {
+                const r = rooms[Math.floor(Math.random() * rooms.length)];
+                let px = randomInt(r.x, r.x + r.w - 1);
+                let py = randomInt(r.y, r.y + r.h - 1);
+                if (map[py][px] === TILE_FLOOR && !(px === start.x && py === start.y)) {
+                    items.push({ type: 'treasure', x: px, y: py });
+                }
+            }
+
+            // Generators: 1 + floor(level/2)
+            const numGen = Math.min(1 + Math.floor(level / 2), 6);
+            const generators = [];
+            for (let i = 0; i < numGen; i++) {
+                const r = rooms[Math.floor(Math.random() * rooms.length)];
+                if (r.cx !== start.x || r.cy !== start.y && Math.random() < 0.6) {
+                    generators.push({ x: r.cx, y: r.cy, health: 3, spawnTimer: 0, active: true });
+                } else {
+                    // Place in corridor
+                    for (let attempt = 0; attempt < 20; attempt++) {
+                        const px = randomInt(2, MAP_W - 3);
+                        const py = randomInt(2, MAP_H - 3);
+                        if (map[py][px] === TILE_FLOOR && !(px === start.x && py === start.y) &&
+                            dist(px, py, start.x, start.y) > 8) {
+                            generators.push({ x: px, y: py, health: 3, spawnTimer: 0, active: true });
+                            break;
+                        }
+                    }
+                }
+            }
+
+            return {
+                map,
+                rooms,
+                start,
+                exit: exitPos,
+                items,
+                generators,
+                doors
+            };
+        }
+
+        // ─── ENTITY FACTORIES ─────────────────────────────────────────────
+        function createHero(x, y) {
+            return {
+                x,
+                y,
+                dir: 0, // 0=right,1=down,2=left,3=up
+                health: 100,
+                maxHealth: 100,
+                score: 0,
+                keys: 0,
+                shootCooldown: 0,
+                alive: true,
+                moveDir: { dx: 0, dy: 0 },
+                animFrame: 0
+            };
+        }
+
+        function createEnemy(type, x, y) {
+            return {
+                type, // 'ghost' or 'grunt'
+                x,
+                y,
+                health: type === 'ghost' ? 1 : 2,
+                speed: type === 'ghost' ? GHOST_SPEED : GRUNT_SPEED,
+                dir: Math.floor(Math.random() * 4),
+                animFrame: 0,
+                hitFlash: 0
+            };
+        }
+
+        function createProjectile(x, y, dx, dy, owner) {
+            return {
+                x,
+                y,
+                dx,
+                dy,
+                owner, // 'hero' or 'enemy'
+                life: 2.0,
+                speed: PROJECTILE_SPEED
+            };
+        }
+
+        // ─── GAME INIT ────────────────────────────────────────────────────
+        function newGame() {
+            const level = game ? game.level + 1 : 1;
+            const dungeon = generateDungeon(level);
+            const hero = createHero(dungeon.start.x + 0.5, dungeon.start.y + 0.5);
+            hero.score = game ? game.hero.score : 0;
+            hero.keys = 0;
+            hero.health = game ? Math.min(game.hero.health + 20, 100) : 100;
+
+            const enemies = [];
+            const projectiles = [];
+            gameOver = false;
+            gameOverTimer = 0;
+
+            game = {
+                level,
+                hero,
+                map: dungeon.map,
+                rooms: dungeon.rooms,
+                exit: dungeon.exit,
+                items: dungeon.items,
+                generators: dungeon.generators,
+                enemies,
+                projectiles,
+                doors: dungeon.doors,
+                time: 0,
+                dt: 0,
+                state: 'playing',
+                aiTarget: null,
+                aiState: 'explore',
+                aiTimer: 0,
+                aiExploreDir: { dx: 0, dy: 0 },
+                aiPath: []
+            };
+
+            // Spawn initial enemies near generators
+            for (const gen of game.generators) {
+                if (gen.active) {
+                    const num = 1 + Math.floor(Math.random() * 2);
+                    for (let i = 0; i < num; i++) {
+                        const angle = Math.random() * Math.PI * 2;
+                        const ex = gen.x + 0.5 + Math.cos(angle) * 1.5;
+                        const ey = gen.y + 0.5 + Math.sin(angle) * 1.5;
+                        const type = Math.random() < 0.5 ? 'ghost' : 'grunt';
+                        game.enemies.push(createEnemy(type, ex, ey));
+                    }
+                }
+            }
+            lastInputTime = performance.now();
+            aiActive = true;
+        }
+
+        function resetGame() {
+            game = null;
+            newGame();
+        }
+
+        // ─── UPDATE LOGIC ─────────────────────────────────────────────────
+        function updateGame(dt) {
+            if (!game || gameOver) return;
+            const g = game;
+            g.time += dt;
+            g.hero.shootCooldown = Math.max(0, g.hero.shootCooldown - dt);
+
+            // Health drain
+            g.hero.health -= DRAIN_RATE * dt;
+
+            // Check death
+            if (g.hero.health <= 0) {
+                g.hero.health = 0;
+                g.hero.alive = false;
+                gameOver = true;
+                gameOverTimer = GAME_OVER_DURATION;
+                return;
+            }
+
+            // AI control
+            if (aiActive) updateAI(dt);
+
+            // Hero movement
+            const h = g.hero;
+            let mx = 0,
+                my = 0;
+            if (keysDown['ArrowLeft'] || keysDown['KeyA']) mx = -1;
+            else if (keysDown['ArrowRight'] || keysDown['KeyD']) mx = 1;
+            if (keysDown['ArrowUp'] || keysDown['KeyW']) my = -1;
+            else if (keysDown['ArrowDown'] || keysDown['KeyS']) my = 1;
+
+            if (!aiActive) {
+                h.moveDir.dx = mx;
+                h.moveDir.dy = my;
+                if (mx !== 0 || my !== 0) {
+                    if (mx === 1) h.dir = 0;
+                    else if (mx === -1) h.dir = 2;
+                    if (my === 1) h.dir = 1;
+                    else if (my === -1) h.dir = 3;
+                }
+                // Shoot with space
+                if (keysDown['Space'] && h.shootCooldown <= 0) {
+                    shootHero(h);
+                }
+            }
+
+            // Apply movement
+            const spd = HERO_SPEED * dt;
+            if (h.moveDir.dx !== 0 || h.moveDir.dy !== 0) {
+                const len = Math.hypot(h.moveDir.dx, h.moveDir.dy);
+                const ndx = h.moveDir.dx / len;
+                const ndy = h.moveDir.dy / len;
+                let nx = h.x + ndx * spd;
+                let ny = h.y + ndy * spd;
+                // Collision with walls
+                const rx = Math.floor(nx);
+                const ry = Math.floor(ny);
+                const hasKey = h.keys > 0;
+                if (isWalkable(g.map, rx, ry, hasKey)) {
+                    h.x = nx;
+                    h.y = ny;
+                    // Open door if walking onto it
+                    if (tileAt(g.map, rx, ry) === TILE_DOOR && hasKey) {
+                        g.map[ry][rx] = TILE_FLOOR;
+                        h.keys--;
+                        // Remove door from list
+                        g.doors = g.doors.filter(d => !(d.x === rx && d.y === ry));
+                    }
+                } else {
+                    // Try sliding along axes
+                    if (isWalkable(g.map, Math.floor(h.x + ndx * spd), Math.floor(h.y), hasKey)) {
+                        h.x += ndx * spd;
+                    } else if (isWalkable(g.map, Math.floor(h.x), Math.floor(h.y + ndy * spd), hasKey)) {
+                        h.y += ndy * spd;
+                    }
+                }
+                h.animFrame += dt * 4;
+            }
+
+            // Check exit
+            const exTile = tileAt(g.map, Math.floor(h.x), Math.floor(h.y));
+            if (exTile === TILE_EXIT) {
+                newGame();
+                return;
+            }
+
+            // Item collection
+            for (let i = g.items.length - 1; i >= 0; i--) {
+                const item = g.items[i];
+                if (dist(h.x, h.y, item.x + 0.5, item.y + 0.5) < 0.7) {
+                    if (item.type === 'food') {
+                        h.health = Math.min(h.maxHealth, h.health + FOOD_HEAL);
+                    } else if (item.type === 'treasure') {
+                        h.score += TREASURE_SCORE;
+                    } else if (item.type === 'key') {
+                        h.keys++;
+                        h.score += KEY_SCORE;
+                    }
+                    g.items.splice(i, 1);
+                }
+            }
+
+            // Generators
+            for (const gen of g.generators) {
+                if (!gen.active) continue;
+                gen.spawnTimer += dt;
+                if (gen.spawnTimer >= GENERATOR_SPAWN_INTERVAL) {
+                    gen.spawnTimer = 0;
+                    const angle = Math.random() * Math.PI * 2;
+                    const ex = gen.x + 0.5 + Math.cos(angle) * 0.8;
+                    const ey = gen.y + 0.5 + Math.sin(angle) * 0.8;
+                    const type = Math.random() < 0.5 ? 'ghost' : 'grunt';
+                    if (ex > 0 && ex < MAP_W && ey > 0 && ey < MAP_H) {
+                        g.enemies.push(createEnemy(type, ex, ey));
+                    }
+                }
+            }
+
+            // Enemy movement
+            for (const e of g.enemies) {
+                const dx = h.x - e.x;
+                const dy = h.y - e.y;
+                const d = Math.hypot(dx, dy);
+                if (d > 0.01) {
+                    const ndx = dx / d;
+                    const ndy = dy / d;
+                    const spd = e.speed * dt;
+                    let nx = e.x + ndx * spd;
+                    let ny = e.y + ndy * spd;
+                    if (e.type === 'grunt') {
+                        // Grunts respect walls
+                        const rx = Math.floor(nx);
+                        const ry = Math.floor(ny);
+                        if (isWalkable(g.map, rx, ry, false)) {
+                            e.x = nx;
+                            e.y = ny;
+                        } else {
+                            // Try sliding
+                            if (isWalkable(g.map, Math.floor(e.x + ndx * spd), Math.floor(e.y), false))
+                                e.x += ndx * spd;
+                            else if (isWalkable(g.map, Math.floor(e.x), Math.floor(e.y + ndy * spd), false))
+                                e.y += ndy * spd;
+                            else {
+                                // Pick random direction
+                                const dirs = [
+                                    [1, 0],
+                                    [-1, 0],
+                                    [0, 1],
+                                    [0, -1]
+                                ];
+                                for (const d2 of dirs) {
+                                    const tx = Math.floor(e.x + d2[0] * spd * 2);
+                                    const ty = Math.floor(e.y + d2[1] * spd * 2);
+                                    if (isWalkable(g.map, tx, ty, false)) {
+                                        e.x += d2[0] * spd;
+                                        e.y += d2[1] * spd;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Ghosts pass through walls (slower in walls)
+                        e.x = nx;
+                        e.y = ny;
+                    }
+                    // Clamp
+                    e.x = Math.max(0.1, Math.min(MAP_W - 0.1, e.x));
+                    e.y = Math.max(0.1, Math.min(MAP_H - 0.1, e.y));
+                    e.dir = Math.floor(((Math.atan2(dy, dx) / Math.PI * 2) + 4) % 4);
+                }
+                e.animFrame += dt * 3;
+                if (e.hitFlash > 0) e.hitFlash -= dt;
+            }
+
+            // Enemy-hero collision damage
+            for (const e of g.enemies) {
+                if (dist(h.x, h.y, e.x, e.y) < 0.6) {
+                    h.health -= 8 * dt;
+                    e.hitFlash = 0.1;
+                }
+            }
+
+            // Projectiles
+            for (let i = g.projectiles.length - 1; i >= 0; i--) {
+                const p = g.projectiles[i];
+                p.x += p.dx * p.speed * dt;
+                p.y += p.dy * p.speed * dt;
+                p.life -= dt;
+
+                let remove = false;
+                if (p.life <= 0 || p.x < 0 || p.x >= MAP_W || p.y < 0 || p.y >= MAP_H) {
+                    remove = true;
+                } else {
+                    const rx = Math.floor(p.x);
+                    const ry = Math.floor(p.y);
+                    if (tileAt(g.map, rx, ry) === TILE_WALL) {
+                        remove = true;
+                    } else if (tileAt(g.map, rx, ry) === TILE_DOOR && p.owner === 'hero') {
+                        // Projectiles can destroy doors
+                        g.map[ry][rx] = TILE_FLOOR;
+                        g.doors = g.doors.filter(d => !(d.x === rx && d.y === ry));
+                        remove = true;
+                    }
+
+                    // Hit enemies (hero projectiles)
+                    if (p.owner === 'hero' && !remove) {
+                        for (const e of g.enemies) {
+                            if (dist(p.x, p.y, e.x, e.y) < 0.5) {
+                                e.health--;
+                                e.hitFlash = 0.2;
+                                remove = true;
+                                if (e.health <= 0) {
+                                    g.hero.score += e.type === 'ghost' ? 20 : 30;
+                                    g.enemies.splice(g.enemies.indexOf(e), 1);
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    // Hit generators (hero projectiles)
+                    if (p.owner === 'hero' && !remove) {
+                        for (const gen of g.generators) {
+                            if (!gen.active) continue;
+                            if (Math.abs(p.x - (gen.x + 0.5)) < 0.7 && Math.abs(p.y - (gen.y + 0.5)) < 0.7) {
+                                gen.health--;
+                                remove = true;
+                                if (gen.health <= 0) {
+                                    gen.active = false;
+                                    g.hero.score += 150;
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    // Hit hero (enemy projectiles — not used, but just in case)
+                    if (p.owner === 'enemy' && !remove) {
+                        if (dist(p.x, p.y, h.x, h.y) < 0.5) {
+                            h.health -= 10;
+                            remove = true;
+                        }
+                    }
+                }
+
+                if (remove) {
+                    g.projectiles.splice(i, 1);
+                }
+            }
+
+            // Clean up dead enemies (already removed on health <= 0)
+
+            // Auto-shoot for AI
+            if (aiActive && h.shootCooldown <= 0 && (h.moveDir.dx !== 0 || h.moveDir.dy !== 0)) {
+                shootHero(h);
+            }
+        }
+
+        function shootHero(h) {
+            if (h.shootCooldown > 0) return;
+            let dx = 0,
+                dy = 0;
+            if (h.dir === 0) dx = 1;
+            else if (h.dir === 1) dy = 1;
+            else if (h.dir === 2) dx = -1;
+            else if (h.dir === 3) dy = -1;
+            if (dx === 0 && dy === 0) dx = 1;
+            game.projectiles.push(createProjectile(h.x + dx * 0.4, h.y + dy * 0.4, dx, dy, 'hero'));
+            h.shootCooldown = SHOOT_COOLDOWN;
+        }
+
+        // ─── AI SYSTEM ────────────────────────────────────────────────────
+        function updateAI(dt) {
+            if (!game || gameOver) return;
+            const g = game;
+            const h = g.hero;
+            g.aiTimer += dt;
+
+            // Decide target
+            let target = null;
+            let targetType = 'explore';
+
+            // 1. Food if health < 70
+            if (h.health < 70) {
+                let closest = null,
+                    cd = Infinity;
+                for (const item of g.items) {
+                    if (item.type === 'food') {
+                        const d = dist(h.x, h.y, item.x + 0.5, item.y + 0.5);
+                        if (d < cd) { cd = d;
+                            closest = item; }
+                    }
+                }
+                if (closest && cd < 20) { target = closest;
+                    targetType = 'food'; }
+            }
+
+            // 2. Keys if keys == 0 and doors exist
+            if (!target && h.keys === 0 && g.doors.length > 0) {
+                let closest = null,
+                    cd = Infinity;
+                for (const item of g.items) {
+                    if (item.type === 'key') {
+                        const d = dist(h.x, h.y, item.x + 0.5, item.y + 0.5);
+                        if (d < cd) { cd = d;
+                            closest = item; }
+                    }
+                }
+                if (closest && cd < 25) { target = closest;
+                    targetType = 'key'; }
+            }
+
+            // 3. Treasure nearby
+            if (!target) {
+                let closest = null,
+                    cd = Infinity;
+                for (const item of g.items) {
+                    if (item.type === 'treasure') {
+                        const d = dist(h.x, h.y, item.x + 0.5, item.y + 0.5);
+                        if (d < cd) { cd = d;
+                            closest = item; }
+                    }
+                }
+                if (closest && cd < 12) { target = closest;
+                    targetType = 'treasure'; }
+            }
+
+            // 4. Generators to destroy
+            if (!target) {
+                let closest = null,
+                    cd = Infinity;
+                for (const gen of g.generators) {
+                    if (!gen.active) continue;
+                    const d = dist(h.x, h.y, gen.x + 0.5, gen.y + 0.5);
+                    if (d < cd) { cd = d;
+                        closest = gen; }
+                }
+                if (closest && cd < 18) { target = closest;
+                    targetType = 'generator'; }
+            }
+
+            // 5. Enemies nearby
+            if (!target) {
+                let closest = null,
+                    cd = Infinity;
+                for (const e of g.enemies) {
+                    const d = dist(h.x, h.y, e.x, e.y);
+                    if (d < cd) { cd = d;
+                        closest = e; }
+                }
+                if (closest && cd < 10) { target = closest;
+                    targetType = 'enemy'; }
+            }
+
+            // 6. Exit if accessible
+            if (!target && g.doors.length === 0) {
+                const d = dist(h.x, h.y, g.exit.x + 0.5, g.exit.y + 0.5);
+                if (d < 30) { target = { x: g.exit.x + 0.5, y: g.exit.y + 0.5 };
+                    targetType = 'exit'; }
+            }
+
+            // 7. Explore — wander toward unexplored areas
+            if (!target) {
+                if (g.aiTimer > 3 || !g.aiExploreDir.dx) {
+                    g.aiTimer = 0;
+                    const dirs = [
+                        [1, 0],
+                        [-1, 0],
+                        [0, 1],
+                        [0, -1]
+                    ];
+                    const d = randomChoice(dirs);
+                    g.aiExploreDir = { dx: d[0], dy: d[1] };
+                }
+                // Check if explore direction is blocked
+                const nx = Math.floor(h.x + g.aiExploreDir.dx * 2);
+                const ny = Math.floor(h.y + g.aiExploreDir.dy * 2);
+                if (!isWalkable(g.map, nx, ny, false)) {
+                    const dirs = [
+                        [1, 0],
+                        [-1, 0],
+                        [0, 1],
+                        [0, -1]
+                    ];
+                    const d = randomChoice(dirs);
+                    g.aiExploreDir = { dx: d[0], dy: d[1] };
+                }
+                h.moveDir.dx = g.aiExploreDir.dx;
+                h.moveDir.dy = g.aiExploreDir.dy;
+                if (g.aiExploreDir.dx === 1) h.dir = 0;
+                else if (g.aiExploreDir.dx === -1) h.dir = 2;
+                if (g.aiExploreDir.dy === 1) h.dir = 1;
+                else if (g.aiExploreDir.dy === -1) h.dir = 3;
+                // Shoot in movement direction
+                if (h.shootCooldown <= 0) shootHero(h);
+                return;
+            }
+
+            // Move toward target
+            if (target) {
+                let tx = target.x;
+                let ty = target.y;
+                if (target.hasOwnProperty('x') && !target.hasOwnProperty('cx')) {
+                    // item or enemy
+                    if (target.type === 'key' || target.type === 'food' || target.type === 'treasure') {
+                        tx = target.x + 0.5;
+                        ty = target.y + 0.5;
+                    } else if (target.type === 'generator') {
+                        tx = target.x + 0.5;
+                        ty = target.y + 0.5;
+                    } else if (target.type === 'enemy') {
+                        tx = target.x;
+                        ty = target.y;
+                    }
+                }
+                const dx = tx - h.x;
+                const dy = ty - h.y;
+                const d = Math.hypot(dx, dy);
+                if (d > 0.5) {
+                    const ndx = dx / d;
+                    const ndy = dy / d;
+                    // Pick major axis
+                    if (Math.abs(ndx) > Math.abs(ndy)) {
+                        h.moveDir.dx = Math.sign(ndx);
+                        h.moveDir.dy = 0;
+                        h.dir = ndx > 0 ? 0 : 2;
+                    } else {
+                        h.moveDir.dx = 0;
+                        h.moveDir.dy = Math.sign(ndy);
+                        h.dir = ndy > 0 ? 1 : 3;
+                    }
+                    // Check if direct path is blocked, try other axis
+                    const rx = Math.floor(h.x + h.moveDir.dx * 1.5);
+                    const ry = Math.floor(h.y + h.moveDir.dy * 1.5);
+                    if (!isWalkable(g.map, rx, ry, h.keys > 0)) {
+                        if (Math.abs(ndx) > Math.abs(ndy)) {
+                            h.moveDir.dx = 0;
+                            h.moveDir.dy = Math.sign(ndy) || 1;
+                            h.dir = h.moveDir.dy > 0 ? 1 : 3;
+                        } else {
+                            h.moveDir.dx = Math.sign(ndx) || 1;
+                            h.moveDir.dy = 0;
+                            h.dir = h.moveDir.dx > 0 ? 0 : 2;
+                        }
+                    }
+                } else {
+                    // At target
+                    if (targetType === 'generator' || targetType === 'enemy') {
+                        // Shoot
+                        h.moveDir.dx = 0;
+                        h.moveDir.dy = 0;
+                        if (h.shootCooldown <= 0) {
+                            // Face target
+                            const dx2 = tx - h.x;
+                            const dy2 = ty - h.y;
+                            if (Math.abs(dx2) > Math.abs(dy2)) h.dir = dx2 > 0 ? 0 : 2;
+                            else h.dir = dy2 > 0 ? 1 : 3;
+                            shootHero(h);
+                        }
+                    } else {
+                        // Pick new direction
+                        g.aiTimer = 100;
+                        target = null;
+                    }
+                }
+                // Shoot toward target if facing it and in range
+                if (target && (targetType === 'generator' || targetType === 'enemy') && h.shootCooldown <= 0) {
+                    const dx2 = tx - h.x;
+                    const dy2 = ty - h.y;
+                    if (Math.abs(dx2) > Math.abs(dy2)) h.dir = dx2 > 0 ? 0 : 2;
+                    else h.dir = dy2 > 0 ? 1 : 3;
+                    shootHero(h);
+                }
+            }
+        }
+
+        // ─── RENDERING ────────────────────────────────────────────────────
+        function render() {
+            if (!game) return;
+            const g = game;
+            const W = canvas.width;
+            const H = canvas.height;
+
+            ctx.clearRect(0, 0, W, H);
+            ctx.fillStyle = '#0a0a0a';
+            ctx.fillRect(0, 0, W, H);
+
+            // Camera follow hero
+            const h = g.hero;
+            const camX = h.x * TILE - W / 2;
+            const camY = h.y * TILE - H / 2;
+            // Clamp to map
+            const maxCamX = MAP_W * TILE - W;
+            const maxCamY = MAP_H * TILE - H;
+            const ccx = Math.max(0, Math.min(maxCamX, camX));
+            const ccy = Math.max(0, Math.min(maxCamY, camY));
+
+            ctx.save();
+            ctx.translate(-ccx, -ccy);
+
+            // Visible tile range
+            const tx0 = Math.max(0, Math.floor(ccx / TILE) - 1);
+            const ty0 = Math.max(0, Math.floor(ccy / TILE) - 1);
+            const tx1 = Math.min(MAP_W - 1, Math.ceil((ccx + W) / TILE) + 1);
+            const ty1 = Math.min(MAP_H - 1, Math.ceil((ccy + H) / TILE) + 1);
+
+            // Draw tiles
+            for (let y = ty0; y <= ty1; y++) {
+                for (let x = tx0; x <= tx1; x++) {
+                    const t = g.map[y][x];
+                    const px = x * TILE;
+                    const py = y * TILE;
+                    if (t === TILE_WALL) {
+                        drawImageOrFallback('wall', ctx, px, py, TILE, TILE, (ctx, x, y) => {
+                            ctx.fillStyle = '#3a2a1a';
+                            ctx.fillRect(x, y, TILE, TILE);
+                            ctx.strokeStyle = '#2a1a0a';
+                            ctx.lineWidth = 1;
+                            ctx.strokeRect(x + 2, y + 2, TILE - 4, TILE - 4);
+                            ctx.fillStyle = '#4a3a2a';
+                            ctx.fillRect(x + 4, y + 4, TILE - 8, TILE - 8);
+                            // Brick lines
+                            ctx.strokeStyle = '#2a1a0a';
+                            ctx.lineWidth = 1;
+                            ctx.beginPath();
+                            ctx.moveTo(x, y + TILE / 2);
+                            ctx.lineTo(x + TILE, y + TILE / 2);
+                            ctx.moveTo(x + TILE / 2, y);
+                            ctx.lineTo(x + TILE / 2, y + TILE / 2);
+                            ctx.stroke();
+                        });
+                    } else if (t === TILE_FLOOR) {
+                        drawImageOrFallback('floor', ctx, px, py, TILE, TILE, (ctx, x, y) => {
+                            const shade = ((x + y) % 2 === 0) ? '#2a2a2a' : '#222222';
+                            ctx.fillStyle = shade;
+                            ctx.fillRect(x, y, TILE, TILE);
+                            ctx.fillStyle = '#333333';
+                            ctx.fillRect(x + 8, y + 8, 4, 4);
+                            ctx.fillRect(x + 28, y + 20, 3, 3);
+                            ctx.fillRect(x + 16, y + 36, 5, 5);
+                        });
+                    } else if (t === TILE_DOOR) {
+                        drawImageOrFallback('floor', ctx, px, py, TILE, TILE, (ctx, x, y) => {
+                            const shade = ((x + y) % 2 === 0) ? '#2a2a2a' : '#222222';
+                            ctx.fillStyle = shade;
+                            ctx.fillRect(x, y, TILE, TILE);
+                        });
+                        // Door overlay
+                        ctx.fillStyle = '#8a6a2a';
+                        ctx.fillRect(px + 4, py + 4, TILE - 8, TILE - 8);
+                        ctx.fillStyle = '#b8963a';
+                        ctx.fillRect(px + 8, py + 8, TILE - 16, TILE - 16);
+                        // Keyhole
+                        ctx.fillStyle = '#3a2a0a';
+                        ctx.beginPath();
+                        ctx.arc(px + TILE / 2, py + TILE / 2, 4, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.fillStyle = '#c8a84a';
+                        ctx.font = '20px monospace';
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'middle';
+                        ctx.fillText('🔒', px + TILE / 2, py + TILE / 2);
+                    } else if (t === TILE_EXIT) {
+                        drawImageOrFallback('exit', ctx, px, py, TILE, TILE, (ctx, x, y) => {
+                            const shade = ((x + y) % 2 === 0) ? '#2a2a2a' : '#222222';
+                            ctx.fillStyle = shade;
+                            ctx.fillRect(x, y, TILE, TILE);
+                            // Glowing portal
+                            const pulse = Math.sin(g.time * 2) * 0.3 + 0.7;
+                            ctx.fillStyle = `rgba(0,255,100,${pulse * 0.5})`;
+                            ctx.beginPath();
+                            ctx.arc(x + TILE / 2, y + TILE / 2, TILE / 3, 0, Math.PI * 2);
+                            ctx.fill();
+                            ctx.fillStyle = `rgba(0,255,150,${pulse * 0.8})`;
+                            ctx.beginPath();
+                            ctx.arc(x + TILE / 2, y + TILE / 2, TILE / 5, 0, Math.PI * 2);
+                            ctx.fill();
+                            ctx.fillStyle = '#ffffff';
+                            ctx.font = '24px monospace';
+                            ctx.textAlign = 'center';
+                            ctx.textBaseline = 'middle';
+                            ctx.fillText('⬇', x + TILE / 2, y + TILE / 2 + 2);
+                        });
+                    }
+                }
+            }
+
+            // Items
+            for (const item of g.items) {
+                const px = item.x * TILE;
+                const py = item.y * TILE;
+                if (item.type === 'food') {
+                    drawImageOrFallback('food', ctx, px + 4, py + 4, TILE - 8, TILE - 8, (ctx, x, y) => {
+                        ctx.fillStyle = '#8b4513';
+                        ctx.beginPath();
+                        ctx.ellipse(x + 16, y + 14, 12, 8, 0, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.fillStyle = '#a0522d';
+                        ctx.beginPath();
+                        ctx.ellipse(x + 12, y + 10, 6, 4, -0.3, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.fillStyle = '#6b3410';
+                        ctx.fillRect(x + 14, y + 18, 4, 10);
+                        ctx.fillStyle = '#ff6600';
+                        ctx.font = '20px monospace';
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'middle';
+                        ctx.fillText('🍗', x + 16, y + 16);
+                    });
+                } else if (item.type === 'treasure') {
+                    drawImageOrFallback('treasure', ctx, px + 4, py + 4, TILE - 8, TILE - 8, (ctx, x, y) => {
+                        ctx.fillStyle = '#8a6a2a';
+                        ctx.fillRect(x + 4, y + 8, 24, 16);
+                        ctx.fillStyle = '#c8a84a';
+                        ctx.fillRect(x + 6, y + 10, 20, 12);
+                        ctx.fillStyle = '#ffd700';
+                        ctx.font = '18px monospace';
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'middle';
+                        ctx.fillText('💰', x + 16, y + 16);
+                    });
+                } else if (item.type === 'key') {
+                    drawImageOrFallback('key', ctx, px + 4, py + 4, TILE - 8, TILE - 8, (ctx, x, y) => {
+                        ctx.fillStyle = '#ffd700';
+                        ctx.beginPath();
+                        ctx.arc(x + 12, y + 12, 6, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.fillStyle = '#daa520';
+                        ctx.fillRect(x + 16, y + 8, 14, 4);
+                        ctx.fillRect(x + 24, y + 8, 4, 12);
+                        ctx.font = '20px monospace';
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'middle';
+                        ctx.fillText('🔑', x + 16, y + 16);
+                    });
+                }
+            }
+
+            // Generators
+            for (const gen of g.generators) {
+                if (!gen.active) continue;
+                const px = gen.x * TILE;
+                const py = gen.y * TILE;
+                const pulse = Math.sin(g.time * 3 + gen.x) * 0.2 + 0.8;
+                drawImageOrFallback('generator', ctx, px + 2, py + 2, TILE - 4, TILE - 4, (ctx, x, y) => {
+                    ctx.fillStyle = '#2a1a3a';
+                    ctx.fillRect(x + 4, y + 12, 24, 16);
+                    ctx.fillStyle = `rgba(120,40,200,${pulse * 0.6})`;
+                    ctx.beginPath();
+                    ctx.arc(x + 16, y + 20, 10, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = `rgba(180,80,255,${pulse * 0.4})`;
+                    ctx.beginPath();
+                    ctx.arc(x + 16, y + 20, 6, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = '#aa66ff';
+                    ctx.font = '16px monospace';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText('🌀', x + 16, y + 20);
+                });
+                // Health bar
+                ctx.fillStyle = 'rgba(0,0,0,0.6)';
+                ctx.fillRect(px + 4, py - 4, TILE - 8, 4);
+                ctx.fillStyle = '#ff4444';
+                ctx.fillRect(px + 4, py - 4, (TILE - 8) * (gen.health / 3), 4);
+            }
+
+            // Enemies
+            for (const e of g.enemies) {
+                const px = e.x * TILE - HALF_TILE;
+                const py = e.y * TILE - HALF_TILE;
+                const flash = e.hitFlash > 0;
+                if (e.type === 'ghost') {
+                    drawImageOrFallback('ghost', ctx, px, py, TILE, TILE, (ctx, x, y) => {
+                        const alpha = 0.7 + Math.sin(e.animFrame) * 0.15;
+                        ctx.globalAlpha = flash ? 1.0 : alpha;
+                        ctx.fillStyle = flash ? '#ffffff' : '#ccccdd';
+                        ctx.beginPath();
+                        ctx.arc(x + HALF_TILE, y + HALF_TILE - 4, HALF_TILE - 4, 0, Math.PI * 2);
+                        ctx.fill();
+                        // Wavy bottom
+                        ctx.fillRect(x + 6, y + HALF_TILE - 4, TILE - 12, 10);
+                        ctx.fillStyle = flash ? '#ffffff' : 'rgba(200,200,230,0.6)';
+                        ctx.beginPath();
+                        ctx.arc(x + HALF_TILE - 6, y + HALF_TILE - 6, 4, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.beginPath();
+                        ctx.arc(x + HALF_TILE + 6, y + HALF_TILE - 6, 4, 0, Math.PI * 2);
+                        ctx.fill();
+                        // Eyes
+                        ctx.fillStyle = '#ff4444';
+                        ctx.beginPath();
+                        ctx.arc(x + HALF_TILE - 5, y + HALF_TILE - 8, 2, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.beginPath();
+                        ctx.arc(x + HALF_TILE + 5, y + HALF_TILE - 8, 2, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.globalAlpha = 1.0;
+                    });
+                } else {
+                    drawImageOrFallback('grunt', ctx, px, py, TILE, TILE, (ctx, x, y) => {
+                        ctx.fillStyle = flash ? '#ffffff' : '#cc6633';
+                        ctx.fillRect(x + 6, y + 8, TILE - 12, TILE - 16);
+                        ctx.fillStyle = flash ? '#ffffff' : '#884422';
+                        ctx.fillRect(x + 4, y + 4, TILE - 8, 10);
+                        // Eyes
+                        ctx.fillStyle = '#ffcc00';
+                        ctx.fillRect(x + 10, y + 10, 6, 4);
+                        ctx.fillRect(x + 24, y + 10, 6, 4);
+                        ctx.fillStyle = '#000';
+                        ctx.fillRect(x + 12, y + 11, 3, 3);
+                        ctx.fillRect(x + 26, y + 11, 3, 3);
+                        // Arms
+                        ctx.fillStyle = flash ? '#ffffff' : '#aa5522';
+                        ctx.fillRect(x + 2, y + 14, 6, 12);
+                        ctx.fillRect(x + TILE - 8, y + 14, 6, 12);
+                        // Legs
+                        ctx.fillRect(x + 8, y + TILE - 10, 8, 8);
+                        ctx.fillRect(x + 24, y + TILE - 10, 8, 8);
+                    });
+                }
+            }
+
+            // Hero
+            if (h.alive) {
+                const px = h.x * TILE - HALF_TILE;
+                const py = h.y * TILE - HALF_TILE;
+                drawImageOrFallback('hero', ctx, px, py, TILE, TILE, (ctx, x, y) => {
+                    // Body
+                    ctx.fillStyle = '#2244aa';
+                    ctx.fillRect(x + 8, y + 10, TILE - 16, TILE - 18);
+                    // Head
+                    ctx.fillStyle = '#eebb88';
+                    ctx.beginPath();
+                    ctx.arc(x + HALF_TILE, y + 10, 8, 0, Math.PI * 2);
+                    ctx.fill();
+                    // Helmet
+                    ctx.fillStyle = '#8888cc';
+                    ctx.fillRect(x + 8, y + 2, TILE - 16, 8);
+                    ctx.fillRect(x + 6, y + 4, 4, 6);
+                    ctx.fillRect(x + TILE - 10, y + 4, 4, 6);
+                    // Eyes
+                    ctx.fillStyle = '#2244aa';
+                    const eyeOff = h.dir === 0 ? 2 : h.dir === 2 ? -2 : 0;
+                    ctx.fillRect(x + HALF_TILE - 4 + eyeOff, y + 8, 3, 3);
+                    ctx.fillRect(x + HALF_TILE + 2 + eyeOff, y + 8, 3, 3);
+                    // Sword
+                    ctx.fillStyle = '#cccccc';
+                    if (h.dir === 0) {
+                        ctx.fillRect(x + TILE - 4, y + 10, 8, 4);
+                        ctx.fillRect(x + TILE + 2, y + 8, 4, 8);
+                    } else if (h.dir === 2) {
+                        ctx.fillRect(x - 4, y + 10, 8, 4);
+                        ctx.fillRect(x - 2, y + 8, 4, 8);
+                    } else if (h.dir === 1) {
+                        ctx.fillRect(x + 10, y + TILE - 4, 4, 8);
+                        ctx.fillRect(x + 8, y + TILE + 2, 8, 4);
+                    } else {
+                        ctx.fillRect(x + 10, y - 4, 4, 8);
+                        ctx.fillRect(x + 8, y - 2, 8, 4);
+                    }
+                    // Shield
+                    ctx.fillStyle = '#aa2222';
+                    if (h.dir === 0) {
+                        ctx.fillRect(x + 4, y + 12, 6, 14);
+                    } else if (h.dir === 2) {
+                        ctx.fillRect(x + TILE - 10, y + 12, 6, 14);
+                    } else if (h.dir === 1) {
+                        ctx.fillRect(x + 6, y + 4, 14, 6);
+                    } else {
+                        ctx.fillRect(x + 6, y + TILE - 10, 14, 6);
+                    }
+                    // Boots
+                    ctx.fillStyle = '#664422';
+                    ctx.fillRect(x + 8, y + TILE - 8, 8, 6);
+                    ctx.fillRect(x + 24, y + TILE - 8, 8, 6);
+                    // Direction indicator
+                    ctx.fillStyle = '#ffff44';
+                    const dx = h.dir === 0 ? 10 : h.dir === 2 ? -10 : 0;
+                    const dy = h.dir === 1 ? 10 : h.dir === 3 ? -10 : 0;
+                    ctx.fillRect(x + HALF_TILE - 2 + dx, y + HALF_TILE - 2 + dy, 4, 4);
+                });
+            }
+
+            // Projectiles
+            for (const p of g.projectiles) {
+                const px = p.x * TILE - 4;
+                const py = p.y * TILE - 4;
+                ctx.fillStyle = p.owner === 'hero' ? '#ffff44' : '#ff4444';
+                ctx.shadowColor = p.owner === 'hero' ? '#ffff00' : '#ff0000';
+                ctx.shadowBlur = 8;
+                ctx.beginPath();
+                ctx.arc(px + 4, py + 4, 5, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.shadowBlur = 0;
+                // Trail
+                ctx.fillStyle = p.owner === 'hero' ? 'rgba(255,255,68,0.3)' : 'rgba(255,68,68,0.3)';
+                ctx.beginPath();
+                ctx.arc(px + 4 - p.dx * 4, py + 4 - p.dy * 4, 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            ctx.restore();
+
+            // ─── HUD ──────────────────────────────────────────────────────
+            const hudY = 18;
+            ctx.fillStyle = 'rgba(0,0,0,0.7)';
+            ctx.fillRect(8, 4, W - 16, 40);
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 18px monospace';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+
+            // Health bar
+            const hpPct = h.health / h.maxHealth;
+            ctx.fillStyle = '#333';
+            ctx.fillRect(80, 18, 160, 16);
+            const hpColor = hpPct > 0.5 ? '#44cc44' : hpPct > 0.25 ? '#cccc44' : '#cc4444';
+            ctx.fillStyle = hpColor;
+            ctx.fillRect(80, 18, 160 * hpPct, 16);
+            ctx.strokeStyle = '#888';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(80, 18, 160, 16);
+            ctx.fillStyle = '#fff';
+            ctx.font = '12px monospace';
+            ctx.fillText(`❤ ${Math.floor(h.health)}`, 84, 26);
+
+            ctx.font = 'bold 18px monospace';
+            ctx.fillStyle = '#ffd700';
+            ctx.textAlign = 'left';
+            ctx.fillText(`💰 ${h.score}`, 260, 22);
+
+            ctx.fillStyle = '#ffdd44';
+            ctx.fillText(`🔑 ${h.keys}`, 400, 22);
+
+            ctx.fillStyle = '#88ff88';
+            ctx.fillText(`🏰 Lv ${g.level}`, 520, 22);
+
+            // Attract mode indicator
+            if (aiActive) {
+                ctx.fillStyle = 'rgba(255,255,100,0.6)';
+                ctx.font = '14px monospace';
+                ctx.textAlign = 'right';
+                ctx.fillText('🤖 AI', W - 16, 22);
+            } else {
+                ctx.fillStyle = 'rgba(100,200,255,0.8)';
+                ctx.font = '14px monospace';
+                ctx.textAlign = 'right';
+                ctx.fillText('🎮 PLAYER', W - 16, 22);
+            }
+
+            // Enemy count
+            ctx.fillStyle = '#ff8888';
+            ctx.font = '14px monospace';
+            ctx.textAlign = 'right';
+            ctx.fillText(`👾 ${g.enemies.length}`, W - 16, 44);
+
+            // Generators count
+            const activeGens = g.generators.filter(g2 => g2.active).length;
+            ctx.fillStyle = '#aa66ff';
+            ctx.font = '14px monospace';
+            ctx.textAlign = 'right';
+            ctx.fillText(`🌀 ${activeGens}`, W - 120, 44);
+
+            // Game Over overlay
+            if (gameOver) {
+                ctx.fillStyle = 'rgba(0,0,0,0.7)';
+                ctx.fillRect(0, 0, W, H);
+                ctx.fillStyle = '#ff2222';
+                ctx.font = 'bold 72px monospace';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                const pulse = Math.sin(g.time * 6) * 0.2 + 0.8;
+                ctx.globalAlpha = pulse;
+                ctx.fillText('GAME OVER', W / 2, H / 2 - 20);
+                ctx.globalAlpha = 1;
+                ctx.fillStyle = '#ffaa44';
+                ctx.font = '24px monospace';
+                ctx.fillText(`Score: ${h.score}  Level: ${g.level}`, W / 2, H / 2 + 50);
+                ctx.fillStyle = '#aaa';
+                ctx.font = '18px monospace';
+                ctx.fillText('Restarting...', W / 2, H / 2 + 100);
+            }
+        }
+
+        // ─── GAME LOOP ────────────────────────────────────────────────────
+        let lastTime = 0;
+
+        function gameLoop(timestamp) {
+            const dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+            lastTime = timestamp;
+
+            // Handle game over timer
+            if (gameOver) {
+                gameOverTimer -= dt;
+                if (gameOverTimer <= 0) {
+                    resetGame();
+                }
+                render();
+                requestAnimationFrame(gameLoop);
+                return;
+            }
+
+            // Check AI timeout
+            if (!aiActive) {
+                const now = performance.now();
+                if (now - lastInputTime > AI_IDLE_TIMEOUT * 1000) {
+                    aiActive = true;
+                }
+            }
+
+            if (game) updateGame(dt);
+            render();
+            requestAnimationFrame(gameLoop);
+        }
+
+        // ─── INPUT HANDLING ───────────────────────────────────────────────
+        function onKeyDown(e) {
+            const key = e.code;
+            if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space'].includes(key)) {
+                e.preventDefault();
+                if (!keysDown[key]) {
+                    keysDown[key] = true;
+                    // Human takeover
+                    aiActive = false;
+                    lastInputTime = performance.now();
+                    // Shoot on space
+                    if (key === 'Space' && game && !gameOver && game.hero.alive) {
+                        shootHero(game.hero);
+                    }
+                }
+            }
+        }
+
+        function onKeyUp(e) {
+            const key = e.code;
+            if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space'].includes(key)) {
+                e.preventDefault();
+                keysDown[key] = false;
+            }
+        }
+
+        document.addEventListener('keydown', onKeyDown);
+        document.addEventListener('keyup', onKeyUp);
+
+        // Also handle window blur to release keys
+        window.addEventListener('blur', () => {
+            keysDown = {};
+        });
+
+        // ─── START ────────────────────────────────────────────────────────
+        resetGame();
+        lastTime = performance.now();
+        requestAnimationFrame(gameLoop);
+
+        // ─── TOUCH SUPPORT (basic) ─────────────────────────────────────────
+        let touchStartX = 0,
+            touchStartY = 0;
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            const t = e.touches[0];
+            touchStartX = t.clientX;
+            touchStartY = t.clientY;
+            // Tap to shoot
+            if (game && !gameOver && game.hero.alive) {
+                aiActive = false;
+                lastInputTime = performance.now();
+                shootHero(game.hero);
+            }
+        }, { passive: false });
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            const t = e.touches[0];
+            const dx = t.clientX - touchStartX;
+            const dy = t.clientY - touchStartY;
+            const threshold = 20;
+            if (Math.abs(dx) > threshold || Math.abs(dy) > threshold) {
+                if (Math.abs(dx) > Math.abs(dy)) {
+                    if (dx > 0) { keysDown['ArrowRight'] = true;
+                        keysDown['ArrowLeft'] = false; } else { keysDown['ArrowLeft'] = true;
+                        keysDown['ArrowRight'] = false; }
+                    keysDown['ArrowUp'] = false;
+                    keysDown['ArrowDown'] = false;
+                } else {
+                    if (dy > 0) { keysDown['ArrowDown'] = true;
+                        keysDown['ArrowUp'] = false; } else { keysDown['ArrowUp'] = true;
+                        keysDown['ArrowDown'] = false; }
+                    keysDown['ArrowLeft'] = false;
+                    keysDown['ArrowRight'] = false;
+                }
+                aiActive = false;
+                lastInputTime = performance.now();
+                touchStartX = t.clientX;
+                touchStartY = t.clientY;
+            }
+        }, { passive: false });
+        canvas.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            keysDown['ArrowUp'] = false;
+            keysDown['ArrowDown'] = false;
+            keysDown['ArrowLeft'] = false;
+            keysDown['ArrowRight'] = false;
+        }, { passive: false });
+
+        console.log('🕹️ Dungeon Crawler started — AI plays by default. Press arrow/WASD + Space to take over.');
+        console.log('📦 Asset manifest:', window.ASSET_MANIFEST);
+    </script>
+</body>
+</html>

@@ -1,0 +1,1105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dungeon Gauntlet — Endless Attract Mode</title>
+<style>
+  html,body{margin:0;padding:0;width:100%;height:100%;background:#05040a;overflow:hidden;}
+  canvas{display:block;}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+window.ASSET_MANIFEST = {
+  floor:     { file: "assets/floor.png",     prompt: "Seamless tileable top-down dungeon floor game texture, dark slate-blue stone slabs with subtle cracks, chips and faint moss in the grout lines, muted indigo-grey palette, flat even ambient lighting, no directional shadows, edges must tile perfectly, crisp 2D game asset, 512x512" },
+  wall:      { file: "assets/wall.png",      prompt: "Seamless tileable top-down dungeon wall block game texture, ancient heavy brick masonry seen from directly above, deep purple-grey stone bricks with dark mortar lines and a slightly lighter beveled upper edge, high contrast, flat even lighting, edges must tile perfectly, crisp 2D game asset, 512x512" },
+  hero:      { file: "assets/hero.png",      prompt: "Top-down view fantasy hero game sprite, brave knight with blue tunic, silver helmet with red plume and raised sword pointing upward, seen from directly above, centered with even margins, bold clean readable shapes, saturated colors, solid very dark background, 2D game asset sprite, 512x512" },
+  ghost:     { file: "assets/ghost.png",     prompt: "Top-down view cartoon ghost enemy game sprite, translucent pale cyan wispy apparition with two dark hollow eyes and a wavy trailing tail, centered, soft eerie glow, bold clean shapes, solid very dark background, 2D game asset sprite, 512x512" },
+  grunt:     { file: "assets/grunt.png",     prompt: "Top-down view orc brute enemy game sprite, hulking green-skinned monster with thick arms, angry red eyes and small tusks seen from directly above, centered, chunky bold silhouette, solid very dark background, 2D game asset sprite, 512x512" },
+  generator: { file: "assets/generator.png", prompt: "Top-down view monster generator game sprite, sinister mound of horned demon skulls with glowing red eyes and wisps of green smoke rising, sitting on a dark stone base, centered, solid very dark background, 2D game asset sprite, 512x512" },
+  key:       { file: "assets/key.png",       prompt: "Ornate golden skeleton key game pickup sprite, decorative bow, long shaft with two teeth and a tiny magical sparkle, slight three-quarter top-down view, centered, warm gold palette with bright highlights, solid very dark background, 2D game asset, 512x512" },
+  food:      { file: "assets/food.png",      prompt: "Top-down view roasted meat drumstick on a round wooden plate game pickup sprite, glossy browned skin with highlight, clean white bone, centered, appetizing warm palette, solid very dark background, 2D game asset, 512x512" },
+  treasure:  { file: "assets/treasure.png",  prompt: "Top-down view overflowing treasure chest game pickup sprite, open wooden coffer with brass trim, gold coins and colorful gems spilling out, glinting star highlights, centered, solid very dark background, 2D game asset, 512x512" },
+  exit:      { file: "assets/exit.png",      prompt: "Top-down view dungeon exit game tile, worn stone staircase descending into a swirling violet magic portal ringed with glowing runes, luminous purple accent on dark stone, centered, edges dark so it tiles on a floor, solid very dark background, 2D game asset, 512x512" }
+};
+
+(() => {
+'use strict';
+
+/* ============================== constants & utils ============================== */
+const TILE = 56;                                  // on-screen tile size (>= 48px)
+const T = { WALL:0, FLOOR:1, DOOR:2, EXIT:3 };
+const START_HP = 500, MAX_HP = 999, HP_DRAIN = 5;
+const HERO_SPEED = 150, HERO_R = TILE * 0.30;
+const PROJ_SPEED = 480, FIRE_CD = 0.24, MELEE_DPS = 14;
+const D4 = [[1,0],[-1,0],[0,1],[0,-1]];
+
+const clamp = (v,a,b) => v<a?a:v>b?b:v;
+const nowSec = () => performance.now()/1000;
+const tx = v => Math.floor(v/TILE), ty = tx;
+const dist2 = (ax,ay,bx,by) => { const dx=ax-bx, dy=ay-by; return dx*dx+dy*dy; };
+function hash2(x,y){ let h=(x*374761393+y*668265263)|0; h=(h^(h>>13))*1274126177|0; h=(h^(h>>16))>>>0; return h/4294967295; }
+function shuffle(a){ for(let i=a.length-1;i>0;i--){ const j=(Math.random()*(i+1))|0; const t=a[i]; a[i]=a[j]; a[j]=t; } return a; }
+
+/* ============================== canvas ============================== */
+const cv = document.getElementById('game');
+const ctx = cv.getContext('2d');
+let DPR=1, VW=0, VH=0;
+function resize(){
+  DPR = Math.min(2, window.devicePixelRatio||1);
+  VW = window.innerWidth; VH = window.innerHeight;
+  cv.width = VW*DPR; cv.height = VH*DPR;
+  cv.style.width = VW+'px'; cv.style.height = VH+'px';
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+addEventListener('resize', resize); resize();
+
+/* ============================== state ============================== */
+let LW=0, LH=0, grid=null;
+let items=new Map(), genMap=new Map();
+let enemies=[], projectiles=[], particles=[], floaters=[];
+let hero={ x:0,y:0,r:HERO_R,hp:START_HP,keys:0,fx:1,fy:0,cool:0,hurtT:0,moving:false };
+let cam={x:0,y:0};
+let enemyFlow=null;
+let level=1, score=0, state='boot', stateT=0, banner='', bannerT=0, clearBonus=0;
+let humanMode=false, lastInput=-100;
+let shake=0, time=0;
+const staticCanvas=document.createElement('canvas');
+const staticCtx=staticCanvas.getContext('2d');
+let staticDirty=true;
+let flowTimer=0, aiTimer=0;
+const ai={ path:null, idx:0, preferFood:false };
+let stuckTimer=1.2, lastHX=0, lastHY=0;
+const exitPos={x:1,y:1};
+
+/* ============================== asset loading (vector fallback) ============================== */
+const ASSETS={};
+for(const slot of Object.keys(window.ASSET_MANIFEST)){
+  const rec=window.ASSET_MANIFEST[slot];
+  const img=new Image();
+  const a={ img, loaded:false };
+  img.onload=()=>{ a.loaded=true; staticDirty=true; };
+  img.onerror=()=>{ a.loaded=false; };
+  img.src=rec.file;
+  ASSETS[slot]=a;
+}
+
+/* ============================== level generation ============================== */
+function bfsRegion(sx,sy,passDoors){
+  const dist=new Int16Array(LW*LH).fill(-1);
+  const list=[]; const q=[sy*LW+sx]; dist[sy*LW+sx]=0;
+  for(let h=0;h<q.length;h++){
+    const i=q[h]; list.push(i);
+    const x=i%LW, y=(i/LW)|0;
+    for(const d of D4){
+      const nx=x+d[0], ny=y+d[1];
+      if(nx<0||ny<0||nx>=LW||ny>=LH) continue;
+      const ni=ny*LW+nx;
+      if(dist[ni]>=0) continue;
+      const t=grid[ni];
+      if(t===T.WALL) continue;
+      if(t===T.DOOR&&!passDoors) continue;
+      dist[ni]=dist[i]+1; q.push(ni);
+    }
+  }
+  return {dist,list};
+}
+function bfsField(sx,sy,passDoors){
+  const dist=new Int16Array(LW*LH).fill(-1);
+  const par=new Int32Array(LW*LH).fill(-1);
+  const si=sy*LW+sx; const q=[si]; dist[si]=0;
+  for(let h=0;h<q.length;h++){
+    const i=q[h]; const x=i%LW, y=(i/LW)|0;
+    for(const d of D4){
+      const nx=x+d[0], ny=y+d[1];
+      if(nx<0||ny<0||nx>=LW||ny>=LH) continue;
+      const ni=ny*LW+nx;
+      if(dist[ni]>=0 || solidIdx(ni,passDoors)) continue;
+      dist[ni]=dist[i]+1; par[ni]=i; q.push(ni);
+    }
+  }
+  return {dist,par};
+}
+function solidIdx(i,passDoors){
+  const t=grid[i];
+  if(t===T.WALL) return true;
+  if(t===T.DOOR && !passDoors) return true;
+  if(genMap.has(i)) return true;
+  return false;
+}
+function placeRandom(type,count,pool,used){
+  let placed=0;
+  for(const i of pool){
+    if(placed>=count) break;
+    if(used.has(i)||grid[i]!==T.FLOOR) continue;
+    items.set(i,{type}); used.add(i); placed++;
+  }
+}
+function genLevel(){
+  LW=41; LH=29;
+  grid=new Uint8Array(LW*LH);
+  items=new Map(); genMap=new Map();
+  enemies=[]; projectiles=[]; particles=[]; floaters=[];
+  // recursive-backtracker maze
+  const stack=[[1,1]]; grid[1*LW+1]=T.FLOOR;
+  const DR=[[2,0],[-2,0],[0,2],[0,-2]];
+  while(stack.length){
+    const cur=stack[stack.length-1], cx=cur[0], cy=cur[1];
+    const opts=[];
+    for(let d=0;d<4;d++){ const nx=cx+DR[d][0], ny=cy+DR[d][1];
+      if(nx>0&&ny>0&&nx<LW-1&&ny<LH-1&&grid[ny*LW+nx]===T.WALL) opts.push(d); }
+    if(!opts.length){ stack.pop(); continue; }
+    const d=opts[(Math.random()*opts.length)|0];
+    grid[(cy+DR[d][1]/2)*LW+cx+DR[d][0]/2]=T.FLOOR;
+    grid[(cy+DR[d][1])*LW+cx+DR[d][0]]=T.FLOOR;
+    stack.push([cx+DR[d][0],cy+DR[d][1]]);
+  }
+  // knock out a few extra walls for loops
+  let lt=(LW*LH*0.04)|0;
+  while(lt-->0){
+    const x=1+((Math.random()*(LW-2))|0), y=1+((Math.random()*(LH-2))|0);
+    if(grid[y*LW+x]!==T.WALL) continue;
+    const h=grid[y*LW+x-1]!==T.WALL&&grid[y*LW+x+1]!==T.WALL;
+    const v=grid[(y-1)*LW+x]!==T.WALL&&grid[(y+1)*LW+x]!==T.WALL;
+    if(h!==v) grid[y*LW+x]=T.FLOOR;
+  }
+  // locked doors at corridor chokepoints
+  const cand=[];
+  for(let y=2;y<LH-2;y++) for(let x=2;x<LW-2;x++){
+    if(grid[y*LW+x]!==T.FLOOR) continue;
+    const l=grid[y*LW+x-1], r=grid[y*LW+x+1], u=grid[(y-1)*LW+x], dn=grid[(y+1)*LW+x];
+    const hz=(l===T.WALL&&r===T.WALL&&u!==T.WALL&&dn!==T.WALL);
+    const vt=(u===T.WALL&&dn===T.WALL&&l!==T.WALL&&r!==T.WALL);
+    if((hz||vt)&&Math.abs(x-1)+Math.abs(y-1)>9) cand.push([x,y]);
+  }
+  shuffle(cand);
+  const doors=[]; const wantDoors=2+((Math.random()*3)|0);
+  for(const c of cand){
+    if(doors.length>=wantDoors) break;
+    let ok=true;
+    for(const dd of doors) if(Math.abs(dd[0]-c[0])+Math.abs(dd[1]-c[1])<7){ ok=false; break; }
+    if(!ok) continue;
+    doors.push(c); grid[c[1]*LW+c[0]]=T.DOOR;
+  }
+  // guarantee enough pre-door room for keys
+  let pre=bfsRegion(1,1,false);
+  while(pre.list.length<doors.length+2 && doors.length>0){
+    const d=doors.pop(); grid[d[1]*LW+d[0]]=T.FLOOR; pre=bfsRegion(1,1,false);
+  }
+  // exit at farthest reachable floor
+  const full=bfsRegion(1,1,true);
+  let bestD=-1, ex=LW-2, ey=LH-2;
+  for(let y=1;y<LH-1;y++) for(let x=1;x<LW-1;x++){
+    const i=y*LW+x;
+    if(grid[i]===T.FLOOR && full.dist[i]>bestD){ bestD=full.dist[i]; ex=x; ey=y; }
+  }
+  grid[ey*LW+ex]=T.EXIT; exitPos.x=ex; exitPos.y=ey;
+  const used=new Set([1*LW+1, ey*LW+ex]);
+  for(const d of doors) used.add(d[1]*LW+d[0]);
+  // candidate pool
+  const pool=[];
+  for(let y=1;y<LH-1;y++) for(let x=1;x<LW-1;x++){
+    const i=y*LW+x;
+    if(grid[i]===T.FLOOR && !used.has(i) && full.dist[i]>3) pool.push(i);
+  }
+  shuffle(pool);
+  // monster generators
+  const nGen=Math.min(8, 4+((Math.random()*2)|0)+(((level-1)/2)|0));
+  for(const i of pool){
+    if(genMap.size>=nGen) break;
+    const x=i%LW, y=(i/LW)|0;
+    if(x%2===0||y%2===0) continue;
+    if(full.dist[i]<9) continue;
+    let ok=true;
+    for(const g of genMap.values()) if(Math.abs(g.x-x)+Math.abs(g.y-y)<6){ ok=false; break; }
+    if(!ok) continue;
+    genMap.set(i,{ i, x, y, hp:4, type:Math.random()<0.6?'ghost':'grunt', t:1+Math.random()*2, seed:Math.random()*6.28, flash:0 });
+    used.add(i);
+  }
+  // keys must be reachable before any door
+  const keyPool=shuffle(pre.list.filter(i=>grid[i]===T.FLOOR && !used.has(i) && i!==(1*LW+1)));
+  let keysPlaced=0;
+  for(const i of keyPool){ if(keysPlaced>=doors.length+1) break; items.set(i,{type:'key'}); used.add(i); keysPlaced++; }
+  placeRandom('food',7,pool,used);
+  placeRandom('treasure',9,pool,used);
+  // hero at start
+  hero.x=1.5*TILE; hero.y=1.5*TILE; hero.fx=1; hero.fy=0; hero.cool=0; hero.hurtT=0; hero.moving=false;
+  ai.path=null; ai.idx=0; aiTimer=0; flowTimer=0; enemyFlow=null;
+  camSnap();
+  staticDirty=true;
+}
+
+/* ============================== collision / movement ============================== */
+function circleHitsSolid(x,y,r){
+  const q=r*0.72;
+  const pts=[[x,y],[x+r,y],[x-r,y],[x,y+r],[x,y-r],[x+q,y+q],[x-q,y+q],[x+q,y-q],[x-q,y-q]];
+  for(const p of pts){
+    const gx=tx(p[0]), gy=ty(p[1]);
+    if(gx<0||gy<0||gx>=LW||gy>=LH) return true;
+    if(solidIdx(gy*LW+gx,false)) return true;
+  }
+  return false;
+}
+function moveEntity(e,dx,dy){
+  if(dx!==0){ const nx=e.x+dx; if(!circleHitsSolid(nx,e.y,e.r)) e.x=nx; }
+  if(dy!==0){ const ny=e.y+dy; if(!circleHitsSolid(e.x,ny,e.r)) e.y=ny; }
+}
+function los(x1,y1,x2,y2){
+  const d=Math.hypot(x2-x1,y2-y1);
+  const steps=Math.max(1,Math.ceil(d/(TILE*0.3)));
+  for(let s=1;s<steps;s++){
+    const x=x1+(x2-x1)*s/steps, y=y1+(y2-y1)*s/steps;
+    const gx=tx(x), gy=ty(y);
+    if(gx<0||gy<0||gx>=LW||gy>=LH) return false;
+    const t=grid[gy*LW+gx];
+    if(t===T.WALL||t===T.DOOR) return false;
+  }
+  return true;
+}
+
+/* ============================== fx helpers ============================== */
+function burst(x,y,color,n,spd){
+  for(let k=0;k<n;k++){
+    const a=Math.random()*6.2832, s=spd*(0.25+Math.random()*0.75);
+    const life=0.35+Math.random()*0.35;
+    particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,t:life,life,color,size:2+Math.random()*3});
+  }
+}
+function floater(x,y,txt,color){ floaters.push({x,y,txt,color,t:0.95}); }
+function updateParticles(dt){
+  const dmp=Math.exp(-3*dt);
+  for(const p of particles){ p.t-=dt; p.x+=p.vx*dt; p.y+=p.vy*dt; p.vx*=dmp; p.vy*=dmp; }
+  if(particles.length>400) particles.splice(0,particles.length-400);
+  particles=particles.filter(p=>p.t>0);
+}
+function updateFloaters(dt){
+  for(const f of floaters){ f.t-=dt; f.y-=28*dt; }
+  floaters=floaters.filter(f=>f.t>0);
+}
+
+/* ============================== combat ============================== */
+function hurtHero(a){ hero.hp-=a; hero.hurtT=0.12; shake=Math.min(6,shake+a*0.08); }
+function damageEnemy(e,d){
+  if(e.dead) return;
+  e.hp-=d; e.flash=0.08;
+  if(e.hp<=0){
+    e.dead=true;
+    const pts=e.type==='ghost'?10:20;
+    score+=pts;
+    floater(e.x,e.y-14,'+'+pts,e.type==='ghost'?'#bfefff':'#9fe06b');
+    burst(e.x,e.y,e.type==='ghost'?'#cfeeff':'#8fd05a',12,120);
+  }
+}
+function damageGenerator(g,d){
+  if(g.hp<=0) return;
+  g.hp-=d; g.flash=0.1;
+  if(g.hp<=0){
+    genMap.delete(g.i);
+    score+=100;
+    const cx=(g.x+0.5)*TILE, cy=(g.y+0.5)*TILE;
+    floater(cx,cy,'+100','#ffd257');
+    burst(cx,cy,'#ff8a5a',22,170);
+    burst(cx,cy,'#d8cfbc',14,120);
+    shake=Math.min(8,shake+4);
+  }
+}
+function nearestEnemy(){
+  let best=null, bd=Infinity;
+  for(const e of enemies){
+    if(e.dead) continue;
+    const d=dist2(e.x,e.y,hero.x,hero.y);
+    if(d<bd){ bd=d; best=e; }
+  }
+  return best;
+}
+function nearestGenerator(){
+  let best=null, bd=Infinity;
+  for(const g of genMap.values()){
+    const cx=(g.x+0.5)*TILE, cy=(g.y+0.5)*TILE;
+    const d=dist2(cx,cy,hero.x,hero.y);
+    if(d<bd){ bd=d; best=g; }
+  }
+  return best;
+}
+function threatInCorridor(dx,dy,range){
+  if(dx===0&&dy===0) return false;
+  let wallD=range*TILE, x=hero.x, y=hero.y;
+  for(let s=0;s<range*2;s++){
+    x+=dx*TILE*0.5; y+=dy*TILE*0.5;
+    const gx=tx(x), gy=ty(y);
+    if(gx<0||gy<0||gx>=LW||gy>=LH){ wallD=s*TILE*0.5; break; }
+    const i=gy*LW+gx, t=grid[i];
+    if(t===T.WALL||t===T.DOOR){ wallD=s*TILE*0.5; break; }
+    if(genMap.has(i)) return true;
+  }
+  for(const e of enemies){
+    if(e.dead) continue;
+    const ex=e.x-hero.x, ey=e.y-hero.y;
+    const proj=ex*dx+ey*dy;
+    if(proj<4||proj>wallD) continue;
+    if(Math.abs(ex*dy-ey*dx)<TILE*0.42) return true;
+  }
+  return false;
+}
+const enemyCap=()=>Math.min(26+level*4,70);
+function spawnFromGenerator(g){
+  if(enemies.length>=enemyCap()) return;
+  const opts=shuffle([[1,0],[-1,0],[0,1],[0,-1]]);
+  for(const d of opts){
+    const nx=g.x+d[0], ny=g.y+d[1];
+    if(nx<0||ny<0||nx>=LW||ny>=LH) continue;
+    const ni=ny*LW+nx;
+    if(solidIdx(ni,false)) continue;
+    const cx=(nx+0.5)*TILE, cy=(ny+0.5)*TILE;
+    if(dist2(cx,cy,hero.x,hero.y)<(TILE*1.1)*(TILE*1.1)) continue;
+    let blocked=false;
+    for(const e of enemies){ if(dist2(cx,cy,e.x,e.y)<(TILE*0.5)*(TILE*0.5)){ blocked=true; break; } }
+    if(blocked) continue;
+    enemies.push({
+      x:cx, y:cy, r:TILE*0.30, type:g.type, born:0,
+      hp: g.type==='ghost'?1:3+(((level-1)/4)|0),
+      speed:(g.type==='ghost'?92:66)+Math.min(30,level*2),
+      t:Math.random()*6.28, flash:0, wt:0, wx:0, wy:0, mx:0, my:1, dead:false
+    });
+    burst(cx,cy,g.type==='ghost'?'#bfefff':'#9fe06b',8,90);
+    return;
+  }
+}
+
+/* ============================== attract-mode AI ============================== */
+function aiThink(){
+  const sx=tx(hero.x), sy=ty(hero.y);
+  const f=bfsField(sx,sy,hero.keys>0);
+  ai.preferFood=false;
+  let bestS=Infinity, bestI=-1, bestFood=false;
+  const consider=(i,w,food)=>{
+    if(i<0) return;
+    const d=f.dist[i]; if(d<0) return;
+    const s=(d+1)*w;
+    if(s<bestS){ bestS=s; bestI=i; bestFood=food; }
+  };
+  for(const e of items){
+    const i=e[0], it=e[1];
+    if(it.type==='food') consider(i, hero.hp<320?0.35:1.6, true);
+    else if(it.type==='key') consider(i,0.8,false);
+    else consider(i,1.0,false);
+  }
+  for(const g of genMap.values()){
+    for(const d of D4){
+      const nx=g.x+d[0], ny=g.y+d[1];
+      if(nx<0||ny<0||nx>=LW||ny>=LH) continue;
+      consider(ny*LW+nx,1.3,false);
+    }
+  }
+  consider(exitPos.y*LW+exitPos.x,1.9,false);
+  ai.preferFood=bestFood && hero.hp<320;
+  if(bestI<0){ ai.path=null; return; }
+  const path=[]; let i=bestI; const si=sy*LW+sx; let guard=0;
+  while(i>=0 && i!==si && guard++<4000){ path.push(i); i=f.par[i]; }
+  path.reverse();
+  ai.path=path; ai.idx=0;
+}
+function aiControl(dt){
+  aiTimer-=dt;
+  let wx=0, wy=0, fire=false, engaged=false;
+  const ne=nearestEnemy();
+  if(ne){
+    const dx=ne.x-hero.x, dy=ne.y-hero.y;
+    const d=Math.hypot(dx,dy);
+    let dir=null;
+    if(Math.abs(dy)<TILE*0.42 && los(hero.x,hero.y,ne.x,ne.y)) dir=[Math.sign(dx)||1,0];
+    else if(Math.abs(dx)<TILE*0.42 && los(hero.x,hero.y,ne.x,ne.y)) dir=[0,Math.sign(dy)||1];
+    const panic=hero.hp<220 && ai.preferFood;
+    if(dir && d<TILE*6 && !panic){
+      hero.fx=dir[0]; hero.fy=dir[1];
+      fire=true; engaged=true;
+      if(d<TILE*1.3){ wx=-dir[0]; wy=-dir[1]; }      // kite backwards while firing
+    } else if(d<TILE*2.2 && !panic){
+      engaged=true;
+      if(Math.abs(dx)>Math.abs(dy)){ wx=Math.sign(dx); hero.fx=wx; hero.fy=0; }
+      else { wy=Math.sign(dy); hero.fy=wy; hero.fx=0; }
+      fire=threatInCorridor(hero.fx,hero.fy,5);
+    }
+  }
+  if(!engaged){
+    const ng=nearestGenerator();
+    if(ng){
+      const cx=(ng.x+0.5)*TILE, cy=(ng.y+0.5)*TILE;
+      if(dist2(cx,cy,hero.x,hero.y)<(TILE*1.6)*(TILE*1.6)){
+        const dx=cx-hero.x, dy=cy-hero.y;
+        if(Math.abs(dx)>Math.abs(dy)){ hero.fx=Math.sign(dx)||1; hero.fy=0; }
+        else { hero.fy=Math.sign(dy)||1; hero.fx=0; }
+        fire=true;
+      }
+    }
+    if(aiTimer<=0 || !ai.path){ aiThink(); aiTimer=0.5; }
+    if(ai.path && ai.idx<ai.path.length){
+      const i=ai.path[ai.idx];
+      const cx=(i%LW+0.5)*TILE, cy=(((i/LW)|0)+0.5)*TILE;
+      const dx=cx-hero.x, dy=cy-hero.y;
+      if(Math.abs(dx)<6 && Math.abs(dy)<6) ai.idx++;
+      else{
+        if(Math.abs(dx)>Math.abs(dy)){ wx=Math.sign(dx); wy=0; } else { wy=Math.sign(dy); wx=0; }
+        if(wx!==0){ hero.fx=wx; hero.fy=0; } else if(wy!==0){ hero.fy=wy; hero.fx=0; }
+      }
+    } else if(!fire){
+      const hx=tx(hero.x), hy=ty(hero.y), opts=[];
+      for(const d of D4){ const ni=(hy+d[1])*LW+(hx+d[0]); if(!solidIdx(ni,hero.keys>0)) opts.push(d); }
+      if(opts.length){ const o=opts[(Math.random()*opts.length)|0]; ai.path=[(hy+o[1])*LW+(hx+o[0])]; ai.idx=0; }
+    }
+    if(!fire) fire=threatInCorridor(hero.fx,hero.fy,5);
+  }
+  return {wx,wy,fire};
+}
+
+/* ============================== input (human takeover) ============================== */
+const down={};
+const GAMEKEYS=new Set(['arrowup','arrowdown','arrowleft','arrowright','w','a','s','d',' ']);
+const DIRMAP={arrowup:[0,-1],w:[0,-1],arrowdown:[0,1],s:[0,1],arrowleft:[-1,0],a:[-1,0],arrowright:[1,0],d:[1,0]};
+addEventListener('keydown',e=>{
+  const k=e.key.toLowerCase();
+  if(GAMEKEYS.has(k)){
+    e.preventDefault();
+    down[k]=true;
+    humanMode=true; lastInput=nowSec();
+    const d=DIRMAP[k];
+    if(d){ hero.fx=d[0]; hero.fy=d[1]; }
+  }
+});
+addEventListener('keyup',e=>{ const k=e.key.toLowerCase(); if(GAMEKEYS.has(k)) down[k]=false; });
+addEventListener('blur',()=>{ for(const k in down) down[k]=false; });
+function humanControl(){
+  let wx=0, wy=0;
+  if(down['arrowleft']||down['a']) wx-=1;
+  if(down['arrowright']||down['d']) wx+=1;
+  if(down['arrowup']||down['w']) wy-=1;
+  if(down['arrowdown']||down['s']) wy+=1;
+  if(wx!==0&&wy!==0){ wx*=0.7071; wy*=0.7071; }
+  return {wx,wy,fire:!!down[' ']};
+}
+
+/* ============================== pickups / doors / run flow ============================== */
+function collectItem(i,it){
+  items.delete(i);
+  const cx=(i%LW+0.5)*TILE, cy=(((i/LW)|0)+0.5)*TILE;
+  if(it.type==='food'){ hero.hp=Math.min(MAX_HP,hero.hp+100); score+=10; floater(cx,cy,'+100 HP','#7dff8a'); burst(cx,cy,'#7dff8a',10,90); }
+  else if(it.type==='key'){ hero.keys++; score+=20; floater(cx,cy,'KEY!','#ffd257'); burst(cx,cy,'#ffd257',10,90); }
+  else { score+=100; floater(cx,cy,'+100','#ffd257'); burst(cx,cy,'#ffd257',12,110); }
+}
+function openDoor(i){
+  grid[i]=T.FLOOR; hero.keys--; score+=10;
+  const cx=(i%LW+0.5)*TILE, cy=(((i/LW)|0)+0.5)*TILE;
+  floater(cx,cy,'UNLOCKED','#ffd257');
+  burst(cx,cy,'#ffd257',14,130);
+  shake=Math.min(6,shake+2);
+  paintFloorTile(staticCtx,i%LW,(i/LW)|0);   // door becomes plain floor on the static layer
+}
+function startClear(){
+  if(state!=='play') return;
+  state='clear'; stateT=1.6;
+  clearBonus=100+level*25; score+=clearBonus;
+  burst(hero.x,hero.y,'#c9a0ff',26,170);
+}
+function nextLevel(){
+  level++;
+  hero.hp=Math.min(MAX_HP,hero.hp+100);
+  hero.keys=0;
+  genLevel();
+  state='play'; banner='LEVEL '+level; bannerT=2;
+}
+function startGameOver(){
+  state='gameover'; stateT=2.0;
+  burst(hero.x,hero.y,'#ff5a4d',30,200);
+}
+function resetRun(){
+  level=1; score=0; hero.hp=START_HP; hero.keys=0;
+  genLevel();
+  state='play'; banner='LEVEL 1'; bannerT=2;
+}
+
+/* ============================== camera ============================== */
+function camTargetX(){ if(LW*TILE<=VW) return (LW*TILE-VW)/2; return clamp(hero.x-VW/2,0,LW*TILE-VW); }
+function camTargetY(){ if(LH*TILE<=VH) return (LH*TILE-VH)/2; return clamp(hero.y-VH/2,0,LH*TILE-VH); }
+function camSnap(){ cam.x=camTargetX(); cam.y=camTargetY(); }
+function updateCam(dt){
+  const k=Math.min(1,dt*5);
+  cam.x+=(camTargetX()-cam.x)*k;
+  cam.y+=(camTargetY()-cam.y)*k;
+}
+
+/* ============================== update ============================== */
+function updateEnemies(dt){
+  const dmgScale=1+0.06*(level-1);
+  for(const e of enemies){
+    if(e.dead) continue;
+    e.flash=Math.max(0,e.flash-dt);
+    e.born=Math.min(1,e.born+dt*4);
+    e.wt-=dt;
+    const hd=Math.hypot(hero.x-e.x,hero.y-e.y);
+    let mx=0, my=0;
+    if(hd<TILE*1.5){
+      mx=(hero.x-e.x)/(hd||1); my=(hero.y-e.y)/(hd||1);
+    } else {
+      const i=ty(e.y)*LW+tx(e.x);
+      const cur=enemyFlow?enemyFlow[i]:-1;
+      if(cur>0){
+        const x=i%LW, y=(i/LW)|0;
+        let bi=-1, bd=cur;
+        for(const d of D4){
+          const nx=x+d[0], ny=y+d[1];
+          if(nx<0||ny<0||nx>=LW||ny>=LH) continue;
+          const ni=ny*LW+nx, dv=enemyFlow[ni];
+          if(dv>=0 && dv<bd){ bd=dv; bi=ni; }
+        }
+        if(bi>=0){
+          const cx=(bi%LW+0.5)*TILE, cy=(((bi/LW)|0)+0.5)*TILE;
+          const dx=cx-e.x, dy=cy-e.y, l=Math.hypot(dx,dy)||1;
+          mx=dx/l; my=dy/l;
+        }
+      }
+      if(mx===0&&my===0){
+        if(e.wt<=0){ e.wt=0.6+Math.random()*0.8; const a=Math.random()*6.2832; e.wx=Math.cos(a); e.wy=Math.sin(a); }
+        mx=e.wx; my=e.wy;
+      }
+    }
+    if(e.type==='ghost'){
+      const w=Math.sin(time*6+e.t)*0.4;
+      const px=-my, py=mx; mx+=px*w; my+=py*w;
+    }
+    const l=Math.hypot(mx,my);
+    if(l>0){ mx/=l; my/=l; }
+    e.mx=mx; e.my=my;
+    moveEntity(e,mx*e.speed*dt,my*e.speed*dt);
+    if(hd<e.r+hero.r+2){
+      hurtHero((e.type==='ghost'?30:55)*dmgScale*dt);
+      damageEnemy(e,MELEE_DPS*dt);
+    }
+  }
+  // separation
+  for(let a=0;a<enemies.length;a++){
+    const e1=enemies[a]; if(e1.dead) continue;
+    for(let b=a+1;b<enemies.length;b++){
+      const e2=enemies[b]; if(e2.dead) continue;
+      const dx=e2.x-e1.x, dy=e2.y-e1.y, rr=e1.r+e2.r, d2=dx*dx+dy*dy;
+      if(d2<rr*rr && d2>0.001){
+        const d=Math.sqrt(d2), ov=(rr-d)/2, nx=dx/d, ny=dy/d;
+        if(!circleHitsSolid(e1.x-nx*ov,e1.y-ny*ov,e1.r)){ e1.x-=nx*ov; e1.y-=ny*ov; }
+        if(!circleHitsSolid(e2.x+nx*ov,e2.y+ny*ov,e2.r)){ e2.x+=nx*ov; e2.y+=ny*ov; }
+      }
+    }
+  }
+  enemies=enemies.filter(e=>!e.dead);
+}
+function updateProjectiles(dt){
+  for(const p of projectiles){
+    if(p.dead) continue;
+    p.x+=p.dx*PROJ_SPEED*dt; p.y+=p.dy*PROJ_SPEED*dt; p.life-=dt;
+    if(p.life<=0){ p.dead=true; continue; }
+    const gx=tx(p.x), gy=ty(p.y);
+    if(gx<0||gy<0||gx>=LW||gy>=LH){ p.dead=true; continue; }
+    const i=gy*LW+gx;
+    if(genMap.has(i)){ damageGenerator(genMap.get(i),1); p.dead=true; burst(p.x,p.y,'#ffd0a0',6,90); continue; }
+    const t=grid[i];
+    if(t===T.WALL||t===T.DOOR){ p.dead=true; burst(p.x,p.y,'#c9b8ff',5,80); continue; }
+    for(const e of enemies){
+      if(e.dead) continue;
+      if(dist2(p.x,p.y,e.x,e.y)<(e.r+5)*(e.r+5)){
+        damageEnemy(e,1); p.dead=true; burst(p.x,p.y,'#fff2b0',4,70); break;
+      }
+    }
+  }
+  projectiles=projectiles.filter(p=>!p.dead);
+}
+function update(dt){
+  time+=dt;
+  updateParticles(dt);
+  updateFloaters(dt);
+  if(state==='gameover'){ stateT-=dt; if(stateT<=0) resetRun(); return; }
+  if(state==='clear'){ stateT-=dt; if(stateT<=0) nextLevel(); return; }
+  bannerT=Math.max(0,bannerT-dt);
+  if(humanMode && nowSec()-lastInput>10) humanMode=false;
+  const ctl=humanMode?humanControl():aiControl(dt);
+  if(ctl.wx!==0||ctl.wy!==0){
+    moveEntity(hero,ctl.wx*HERO_SPEED*dt,ctl.wy*HERO_SPEED*dt);
+    hero.moving=true;
+  } else hero.moving=false;
+  hero.cool-=dt;
+  if(ctl.fire && hero.cool<=0 && (hero.fx!==0||hero.fy!==0)){
+    hero.cool=FIRE_CD;
+    projectiles.push({x:hero.x+hero.fx*(hero.r+5),y:hero.y+hero.fy*(hero.r+5),dx:hero.fx,dy:hero.fy,life:1.4,dead:false});
+    burst(hero.x+hero.fx*(hero.r+7),hero.y+hero.fy*(hero.r+7),'#ffe27a',3,60);
+  }
+  hero.hp-=HP_DRAIN*dt;                                  // Gauntlet-style slow drain
+  hero.hurtT=Math.max(0,hero.hurtT-dt);
+  const hx=tx(hero.x), hy=ty(hero.y);
+  for(const d of D4){                                    // touch locked doors with a key
+    const nx=hx+d[0], ny=hy+d[1];
+    if(nx<0||ny<0||nx>=LW||ny>=LH) continue;
+    const ni=ny*LW+nx;
+    if(grid[ni]===T.DOOR && hero.keys>0) openDoor(ni);
+  }
+  const ci=hy*LW+hx;
+  const it=items.get(ci);
+  if(it) collectItem(ci,it);
+  if(grid[ci]===T.EXIT){ startClear(); return; }
+  flowTimer-=dt;
+  if(flowTimer<=0){ flowTimer=0.22; enemyFlow=bfsField(hx,hy,false).dist; }
+  for(const g of genMap.values()){
+    g.flash=Math.max(0,g.flash-dt);
+    g.t-=dt;
+    if(g.t<=0){ g.t=(2.4+Math.random()*1.5)*Math.max(0.55,1-0.04*(level-1)); spawnFromGenerator(g); }
+  }
+  for(const g of genMap.values()){                       // bump-attack generators
+    const gx0=g.x*TILE, gy0=g.y*TILE;
+    const nx=clamp(hero.x,gx0,gx0+TILE), ny=clamp(hero.y,gy0,gy0+TILE);
+    if(dist2(hero.x,hero.y,nx,ny)<(hero.r+1)*(hero.r+1)) damageGenerator(g,10*dt);
+  }
+  updateEnemies(dt);
+  updateProjectiles(dt);
+  if(!humanMode){                                        // anti-stall watchdog for the AI
+    stuckTimer-=dt;
+    if(stuckTimer<=0){
+      if(dist2(hero.x,hero.y,lastHX,lastHY)<36){ ai.path=null; aiTimer=0; }
+      lastHX=hero.x; lastHY=hero.y; stuckTimer=1.2;
+    }
+  }
+  if(hero.hp<=0){ hero.hp=0; startGameOver(); return; }
+  shake=Math.max(0,shake-dt*12);
+  updateCam(dt);
+}
+
+/* ============================== static layer (floor / wall / door / exit) ============================== */
+function isWallAt(gx,gy){ if(gx<0||gy<0||gx>=LW||gy>=LH) return true; return grid[gy*LW+gx]===T.WALL; }
+function paintFloorTile(c,gx,gy){
+  const px=gx*TILE, py=gy*TILE;
+  if(ASSETS.floor.loaded){ c.drawImage(ASSETS.floor.img,px,py,TILE,TILE); }
+  else{
+    const h=hash2(gx,gy), l=0.88+h*0.24;
+    c.fillStyle=`rgb(${37*l|0},${31*l|0},${52*l|0})`;
+    c.fillRect(px,py,TILE,TILE);
+    c.strokeStyle='rgba(10,6,20,0.45)'; c.lineWidth=2;
+    c.strokeRect(px+1,py+1,TILE-2,TILE-2);
+    const s1=hash2(gx*7+1,gy*3+2), s2=hash2(gx*5+4,gy*9+1);
+    c.fillStyle='rgba(255,255,255,0.05)';
+    c.fillRect(px+4+s1*(TILE-10),py+4+s2*(TILE-10),3,3);
+    if(h>0.8){
+      c.strokeStyle='rgba(12,8,22,0.5)'; c.lineWidth=1.5;
+      c.beginPath(); c.moveTo(px+8,py+10+s1*20); c.lineTo(px+20+s2*10,py+26); c.lineTo(px+30,py+34+s1*10); c.stroke();
+    }
+  }
+  if(isWallAt(gx,gy-1)){
+    const g=c.createLinearGradient(0,py,0,py+14);
+    g.addColorStop(0,'rgba(0,0,0,0.4)'); g.addColorStop(1,'rgba(0,0,0,0)');
+    c.fillStyle=g; c.fillRect(px,py,TILE,14);
+  }
+  if(isWallAt(gx-1,gy)){
+    const g=c.createLinearGradient(px,0,px+12,0);
+    g.addColorStop(0,'rgba(0,0,0,0.32)'); g.addColorStop(1,'rgba(0,0,0,0)');
+    c.fillStyle=g; c.fillRect(px,py,12,TILE);
+  }
+  if(isWallAt(gx+1,gy)){
+    const g=c.createLinearGradient(px+TILE,0,px+TILE-12,0);
+    g.addColorStop(0,'rgba(0,0,0,0.32)'); g.addColorStop(1,'rgba(0,0,0,0)');
+    c.fillStyle=g; c.fillRect(px+TILE-12,py,12,TILE);
+  }
+}
+function paintWallTile(c,gx,gy){
+  const px=gx*TILE, py=gy*TILE;
+  if(ASSETS.wall.loaded){ c.drawImage(ASSETS.wall.img,px,py,TILE,TILE); return; }
+  const h=hash2(gx*3+11,gy*7+5), l=0.9+h*0.25;
+  c.fillStyle=`rgb(${64*l|0},${54*l|0},${92*l|0})`;
+  c.fillRect(px,py,TILE,TILE);
+  c.strokeStyle='rgba(16,10,30,0.6)'; c.lineWidth=2;
+  const off=(gy%2)*14;
+  c.beginPath();
+  c.moveTo(px,py+TILE/2); c.lineTo(px+TILE,py+TILE/2);
+  c.moveTo(px+((off+14)%TILE),py); c.lineTo(px+((off+14)%TILE),py+TILE/2);
+  c.moveTo(px+((off+34)%TILE),py+TILE/2); c.lineTo(px+((off+34)%TILE),py+TILE);
+  c.stroke();
+  c.fillStyle='rgba(255,255,255,0.10)'; c.fillRect(px,py,TILE,4);
+  c.fillStyle='rgba(0,0,0,0.35)'; c.fillRect(px,py+TILE-5,TILE,5);
+  if(h>0.72){
+    c.strokeStyle='rgba(10,6,20,0.55)'; c.lineWidth=1.5;
+    c.beginPath(); c.moveTo(px+10,py+8); c.lineTo(px+18,py+22); c.lineTo(px+14,py+38); c.stroke();
+  }
+}
+function paintDoorTile(c,gx,gy){
+  const px=gx*TILE, py=gy*TILE;
+  const vert=grid[gy*LW+gx-1]===T.WALL;
+  c.save(); c.translate(px+TILE/2,py+TILE/2);
+  if(!vert) c.rotate(Math.PI/2);
+  c.fillStyle='#0f0a1a'; c.fillRect(-TILE/2+4,-TILE/2+2,TILE-8,TILE-4);
+  c.strokeStyle='rgba(255,200,90,0.55)'; c.lineWidth=2;
+  c.strokeRect(-TILE/2+4,-TILE/2+2,TILE-8,TILE-4);
+  c.fillStyle='#e8b34a';
+  for(let k=-1;k<=1;k++) c.fillRect(k*13-3,-TILE/2+4,6,TILE-8);
+  c.fillStyle='#9a6f22';
+  c.fillRect(-TILE/2+6,-10,TILE-12,5); c.fillRect(-TILE/2+6,5,TILE-12,5);
+  c.fillStyle='#ffd257'; c.beginPath(); c.arc(0,0,7,0,6.2832); c.fill();
+  c.fillStyle='#3a2c14'; c.beginPath(); c.arc(0,-1,2.4,0,6.2832); c.fill(); c.fillRect(-1.5,0,3,5);
+  c.restore();
+}
+function paintExitTile(c,gx,gy){
+  const px=gx*TILE, py=gy*TILE, cx=px+TILE/2, cy=py+TILE/2;
+  if(ASSETS.exit.loaded){ c.drawImage(ASSETS.exit.img,px,py,TILE,TILE); return; }
+  c.fillStyle='#141026'; c.fillRect(px,py,TILE,TILE);
+  c.strokeStyle='#2c2350'; c.lineWidth=2; c.strokeRect(px+1,py+1,TILE-2,TILE-2);
+  c.fillStyle='#05030c'; c.beginPath(); c.arc(cx,cy,19,0,6.2832); c.fill();
+  c.strokeStyle='#6c4fd0'; c.lineWidth=3; c.beginPath(); c.arc(cx,cy,19,0,6.2832); c.stroke();
+  c.strokeStyle='rgba(140,110,230,0.5)'; c.lineWidth=2;
+  for(const r of [13,8,3]){ c.beginPath(); c.arc(cx,cy,r,0,6.2832); c.stroke(); }
+  c.fillStyle='#8a6fe0';
+  for(let k=0;k<8;k++){
+    const a=k/8*6.2832;
+    c.fillRect(cx+Math.cos(a)*23-1.5,cy+Math.sin(a)*23-1.5,3,3);
+  }
+}
+function renderStatic(){
+  staticCanvas.width=LW*TILE; staticCanvas.height=LH*TILE;
+  for(let y=0;y<LH;y++) for(let x=0;x<LW;x++) paintFloorTile(staticCtx,x,y);
+  for(let y=0;y<LH;y++) for(let x=0;x<LW;x++){
+    const t=grid[y*LW+x];
+    if(t===T.WALL) paintWallTile(staticCtx,x,y);
+    else if(t===T.DOOR) paintDoorTile(staticCtx,x,y);
+    else if(t===T.EXIT) paintExitTile(staticCtx,x,y);
+  }
+  staticDirty=false;
+}
+
+/* ============================== dynamic drawing ============================== */
+function drawExitFx(){
+  const x=(exitPos.x+0.5)*TILE, y=(exitPos.y+0.5)*TILE;
+  const pulse=0.5+0.5*Math.sin(time*3);
+  const g=ctx.createRadialGradient(x,y,4,x,y,TILE*1.05);
+  g.addColorStop(0,`rgba(170,110,255,${0.30+0.18*pulse})`);
+  g.addColorStop(1,'rgba(170,110,255,0)');
+  ctx.fillStyle=g; ctx.beginPath(); ctx.arc(x,y,TILE*1.05,0,6.2832); ctx.fill();
+  ctx.save(); ctx.translate(x,y); ctx.rotate(time*0.8);
+  ctx.setLineDash([6,6]);
+  ctx.strokeStyle='rgba(190,140,255,0.85)'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.arc(0,0,TILE*0.34,0,6.2832); ctx.stroke();
+  ctx.setLineDash([]); ctx.restore();
+}
+function drawItem(i,it){
+  const gx=i%LW, gy=(i/LW)|0;
+  const x=(gx+0.5)*TILE, y=(gy+0.5)*TILE+Math.sin(time*2.5+gx*1.7+gy*0.9)*2.5;
+  if(x<cam.x-60||x>cam.x+VW+60||y<cam.y-60||y>cam.y+VH+60) return;
+  const A=ASSETS[it.type];
+  ctx.save(); ctx.translate(x,y);
+  ctx.fillStyle=it.type==='food'?'rgba(125,255,138,0.10)':'rgba(255,210,87,0.12)';
+  ctx.beginPath(); ctx.arc(0,0,21,0,6.2832); ctx.fill();
+  if(A&&A.loaded){ const s=TILE*0.8; ctx.drawImage(A.img,-s/2,-s/2,s,s); ctx.restore(); return; }
+  if(it.type==='key'){
+    ctx.shadowColor='#ffd257'; ctx.shadowBlur=10;
+    ctx.strokeStyle='#ffd257'; ctx.lineWidth=4; ctx.lineCap='round';
+    ctx.beginPath(); ctx.arc(-8,0,6,0,6.2832); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-2,0); ctx.lineTo(14,0); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(9,0); ctx.lineTo(9,6); ctx.moveTo(14,0); ctx.lineTo(14,7); ctx.stroke();
+    ctx.shadowBlur=0;
+    const a=0.5+0.5*Math.sin(time*5+gx);
+    ctx.strokeStyle=`rgba(255,255,255,${0.7*a})`; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.moveTo(-14,-8); ctx.lineTo(-8,-8); ctx.moveTo(-11,-11); ctx.lineTo(-11,-5); ctx.stroke();
+  } else if(it.type==='food'){
+    ctx.fillStyle='#cfc8bd'; ctx.beginPath(); ctx.ellipse(0,4,17,8,0,0,6.2832); ctx.fill();
+    ctx.fillStyle='#a89f92'; ctx.beginPath(); ctx.ellipse(0,4,12,5,0,0,6.2832); ctx.fill();
+    ctx.strokeStyle='#f3ede2'; ctx.lineWidth=4; ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(4,2); ctx.lineTo(14,-4); ctx.stroke();
+    ctx.fillStyle='#f3ede2'; ctx.beginPath(); ctx.arc(15,-5,2.6,0,6.2832); ctx.arc(13,-8,2.6,0,6.2832); ctx.fill();
+    ctx.fillStyle='#a8572a'; ctx.beginPath(); ctx.ellipse(-2,-2,11,8,-0.5,0,6.2832); ctx.fill();
+    ctx.fillStyle='#c97a3e'; ctx.beginPath(); ctx.ellipse(-4,-4,6,4,-0.5,0,6.2832); ctx.fill();
+  } else {
+    ctx.fillStyle='#5c3618'; ctx.fillRect(-14,-2,28,14);
+    ctx.fillStyle='#7a4a22'; ctx.fillRect(-14,-10,28,10);
+    ctx.fillStyle='#ffd257'; ctx.fillRect(-14,-3,28,3); ctx.fillRect(-2,-6,5,7);
+    ctx.fillStyle='#ffe27a';
+    ctx.beginPath(); ctx.arc(-7,12,3,0,6.2832); ctx.arc(0,13,3,0,6.2832); ctx.arc(7,12,3,0,6.2832); ctx.fill();
+    const a=0.5+0.5*Math.sin(time*4+gy);
+    ctx.strokeStyle=`rgba(255,255,255,${0.8*a})`; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.moveTo(8,-15); ctx.lineTo(14,-15); ctx.moveTo(11,-18); ctx.lineTo(11,-12); ctx.stroke();
+  }
+  ctx.restore();
+}
+function skullPath(x,y,r){
+  ctx.fillStyle='#c9bfa9'; ctx.beginPath(); ctx.arc(x,y,r,0,6.2832); ctx.fill();
+  ctx.fillStyle='#241c30';
+  ctx.beginPath(); ctx.arc(x-r*0.35,y-1,r*0.22,0,6.2832); ctx.arc(x+r*0.35,y-1,r*0.22,0,6.2832); ctx.fill();
+}
+function drawGenerator(g){
+  const x=(g.x+0.5)*TILE, y=(g.y+0.5)*TILE;
+  if(x<cam.x-70||x>cam.x+VW+70||y<cam.y-70||y>cam.y+VH+70) return;
+  const A=ASSETS.generator;
+  const pulse=1+0.05*Math.sin(time*4+g.seed);
+  ctx.save(); ctx.translate(x,y); ctx.scale(pulse,pulse);
+  if(A.loaded){ ctx.drawImage(A.img,-TILE/2,-TILE/2,TILE,TILE); }
+  else{
+    ctx.fillStyle='rgba(150,50,50,0.22)'; ctx.beginPath(); ctx.arc(0,0,24,0,6.2832); ctx.fill();
+    ctx.fillStyle='#241c30'; ctx.beginPath(); ctx.arc(0,2,20,0,6.2832); ctx.fill();
+    ctx.strokeStyle='#120d1c'; ctx.lineWidth=2; ctx.stroke();
+    skullPath(-10,6,5); skullPath(10,7,5); skullPath(0,12,5);
+    ctx.fillStyle='#d8cfbc'; ctx.beginPath(); ctx.arc(0,-4,10,0,6.2832); ctx.fill();
+    ctx.fillStyle='#8a7a5c';
+    ctx.beginPath(); ctx.moveTo(-8,-10); ctx.lineTo(-14,-18); ctx.lineTo(-5,-13); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(8,-10); ctx.lineTo(14,-18); ctx.lineTo(5,-13); ctx.fill();
+    ctx.shadowColor='#ff3b30'; ctx.shadowBlur=8;
+    ctx.fillStyle='#ff5040';
+    ctx.beginPath(); ctx.arc(-4,-5,2.2,0,6.2832); ctx.arc(4,-5,2.2,0,6.2832); ctx.fill();
+    ctx.shadowBlur=0;
+    ctx.fillStyle='#241c30'; ctx.beginPath(); ctx.moveTo(0,-1); ctx.lineTo(-2,3); ctx.lineTo(2,3); ctx.fill();
+  }
+  if(g.flash>0){
+    ctx.globalAlpha=Math.min(1,g.flash*8);
+    ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(0,0,22,0,6.2832); ctx.fill();
+    ctx.globalAlpha=1;
+  }
+  ctx.restore();
+}
+function drawEnemy(e){
+  if(e.x<cam.x-70||e.x>cam.x+VW+70||e.y<cam.y-70||e.y>cam.y+VH+70) return;
+  const A=ASSETS[e.type];
+  const sc=0.3+0.7*e.born;
+  ctx.save(); ctx.translate(e.x,e.y); ctx.scale(sc,sc);
+  if(A&&A.loaded){
+    const s=TILE*0.9;
+    ctx.rotate(Math.atan2(e.my,e.mx)+Math.PI/2);
+    ctx.drawImage(A.img,-s/2,-s/2,s,s);
+  } else if(e.type==='ghost'){
+    const bob=Math.sin(time*3+e.t)*2;
+    ctx.globalAlpha=0.75+0.15*Math.sin(time*5+e.t);
+    ctx.translate(0,bob-2);
+    ctx.fillStyle='#d8f4ff';
+    ctx.beginPath();
+    ctx.arc(0,-2,13,Math.PI,0);
+    ctx.lineTo(13,8);
+    ctx.quadraticCurveTo(8.6,14,4.3,8);
+    ctx.quadraticCurveTo(0,14,-4.3,8);
+    ctx.quadraticCurveTo(-8.6,14,-13,8);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle='#20304a';
+    ctx.beginPath(); ctx.ellipse(-4.5,-3,2.4,3.4,0,0,6.2832); ctx.ellipse(4.5,-3,2.4,3.4,0,0,6.2832); ctx.fill();
+  } else {
+    ctx.rotate(Math.atan2(e.my,e.mx));
+    ctx.fillStyle='#4c7d26';
+    ctx.beginPath(); ctx.arc(2,-15,6,0,6.2832); ctx.arc(2,15,6,0,6.2832); ctx.fill();
+    ctx.fillStyle='#6fae3f'; ctx.beginPath(); ctx.arc(0,0,15,0,6.2832); ctx.fill();
+    ctx.strokeStyle='#3c6420'; ctx.lineWidth=2.5; ctx.stroke();
+    ctx.fillStyle='#fff';
+    ctx.beginPath(); ctx.arc(7,-5,3.4,0,6.2832); ctx.arc(7,5,3.4,0,6.2832); ctx.fill();
+    ctx.fillStyle='#c62f2f';
+    ctx.beginPath(); ctx.arc(8.2,-5,1.7,0,6.2832); ctx.arc(8.2,5,1.7,0,6.2832); ctx.fill();
+    ctx.strokeStyle='#2e4d16'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(3,-8); ctx.lineTo(10,-5.5); ctx.moveTo(3,8); ctx.lineTo(10,5.5); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(11,-3); ctx.lineTo(13.5,0); ctx.lineTo(11,3); ctx.stroke();
+  }
+  if(e.flash>0){
+    ctx.globalAlpha=Math.min(1,e.flash*10);
+    ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(0,0,15,0,6.2832); ctx.fill();
+  }
+  ctx.restore();
+}
+function drawHero(){
+  const A=ASSETS.hero;
+  const bob=hero.moving?Math.sin(time*10)*1.5:0;
+  ctx.save(); ctx.translate(hero.x,hero.y+bob*0.3);
+  ctx.fillStyle='rgba(0,0,0,0.35)';
+  ctx.beginPath(); ctx.ellipse(0,15,13,5,0,0,6.2832); ctx.fill();
+  const ang=Math.atan2(hero.fy,hero.fx);
+  if(A.loaded){
+    ctx.rotate(ang+Math.PI/2);
+    const s=TILE*0.95;
+    ctx.drawImage(A.img,-s/2,-s/2,s,s);
+  } else {
+    ctx.rotate(ang);
+    ctx.fillStyle='#dfe7f2'; ctx.fillRect(12,-2,14,4);          // sword blade
+    ctx.fillStyle='#ffd257'; ctx.fillRect(10,-4,3,8);            // guard
+    ctx.fillStyle='#2f6fd0'; ctx.beginPath(); ctx.arc(0,0,14,0,6.2832); ctx.fill();
+    ctx.strokeStyle='#1a3f7d'; ctx.lineWidth=2.5; ctx.stroke();
+    ctx.fillStyle='#9fb6cf';
+    ctx.beginPath(); ctx.arc(2,-10,5,0,6.2832); ctx.arc(2,10,5,0,6.2832); ctx.fill();
+    ctx.fillStyle='#c9d4e6'; ctx.beginPath(); ctx.arc(2,0,6.5,0,6.2832); ctx.fill();   // helmet
+    ctx.fillStyle='#f2c894'; ctx.beginPath(); ctx.arc(5.5,0,3.6,0,6.2832); ctx.fill(); // face
+    ctx.fillStyle='#d23b3b'; ctx.beginPath(); ctx.moveTo(-4,-2); ctx.lineTo(-11,0); ctx.lineTo(-4,2); ctx.fill(); // plume
+  }
+  if(hero.hurtT>0){
+    ctx.globalAlpha=Math.min(1,hero.hurtT*6);
+    ctx.fillStyle='#ff4d4d'; ctx.beginPath(); ctx.arc(0,0,15,0,6.2832); ctx.fill();
+    ctx.globalAlpha=1;
+  }
+  ctx.restore();
+}
+function drawProjectile(p){
+  ctx.save(); ctx.translate(p.x,p.y);
+  ctx.shadowColor='#ffe27a'; ctx.shadowBlur=12;
+  ctx.fillStyle='#fff6c8'; ctx.beginPath(); ctx.arc(0,0,4.5,0,6.2832); ctx.fill();
+  ctx.shadowBlur=0;
+  ctx.strokeStyle='rgba(255,226,122,0.6)'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(-p.dx*10,-p.dy*10); ctx.stroke();
+  ctx.restore();
+}
+function drawParticles(){
+  for(const p of particles){
+    ctx.globalAlpha=clamp(p.t/p.life,0,1);
+    ctx.fillStyle=p.color;
+    ctx.fillRect(p.x-p.size/2,p.y-p.size/2,p.size,p.size);
+  }
+  ctx.globalAlpha=1;
+}
+function drawFloaters(){
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.font='700 13px "Courier New",monospace';
+  for(const f of floaters){
+    ctx.globalAlpha=clamp(f.t/0.95,0,1);
+    ctx.lineWidth=3; ctx.strokeStyle='rgba(0,0,0,0.7)';
+    ctx.strokeText(f.txt,f.x,f.y);
+    ctx.fillStyle=f.color; ctx.fillText(f.txt,f.x,f.y);
+  }
+  ctx.globalAlpha=1;
+}
+
+/* ============================== lighting / HUD / banners ============================== */
+function drawLighting(cx,cy){
+  const g=ctx.createRadialGradient(VW/2,VH/2,Math.min(VW,VH)*0.3,VW/2,VH/2,Math.max(VW,VH)*0.72);
+  g.addColorStop(0,'rgba(5,3,12,0)'); g.addColorStop(1,'rgba(4,2,10,0.6)');
+  ctx.fillStyle=g; ctx.fillRect(0,0,VW,VH);
+  const hx=hero.x-cx, hy=hero.y-cy;
+  const g2=ctx.createRadialGradient(hx,hy,20,hx,hy,240);
+  g2.addColorStop(0,'rgba(255,214,150,0.12)'); g2.addColorStop(1,'rgba(255,214,150,0)');
+  ctx.fillStyle=g2; ctx.fillRect(0,0,VW,VH);
+  if(hero.hp<150 && state==='play'){
+    const a=0.10+0.08*Math.sin(time*6);
+    const g3=ctx.createRadialGradient(VW/2,VH/2,Math.min(VW,VH)*0.3,VW/2,VH/2,Math.max(VW,VH)*0.7);
+    g3.addColorStop(0,'rgba(255,40,40,0)'); g3.addColorStop(1,`rgba(255,40,40,${a})`);
+    ctx.fillStyle=g3; ctx.fillRect(0,0,VW,VH);
+  }
+}
+function drawMiniKey(x,y){
+  ctx.save(); ctx.translate(x,y); ctx.scale(0.85,0.85);
+  ctx.strokeStyle='#ffd257'; ctx.lineWidth=3; ctx.lineCap='round';
+  ctx.beginPath(); ctx.arc(-6,0,4.5,0,6.2832); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-1,0); ctx.lineTo(11,0); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(7,0); ctx.lineTo(7,5); ctx.moveTo(11,0); ctx.lineTo(11,6); ctx.stroke();
+  ctx.restore();
+}
+function drawHUD(){
+  const H=48;
+  ctx.fillStyle='rgba(8,6,16,0.85)'; ctx.fillRect(0,0,VW,H);
+  ctx.fillStyle='rgba(255,210,87,0.3)'; ctx.fillRect(0,H-2,VW,2);
+  ctx.textBaseline='middle';
+  const hp=Math.max(0,Math.ceil(hero.hp));
+  const hpcol=hp>300?'#5ee06b':hp>150?'#ffd257':'#ff5a4d';
+  ctx.textAlign='left';
+  ctx.font='700 11px "Courier New",monospace'; ctx.fillStyle='#8f86b0';
+  ctx.fillText('HEALTH',14,13);
+  ctx.font='700 20px "Courier New",monospace'; ctx.fillStyle=hpcol;
+  if(hp<150&&state==='play') ctx.globalAlpha=0.6+0.4*Math.sin(time*8);
+  ctx.fillText(String(hp).padStart(3,'0'),14,33);
+  ctx.globalAlpha=1;
+  const bx=80, bw=150, by=H/2+2;
+  ctx.fillStyle='#1a1428'; ctx.fillRect(bx,by,bw,12);
+  ctx.fillStyle=hpcol; ctx.fillRect(bx,by,bw*clamp(hero.hp/700,0,1),12);
+  ctx.strokeStyle='rgba(255,255,255,0.25)'; ctx.lineWidth=1;
+  ctx.strokeRect(bx+0.5,by+0.5,bw-1,11);
+  ctx.textAlign='center';
+  ctx.font='700 11px "Courier New",monospace'; ctx.fillStyle='#8f86b0';
+  ctx.fillText('SCORE',VW*0.40,13);
+  ctx.font='700 20px "Courier New",monospace'; ctx.fillStyle='#f5f0ff';
+  ctx.fillText(String(score).padStart(6,'0'),VW*0.40,33);
+  drawMiniKey(VW*0.56-16,H/2);
+  ctx.textAlign='left';
+  ctx.font='700 20px "Courier New",monospace'; ctx.fillStyle='#ffd257';
+  ctx.fillText('×'+hero.keys,VW*0.56+2,H/2);
+  ctx.textAlign='center';
+  ctx.font='700 11px "Courier New",monospace'; ctx.fillStyle='#8f86b0';
+  ctx.fillText('LEVEL',VW*0.67,13);
+  ctx.font='700 20px "Courier New",monospace'; ctx.fillStyle='#f5f0ff';
+  ctx.fillText(String(level),VW*0.67,33);
+  ctx.textAlign='right';
+  if(humanMode){
+    const rem=Math.max(0,10-(nowSec()-lastInput));
+    ctx.font='700 14px "Courier New",monospace'; ctx.fillStyle='#5ee06b';
+    ctx.fillText('● PLAYER',VW-14,16);
+    ctx.font='11px "Courier New",monospace'; ctx.fillStyle='#8f86b0';
+    ctx.fillText('attract resumes in '+Math.ceil(rem)+'s',VW-14,34);
+  } else {
+    ctx.globalAlpha=0.55+0.45*Math.sin(time*4);
+    ctx.font='700 14px "Courier New",monospace'; ctx.fillStyle='#ffd257';
+    ctx.fillText('● ATTRACT MODE',VW-14,16);
+    ctx.globalAlpha=1;
+    ctx.font='11px "Courier New",monospace'; ctx.fillStyle='#8f86b0';
+    ctx.fillText('press arrows / WASD / space',VW-14,34);
+  }
+  ctx.textAlign='center';
+  ctx.font='12px "Courier New",monospace';
+  ctx.fillStyle='rgba(245,240,255,0.45)';
+  ctx.fillText(humanMode?'ARROWS / WASD — MOVE        SPACE — FIRE':'WATCHING AI DEMO — PRESS ANY GAME KEY TO TAKE CONTROL',VW/2,VH-16);
+}
+function centerText(txt,y,size,color){
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.font='700 '+size+'px "Courier New",monospace';
+  ctx.shadowColor=color; ctx.shadowBlur=18;
+  ctx.lineWidth=Math.max(3,size/10); ctx.strokeStyle='rgba(0,0,0,0.8)';
+  ctx.strokeText(txt,VW/2,y);
+  ctx.fillStyle=color; ctx.fillText(txt,VW/2,y);
+  ctx.shadowBlur=0;
+}
+function drawBanners(){
+  if(state==='play'&&bannerT>0){
+    const a=clamp(bannerT,0,1)*clamp((2-bannerT)*3,0,1);
+    ctx.globalAlpha=a;
+    centerText('— '+banner+' —',VH*0.32,44,'#ffd257');
+    ctx.globalAlpha=1;
+  }
+  if(state==='clear'){
+    ctx.fillStyle='rgba(4,2,10,0.45)'; ctx.fillRect(0,0,VW,VH);
+    centerText('LEVEL CLEARED!',VH*0.42,52,'#ffd257');
+    centerText('BONUS +'+clearBonus,VH*0.42+54,22,'#f5f0ff');
+  }
+  if(state==='gameover'){
+    ctx.fillStyle='rgba(10,2,4,0.55)'; ctx.fillRect(0,0,VW,VH);
+    ctx.globalAlpha=Math.sin(time*18)>0?1:0.3;
+    centerText('GAME OVER',VH*0.42,64,'#ff5a4d');
+    ctx.globalAlpha=1;
+    centerText('starting new run…',VH*0.42+58,18,'#f5f0ff');
+  }
+}
+
+/* ============================== render ============================== */
+function render(){
+  ctx.fillStyle='#07060d'; ctx.fillRect(0,0,VW,VH);
+  if(staticDirty) renderStatic();
+  const shx=(Math.random()*2-1)*shake, shy=(Math.random()*2-1)*shake;
+  const cx=cam.x+shx, cy=cam.y+shy;
+  ctx.save();
+  ctx.translate(-cx,-cy);
+  ctx.drawImage(staticCanvas,0,0);
+  drawExitFx();
+  for(const e of items) drawItem(e[0],e[1]);
+  for(const g of genMap.values()) drawGenerator(g);
+  enemies.sort((a,b)=>a.y-b.y);
+  for(const e of enemies) drawEnemy(e);
+  drawHero();
+  for(const p of projectiles) drawProjectile(p);
+  drawParticles();
+  drawFloaters();
+  ctx.restore();
+  drawLighting(cx,cy);
+  drawHUD();
+  drawBanners();
+}
+
+/* ============================== main loop ============================== */
+let last=performance.now();
+function frame(t){
+  const dt=Math.min(0.05,(t-last)/1000);
+  last=t;
+  update(dt);
+  render();
+  requestAnimationFrame(frame);
+}
+resetRun();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

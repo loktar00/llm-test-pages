@@ -16,6 +16,28 @@ def _data_uri(path):
 # Jason's avatar, inlined so every page (at any depth) stays self-contained.
 AVATAR = _data_uri(os.path.join(ASSETS, 'avatar-loktar.jpg'))
 
+# Compact per-model labels for the tile badges. Everything else (which models
+# exist, their run counts, the filter bar) is derived from the manifest — this
+# map only supplies a short human label, with a first-word fallback for new
+# models so newly-benched runs light up without a code change.
+SHORT_LABELS = {
+    'qwen3-6-35b': '35B',
+    'qwen3-6-27b-q8xl': '27B',
+    'qwen3-6-35b-contrast160': 'C160',
+    'qwen3-6-35b-reap192': 'REAP',
+    'qwen3-7-max': '3.7',
+    'qwen3-8-max-preview': '3.8',
+    'laguna-s-2-1-q8': 'Laguna',
+    'glm-5-2-contrast160-iq3': 'GLM',
+}
+
+
+def short_label(run_id, model_name):
+    if run_id in SHORT_LABELS:
+        return SHORT_LABELS[run_id]
+    words = model_name.split()
+    return words[0] if words else run_id
+
 # Video-brand palette: light cool-gray page + white cards by default, inverted dark
 # mode. Colours come straight from the compare-video compositor (compose.py).
 CSS = """
@@ -30,6 +52,8 @@ CSS = """
     --text-2: #656d76;
     --text-3: #8b929c;
     --accent: #0969da;
+    --accent-soft: rgba(9,105,218,.12);
+    --pill-bg: rgba(17,19,24,.05);
     --media-bg: #0a0a0a;
     --shadow: 0 1px 3px rgba(31,35,40,.14), 0 8px 24px rgba(31,35,40,.06);
     --shadow-hover: 0 2px 6px rgba(31,35,40,.16), 0 14px 34px rgba(31,35,40,.10);
@@ -49,6 +73,8 @@ CSS = """
       --text-2: #8d96a0;
       --text-3: #6e7681;
       --accent: #58a6ff;
+      --accent-soft: rgba(88,166,255,.15);
+      --pill-bg: rgba(230,237,243,.08);
       --media-bg: #010409;
       --shadow: 0 1px 2px rgba(1,4,9,.5), 0 8px 24px rgba(1,4,9,.35);
       --shadow-hover: 0 2px 6px rgba(1,4,9,.6), 0 14px 34px rgba(1,4,9,.45);
@@ -68,6 +94,8 @@ CSS = """
     --text-2: #8d96a0;
     --text-3: #6e7681;
     --accent: #58a6ff;
+    --accent-soft: rgba(88,166,255,.15);
+    --pill-bg: rgba(230,237,243,.08);
     --media-bg: #010409;
     --shadow: 0 1px 2px rgba(1,4,9,.5), 0 8px 24px rgba(1,4,9,.35);
     --shadow-hover: 0 2px 6px rgba(1,4,9,.6), 0 14px 34px rgba(1,4,9,.45);
@@ -129,17 +157,39 @@ CSS = """
   .b.degenerated { background: var(--err-bg); color: var(--err-fg); border: 1px solid var(--err-bd); }
   .b.repaired { background: var(--warn-bg); color: var(--warn-fg); border: 1px solid var(--warn-bd); }
 
+  /* model filter bar (section pages) */
+  .filterbar { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: 1.7rem; }
+  .chip { display: inline-flex; align-items: center; gap: .45rem; cursor: pointer;
+    font-family: inherit; font-size: .82rem; font-weight: 700; letter-spacing: -0.01em;
+    padding: .4rem .8rem; border-radius: 999px; white-space: nowrap;
+    background: var(--card); color: var(--text); border: 1px solid var(--border);
+    box-shadow: var(--shadow); transition: border-color .15s, background .15s, color .15s; }
+  .chip:hover { border-color: var(--border-hover); }
+  .chip .c-count { color: var(--text-3); font-weight: 700; font-size: .74rem; }
+  .chip.active { background: var(--accent-soft); color: var(--accent);
+    border-color: var(--accent); font-weight: 800; }
+  .chip.active .c-count { color: var(--accent); }
+
   /* live-thumbnail grid (section pages) */
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1rem; margin-top: 2rem; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1rem; margin-top: 1.2rem; }
   a.tile { display: block; border: 1px solid var(--border); border-radius: 14px; overflow: hidden;
     background: var(--card); color: var(--text); text-decoration: none; box-shadow: var(--shadow);
     transition: border-color .15s, box-shadow .15s, transform .15s; }
   a.tile:hover { border-color: var(--border-hover); box-shadow: var(--shadow-hover); transform: translateY(-2px); }
+  .grid a.tile.is-hidden { display: none; }
+  @keyframes tileIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+  .grid.filtering a.tile:not(.is-hidden) { animation: tileIn .18s ease both; }
   .thumbwrap { position: relative; aspect-ratio: 16/10; overflow: hidden; background: var(--media-bg); }
   .thumbwrap video { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .tile-cap { display: flex; justify-content: space-between; align-items: baseline; gap: .5rem;
+  .tile-cap { display: flex; justify-content: space-between; align-items: flex-start; gap: .5rem;
     padding: .7rem .9rem; }
+  .cap-main { min-width: 0; }
   .tile-cap .name { font-size: .9rem; }
+  .tile-cap .muted { flex: none; padding-top: .05rem; }
+  .tile-badges { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .45rem; }
+  .mb { font-size: .64rem; font-weight: 700; line-height: 1; letter-spacing: .01em;
+    padding: .2rem .38rem; border-radius: 6px; white-space: nowrap;
+    background: var(--pill-bg); color: var(--text-2); border: 1px solid var(--border); }
 
   /* featured side-by-side compare video */
   .feature { margin-top: 2rem; background: var(--card); border: 1px solid var(--border);
@@ -369,17 +419,42 @@ for section, stems in by_section.items():
             page(title, '../', SECTIONS[section][0],
                  f'{len(runs)} run(s), live. Add a model, get a panel.', body, wide=True))
 
-# section indexes: live-thumbnail grid, baseline run per prompt
+# section indexes: model filter bar + live-thumbnail grid, baseline preview per prompt
 for section, stems in by_section.items():
     title, brief = SECTIONS[section]
+    # models present in this section, straight from the manifest, with prompt counts
+    model_names = {}
+    model_stems = defaultdict(set)
+    for stem, runs in stems.items():
+        for r in runs:
+            model_names[r['runId']] = r['modelName']
+            model_stems[r['runId']].add(stem)
+    # most-run models first, then alphabetical by short label — a stable order shared
+    # by the filter chips and each tile's badge row
+    order = sorted(model_stems, key=lambda rid: (-len(model_stems[rid]), short_label(rid, model_names[rid])))
+
+    chips = [f'<button class="chip active" type="button" data-all>All <span class="c-count">{len(stems)}</span></button>']
+    for rid in order:
+        chips.append(f'<button class="chip" type="button" data-model="{html.escape(rid)}">'
+                     f'{html.escape(model_names[rid])} <span class="c-count">{len(model_stems[rid])}</span></button>')
+    filterbar = '    <div class="filterbar">\n      ' + '\n      '.join(chips) + '\n    </div>'
+
     tiles = []
     for stem in sorted(stems):
         runs = stems[stem]
         base = next((r for r in runs if r['runId'] == 'qwen3-6-35b'), runs[0])
-        tiles.append(f"""      <a class="tile" href="./{stem}/">
+        rids = sorted((r['runId'] for r in runs), key=lambda rid: order.index(rid))
+        data_models = ' '.join(rids)
+        pills = ''.join(
+            f'<span class="mb" title="{html.escape(model_names[rid])}">{html.escape(short_label(rid, model_names[rid]))}</span>'
+            for rid in rids)
+        tiles.append(f"""      <a class="tile" href="./{stem}/" data-models="{data_models}">
         <div class="thumbwrap"><video data-src="./{stem}/{base['runId']}/preview.webm" muted loop playsinline preload="none" title="{html.escape(stem)}"></video></div>
-        <div class="tile-cap"><span class="name">{html.escape(stem.replace('-', ' ').title())}</span>
-        <span class="muted">{len(runs)}</span></div>
+        <div class="tile-cap">
+          <div class="cap-main"><span class="name">{html.escape(stem.replace('-', ' ').title())}</span>
+          <div class="tile-badges">{pills}</div></div>
+          <span class="muted">{len(runs)}</span>
+        </div>
       </a>""")
     observer_js = """    <script>
     // recorded previews: load + play near the viewport, pause + release far away
@@ -394,7 +469,29 @@ for section, stems in by_section.items():
     }, { rootMargin: '300px 0px' });
     document.querySelectorAll('.thumbwrap').forEach((t) => io.observe(t));
     </script>"""
-    body = '    <div class="grid">\n' + '\n'.join(tiles) + '\n    </div>\n' + observer_js
+    filter_js = """    <script>
+    // manifest-driven model filter: single-select chips show/hide tiles by data-models
+    (function () {
+      const grid = document.querySelector('.grid');
+      const chips = Array.from(document.querySelectorAll('.chip'));
+      const allChip = document.querySelector('.chip[data-all]');
+      function apply(model) {
+        grid.querySelectorAll('a.tile').forEach((t) => {
+          const ok = !model || (' ' + t.dataset.models + ' ').includes(' ' + model + ' ');
+          t.classList.toggle('is-hidden', !ok);
+        });
+        grid.classList.remove('filtering'); void grid.offsetWidth; grid.classList.add('filtering');
+      }
+      chips.forEach((c) => c.addEventListener('click', () => {
+        const model = c.dataset.model || '';
+        const wasActive = c.classList.contains('active');
+        chips.forEach((x) => x.classList.remove('active'));
+        if (model && wasActive) { allChip.classList.add('active'); apply(''); }
+        else { c.classList.add('active'); apply(model); }
+      }));
+    })();
+    </script>"""
+    body = filterbar + '\n    <div class="grid">\n' + '\n'.join(tiles) + '\n    </div>\n' + observer_js + filter_js
     open(os.path.join(REPO, section, 'index.html'), 'w', encoding='utf-8').write(
         page(title, '../', 'Home', brief, body, wide=True))
 

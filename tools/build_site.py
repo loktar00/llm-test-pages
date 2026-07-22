@@ -1,67 +1,216 @@
-import json, os, shutil, html
+import json, os, shutil, html, base64
 from collections import defaultdict
 
 SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gallery-out')
 REPO = r'D:\dev\llm-test-pages'
+ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
 manifest = json.load(open(os.path.join(SRC, 'manifest.json'), encoding='utf-8'))
 
+
+def _data_uri(path):
+    ext = path.rsplit('.', 1)[-1].lower()
+    mime = {'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg'}[ext]
+    return f'data:{mime};base64,' + base64.b64encode(open(path, 'rb').read()).decode()
+
+
+# Jason's avatar, inlined so every page (at any depth) stays self-contained.
+AVATAR = _data_uri(os.path.join(ASSETS, 'avatar-loktar.jpg'))
+
+# Video-brand palette: light cool-gray page + white cards by default, inverted dark
+# mode. Colours come straight from the compare-video compositor (compose.py).
 CSS = """
-  :root { color-scheme: dark; }
+  :root {
+    color-scheme: light;
+    --bg: #e9ecf3;
+    --card: #ffffff;
+    --card-hover: #f4f6fb;
+    --border: #dfe3ec;
+    --border-hover: #b7c0d6;
+    --text: #111318;
+    --text-2: #656d76;
+    --text-3: #8b929c;
+    --accent: #0969da;
+    --media-bg: #0a0a0a;
+    --shadow: 0 1px 3px rgba(31,35,40,.14), 0 8px 24px rgba(31,35,40,.06);
+    --shadow-hover: 0 2px 6px rgba(31,35,40,.16), 0 14px 34px rgba(31,35,40,.10);
+    --ok-fg: #1a7f37; --ok-bg: rgba(26,127,55,.10); --ok-bd: rgba(26,127,55,.30);
+    --warn-fg: #9a6700; --warn-bg: rgba(154,103,0,.10); --warn-bd: rgba(154,103,0,.30);
+    --err-fg: #cf222e; --err-bg: rgba(207,34,46,.10); --err-bd: rgba(207,34,46,.30);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #0d1117;
+      --card: #161b22;
+      --card-hover: #1b2230;
+      --border: #30363d;
+      --border-hover: #4493f8;
+      --text: #e6edf3;
+      --text-2: #8d96a0;
+      --text-3: #6e7681;
+      --accent: #58a6ff;
+      --media-bg: #010409;
+      --shadow: 0 1px 2px rgba(1,4,9,.5), 0 8px 24px rgba(1,4,9,.35);
+      --shadow-hover: 0 2px 6px rgba(1,4,9,.6), 0 14px 34px rgba(1,4,9,.45);
+      --ok-fg: #3fb950; --ok-bg: rgba(63,185,80,.12); --ok-bd: rgba(63,185,80,.35);
+      --warn-fg: #d29922; --warn-bg: rgba(210,153,34,.12); --warn-bd: rgba(210,153,34,.35);
+      --err-fg: #f85149; --err-bg: rgba(248,81,73,.12); --err-bd: rgba(248,81,73,.35);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0d1117;
+    --card: #161b22;
+    --card-hover: #1b2230;
+    --border: #30363d;
+    --border-hover: #4493f8;
+    --text: #e6edf3;
+    --text-2: #8d96a0;
+    --text-3: #6e7681;
+    --accent: #58a6ff;
+    --media-bg: #010409;
+    --shadow: 0 1px 2px rgba(1,4,9,.5), 0 8px 24px rgba(1,4,9,.35);
+    --shadow-hover: 0 2px 6px rgba(1,4,9,.6), 0 14px 34px rgba(1,4,9,.45);
+    --ok-fg: #3fb950; --ok-bg: rgba(63,185,80,.12); --ok-bd: rgba(63,185,80,.35);
+    --warn-fg: #d29922; --warn-bg: rgba(210,153,34,.12); --warn-bd: rgba(210,153,34,.35);
+    --err-fg: #f85149; --err-bg: rgba(248,81,73,.12); --err-bd: rgba(248,81,73,.35);
+  }
   * { box-sizing: border-box; }
   body { margin: 0; min-height: 100vh;
-    font-family: -apple-system, "Segoe UI", Inter, Roboto, "Helvetica Neue", sans-serif;
-    background: #0d1117; color: #e6edf3; padding: 3rem 1.5rem 4rem; }
+    font-family: "Segoe UI", system-ui, -apple-system, "Arial Black", Arial, sans-serif;
+    background: var(--bg); color: var(--text); padding: 3rem 1.5rem 4rem;
+    -webkit-font-smoothing: antialiased; }
   .wrap { max-width: 860px; margin: 0 auto; }
-  a.back { color: #8d96a0; text-decoration: none; font-size: 0.85rem; }
-  a.back:hover { color: #58a6ff; }
-  h1 { margin: 1.25rem 0 0.35rem; font-size: clamp(1.6rem, 5vw, 2.4rem); font-weight: 650; letter-spacing: -0.02em; }
-  p.brief { color: #8d96a0; line-height: 1.65; max-width: 64ch; }
+  .wrap.wide { max-width: 1240px; }
+  a.back { color: var(--text-2); text-decoration: none; font-size: 0.85rem; font-weight: 600; }
+  a.back:hover { color: var(--accent); }
+  h1 { margin: 1.25rem 0 0.4rem; font-size: clamp(1.7rem, 5vw, 2.5rem);
+    font-weight: 900; letter-spacing: -0.035em; line-height: 1.05; }
+  p.brief { color: var(--text-2); line-height: 1.65; max-width: 64ch; font-weight: 450; }
+  p.brief a { color: var(--accent); }
+
+  /* theme toggle */
+  #theme-toggle { position: fixed; top: 14px; right: 14px; z-index: 50;
+    width: 40px; height: 40px; border-radius: 12px; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--card); color: var(--text-2);
+    border: 1px solid var(--border); box-shadow: var(--shadow);
+    transition: color .15s, border-color .15s, background .15s; }
+  #theme-toggle:hover { color: var(--text); border-color: var(--border-hover); }
+  #theme-toggle .icon-sun { display: none; }
+  #theme-toggle .icon-moon { display: block; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) #theme-toggle .icon-sun { display: block; }
+    :root:not([data-theme="light"]) #theme-toggle .icon-moon { display: none; }
+  }
+  :root[data-theme="dark"] #theme-toggle .icon-sun { display: block; }
+  :root[data-theme="dark"] #theme-toggle .icon-moon { display: none; }
+  :root[data-theme="light"] #theme-toggle .icon-sun { display: none; }
+  :root[data-theme="light"] #theme-toggle .icon-moon { display: block; }
+
+  /* section list cards */
   .cards { display: grid; gap: 0.8rem; margin-top: 2rem; }
-  a.card { display: block; padding: 1.1rem 1.4rem; border: 1px solid #30363d;
-    border-radius: 10px; background: #161b22; color: #e6edf3; text-decoration: none;
-    transition: border-color .15s, background .15s; }
-  a.card:hover { border-color: #4493f8; background: #1b2230; }
+  a.card { display: block; padding: 1.1rem 1.4rem; border: 1px solid var(--border);
+    border-radius: 14px; background: var(--card); color: var(--text); text-decoration: none;
+    box-shadow: var(--shadow);
+    transition: border-color .15s, background .15s, box-shadow .15s, transform .15s; }
+  a.card:hover { border-color: var(--border-hover); background: var(--card-hover);
+    box-shadow: var(--shadow-hover); transform: translateY(-1px); }
   .card-top { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
-  .name { font-size: 1.05rem; font-weight: 650; }
-  .muted { color: #8d96a0; font-size: 0.85rem; }
+  .name { font-size: 1.05rem; font-weight: 800; letter-spacing: -0.01em; }
+  .muted { color: var(--text-3); font-size: 0.85rem; font-weight: 600; }
+  .runid { color: var(--text-2); font-size: 0.82rem; margin-top: 0.4rem; line-height: 1.5; }
+
   .badges { display: flex; gap: .45rem; margin-top: .55rem; flex-wrap: wrap; }
-  .b { font-size: .7rem; padding: .18rem .6rem; border-radius: 99px; font-weight: 600; }
-  .b.complete { background: rgba(63,185,80,.12); color: #3fb950; border: 1px solid rgba(63,185,80,.35); }
-  .b.truncated { background: rgba(210,153,34,.12); color: #d29922; border: 1px solid rgba(210,153,34,.35); }
-  .b.degenerated { background: rgba(248,81,73,.12); color: #f85149; border: 1px solid rgba(248,81,73,.35); }
-  .b.repaired { background: rgba(210,153,34,.12); color: #d29922; border: 1px solid rgba(210,153,34,.35); }
-  footer { color: #6e7681; font-size: .8rem; margin-top: 3rem; }
+  .b { font-size: .7rem; padding: .18rem .6rem; border-radius: 99px; font-weight: 700;
+    text-transform: lowercase; }
+  .b.complete { background: var(--ok-bg); color: var(--ok-fg); border: 1px solid var(--ok-bd); }
+  .b.truncated { background: var(--warn-bg); color: var(--warn-fg); border: 1px solid var(--warn-bd); }
+  .b.degenerated { background: var(--err-bg); color: var(--err-fg); border: 1px solid var(--err-bd); }
+  .b.repaired { background: var(--warn-bg); color: var(--warn-fg); border: 1px solid var(--warn-bd); }
+
   /* live-thumbnail grid (section pages) */
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1rem; margin-top: 2rem; }
-  a.tile { display: block; border: 1px solid #30363d; border-radius: 10px; overflow: hidden;
-    background: #161b22; color: #e6edf3; text-decoration: none;
-    transition: border-color .15s; }
-  a.tile:hover { border-color: #4493f8; }
-  .thumbwrap { position: relative; aspect-ratio: 16/10; overflow: hidden; background: #010409; }
+  a.tile { display: block; border: 1px solid var(--border); border-radius: 14px; overflow: hidden;
+    background: var(--card); color: var(--text); text-decoration: none; box-shadow: var(--shadow);
+    transition: border-color .15s, box-shadow .15s, transform .15s; }
+  a.tile:hover { border-color: var(--border-hover); box-shadow: var(--shadow-hover); transform: translateY(-2px); }
+  .thumbwrap { position: relative; aspect-ratio: 16/10; overflow: hidden; background: var(--media-bg); }
   .thumbwrap video { width: 100%; height: 100%; object-fit: cover; display: block; }
   .tile-cap { display: flex; justify-content: space-between; align-items: baseline; gap: .5rem;
-    padding: .65rem .85rem; }
-  .tile-cap .name { font-size: .85rem; }
+    padding: .7rem .9rem; }
+  .tile-cap .name { font-size: .9rem; }
+
+  /* featured side-by-side compare video */
+  .feature { margin-top: 2rem; background: var(--card); border: 1px solid var(--border);
+    border-radius: 14px; overflow: hidden; box-shadow: var(--shadow); }
+  .feature-head { padding: .85rem 1.1rem; font-weight: 900; font-size: 1rem;
+    letter-spacing: -0.02em; color: var(--text); border-bottom: 1px solid var(--border); }
+  .feature video { display: block; width: 100%; background: var(--media-bg); }
+
   /* compare view (prompt pages) */
   .panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(480px, 100%), 1fr));
     gap: 1.2rem; margin-top: 2rem; }
-  .panel { border: 1px solid #30363d; border-radius: 10px; overflow: hidden;
-    background: #161b22; }
+  .panel { border: 1px solid var(--border); border-radius: 14px; overflow: hidden;
+    background: var(--card); box-shadow: var(--shadow); }
   .panel-head { display: flex; justify-content: space-between; align-items: center; gap: .6rem;
-    flex-wrap: wrap; padding: .7rem 1rem; }
-  .panel-head .name { font-weight: 650; font-size: .95rem; }
-  .panel-head a.full { color: #58a6ff; text-decoration: none; font-size: .8rem; }
+    flex-wrap: wrap; padding: .8rem 1.05rem; border-bottom: 1px solid var(--border); }
+  .panel-head .name { font-weight: 800; font-size: .98rem; letter-spacing: -0.01em; }
+  .panel-meta { display: flex; align-items: center; gap: .6rem; }
+  .panel-meta .tok { color: var(--text-3); font-size: .78rem; font-weight: 600; }
+  .panel-head a.full { color: var(--accent); text-decoration: none; font-size: .8rem; font-weight: 600; }
   .panel-head a.full:hover { text-decoration: underline; }
-  .panel iframe { display: block; width: 100%; height: 430px; border: 0; background: #010409; }
+  .panel iframe { display: block; width: 100%; height: 430px; border: 0; background: var(--media-bg); }
   .liveslot { position: relative; cursor: pointer; }
-  .liveslot video { display: block; width: 100%; aspect-ratio: 16/10; object-fit: cover; background: #010409; }
+  .liveslot video { display: block; width: 100%; aspect-ratio: 16/10; object-fit: cover; background: var(--media-bg); }
   .liveslot .hint { position: absolute; bottom: .6rem; right: .75rem; font-size: .7rem;
-    font-weight: 600; color: #e6edf3;
-    background: rgba(13,17,23,.72); border: 1px solid #30363d;
+    font-weight: 700; color: #fff;
+    background: rgba(13,17,23,.72); border: 1px solid rgba(255,255,255,.18);
     padding: .28rem .65rem; border-radius: 99px; pointer-events: none; }
-  .liveslot:hover .hint { border-color: #4493f8; background: rgba(27,34,48,.9); }
-  .wrap.wide { max-width: 1240px; }
+  .liveslot:hover .hint { background: rgba(9,105,218,.85); border-color: rgba(255,255,255,.3); }
+
+  /* footer wordmark */
+  footer { display: flex; align-items: center; gap: .7rem; flex-wrap: wrap;
+    margin-top: 3rem; padding-top: 1.4rem; border-top: 1px solid var(--border);
+    color: var(--text-3); font-size: .82rem; }
+  footer a { text-decoration: none; color: inherit; }
+  footer .me { display: inline-flex; align-items: center; gap: .5rem; }
+  footer .me .avatar { width: 28px; height: 28px; border-radius: 50%; object-fit: cover;
+    border: 1px solid var(--border); flex: none; }
+  footer .me .handle { font-weight: 900; letter-spacing: -0.01em; color: var(--text);
+    font-size: .92rem; }
+  footer .me:hover .handle { color: var(--accent); }
+  footer .dot { color: var(--text-3); }
+  footer .repo:hover { color: var(--accent); }
 """
+
+# Runs before paint so the stored theme never flashes the wrong palette.
+HEAD_SCRIPT = ("<script>(function(){try{var t=localStorage.getItem('theme');"
+               "if(t)document.documentElement.dataset.theme=t;}catch(e){}})();</script>")
+
+TOGGLE_HTML = """<button id="theme-toggle" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">
+    <svg class="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+  </button>"""
+
+TOGGLE_SCRIPT = """<script>(function(){
+    var btn=document.getElementById('theme-toggle');
+    if(!btn)return;
+    btn.addEventListener('click',function(){
+      var root=document.documentElement, cur=root.dataset.theme;
+      if(!cur)cur=window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';
+      var next=cur==='dark'?'light':'dark';
+      root.dataset.theme=next;
+      try{localStorage.setItem('theme',next);}catch(e){}
+    });
+  })();</script>"""
+
+FOOTER_HTML = f"""<footer>
+      <a class="me" href="https://x.com/loktar00"><img class="avatar" src="{AVATAR}" alt="loktar00" width="28" height="28"><span class="handle">@loktar00</span></a>
+      <span class="dot">&middot;</span>
+      <a class="repo" href="https://github.com/loktar00/llm-test-pages">github.com/loktar00/llm-test-pages</a>
+    </footer>"""
+
 
 def page(title, back, back_label, brief, body_html, wide=False):
     return f"""<!doctype html>
@@ -70,16 +219,74 @@ def page(title, back, back_label, brief, body_html, wide=False):
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(title)}</title>
+{HEAD_SCRIPT}
 <style>{CSS}</style>
 </head>
 <body>
+  {TOGGLE_HTML}
   <div class="wrap{' wide' if wide else ''}">
     <a class="back" href="{back}">&larr; {html.escape(back_label)}</a>
     <h1>{html.escape(title)}</h1>
     <p class="brief">{brief}</p>
 {body_html}
-    <footer>github.com/loktar00/llm-test-pages</footer>
+    {FOOTER_HTML}
   </div>
+  {TOGGLE_SCRIPT}
+</body>
+</html>
+"""
+
+ROOT_TITLE = 'Local AI Model Demos'
+ROOT_BRIEF = ('Self-contained HTML demos produced by local language models &mdash; each published with the '
+              'model that generated it, base against expert-pruned, side by side.')
+ROOT_BODY = """    <div class="cards">
+      <a class="card" href="./virtual-boy-website/">
+        <div class="card-top">
+          <span class="name">Virtual Boy Website</span>
+          <span class="muted">1 run</span>
+        </div>
+      </a>
+      <a class="card" href="./canvas/">
+        <div class="card-top">
+          <span class="name">Canvas Demos</span>
+          <span class="muted">122 runs &middot; 66 prompts</span>
+        </div>
+        <div class="runid">Full-length baselines of the visual-llm canvas prompt set &mdash; Qwen3.6 35B, base vs expert-pruned REAP192, side by side</div>
+      </a>
+      <a class="card" href="./frontend/">
+        <div class="card-top">
+          <span class="name">Frontend Web</span>
+          <span class="muted">36 runs</span>
+        </div>
+        <div class="runid">Full-length baselines of the frontend-web prompt set &mdash; component-level UI design by Qwen3.6 35B</div>
+      </a>
+      <a class="card" href="./deviations/">
+        <div class="card-top">
+          <span class="name">Deviations</span>
+          <span class="muted">40 runs &middot; 20 prompts</span>
+        </div>
+        <div class="runid">Concepts from the original demos-and-deviations archive, reinterpreted by the models &mdash; base vs REAP192</div>
+      </a>
+    </div>"""
+
+ROOT_PAGE = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{ROOT_TITLE}</title>
+{HEAD_SCRIPT}
+<style>{CSS}</style>
+</head>
+<body>
+  {TOGGLE_HTML}
+  <div class="wrap">
+    <h1>{ROOT_TITLE}</h1>
+    <p class="brief">{ROOT_BRIEF}</p>
+{ROOT_BODY}
+    {FOOTER_HTML}
+  </div>
+  {TOGGLE_SCRIPT}
 </body>
 </html>
 """
@@ -92,7 +299,7 @@ SECTIONS = {
                  'UI design — glassmorphic cards, dashboards, pure-CSS art — each a single self-contained '
                  'HTML file generated by Qwen3.6 35B.'),
     'deviations': ('Deviations', 'Concepts adapted from loktar00&rsquo;s original creative-coding archive '
-                   '(<a href="https://github.com/loktar00/demos-and-deviations" style="color:#58a6ff">demos-and-deviations</a>) '
+                   '(<a href="https://github.com/loktar00/demos-and-deviations">demos-and-deviations</a>) '
                    'and reinterpreted by the models: raycast lighting, metaballs, screen-melt, self-weaving '
                    'tapestries, autonomous landers. Base vs expert-pruned REAP192, side by side.'),
 }
@@ -128,8 +335,11 @@ for section, stems in by_section.items():
             panels.append(f"""      <div class="panel">
         <div class="panel-head">
           <span class="name">{html.escape(r['modelName'])}</span>
-          <span class="muted">{r['tokens']} tok &middot; <span class="b {r['status']}">{r['status']}</span></span>
-          <a class="full" href="./{r['runId']}/">open full &rarr;</a>
+          <span class="panel-meta">
+            <span class="tok">{r['tokens']} tok</span>
+            <span class="b {r['status']}">{r['status']}</span>
+            <a class="full" href="./{r['runId']}/">open full &rarr;</a>
+          </span>
         </div>
         <div class="liveslot" data-src="./{r['runId']}/" data-title="{html.escape(r['modelName'])}">
           <video src="./{r['runId']}/preview.webm" muted loop autoplay playsinline preload="metadata"></video>
@@ -147,7 +357,14 @@ for section, stems in by_section.items():
       }, { once: true });
     });
     </script>"""
-        body = '    <div class="panels">\n' + '\n'.join(panels) + '\n    </div>\n' + swap_js
+        # optional side-by-side comparison video: rendered above the panels when present
+        feature = ''
+        if os.path.isfile(os.path.join(REPO, section, stem, 'compare.mp4')):
+            feature = ('    <div class="feature">\n'
+                       '      <div class="feature-head">Side-by-side</div>\n'
+                       '      <video controls playsinline preload="metadata" src="./compare.mp4"></video>\n'
+                       '    </div>\n')
+        body = feature + '    <div class="panels">\n' + '\n'.join(panels) + '\n    </div>\n' + swap_js
         open(os.path.join(REPO, section, stem, 'index.html'), 'w', encoding='utf-8').write(
             page(title, '../', SECTIONS[section][0],
                  f'{len(runs)} run(s), live. Add a model, get a panel.', body, wide=True))
@@ -179,7 +396,10 @@ for section, stems in by_section.items():
     </script>"""
     body = '    <div class="grid">\n' + '\n'.join(tiles) + '\n    </div>\n' + observer_js
     open(os.path.join(REPO, section, 'index.html'), 'w', encoding='utf-8').write(
-        page(title, '../', 'LLM Test Pages', brief, body, wide=True))
+        page(title, '../', 'Home', brief, body, wide=True))
+
+# root landing page
+open(os.path.join(REPO, 'index.html'), 'w', encoding='utf-8').write(ROOT_PAGE)
 
 n_runs = len(manifest)
 n_canvas = sum(1 for r in manifest if r['section'] == 'canvas')

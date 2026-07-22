@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flowing Cloth Ribbons</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #050508; /* Deep dark background */
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d', { alpha: false }); // Optimize for no transparency on base
+
+        let width, height;
+        let time = 0;
+
+        // Configuration
+        const RIBBON_COUNT = 5;
+        const SEGMENT_COUNT = 40;
+        const SEGMENT_LENGTH = 15;
+        const RIBBON_WIDTH = 60;
+        const GRAVITY = 0.2;
+        const FRICTION = 0.92;
+        const STIFFNESS = 0.4; // Spring stiffness (0-1)
+        const ITERATIONS = 5; // Physics solver iterations
+        
+        // Wind Configuration
+        const WIND_SPEED = 0.003;
+        const WIND_AMPLITUDE = 0.5;
+        const WIND_FREQ = 0.02;
+
+        // Light Source Direction (normalized)
+        const LIGHT_DIR = { x: 0.5, y: 0.5, z: 1.0 };
+        const lightLen = Math.sqrt(LIGHT_DIR.x**2 + LIGHT_DIR.y**2 + LIGHT_DIR.z**2);
+        LIGHT_DIR.x /= lightLen;
+        LIGHT_DIR.y /= lightLen;
+        LIGHT_DIR.z /= lightLen;
+
+        class Ribbon {
+            constructor(index, total, color) {
+                this.color = color;
+                this.segments = [];
+                
+                // Calculate starting X to distribute evenly
+                const spacing = width / (total + 1);
+                const startX = spacing * (index + 1);
+                
+                // Create segments
+                for (let i = 0; i < SEGMENT_COUNT; i++) {
+                    this.segments.push({
+                        x: startX,
+                        y: i * SEGMENT_LENGTH,
+                        oldX: startX,
+                        oldY: i * SEGMENT_LENGTH,
+                        pinned: i === 0
+                    });
+                }
+            }
+
+            update() {
+                // 1. Verlet Integration
+                for (let i = 0; i < this.segments.length; i++) {
+                    const seg = this.segments[i];
+                    
+                    if (seg.pinned) {
+                        seg.x = this.segments[0].x; // Keep pinned to original X
+                        seg.y = 0;
+                        continue;
+                    }
+
+                    const vx = (seg.x - seg.oldX) * FRICTION;
+                    const vy = (seg.y - seg.oldY) * FRICTION;
+
+                    seg.oldX = seg.x;
+                    seg.oldY = seg.y;
+
+                    seg.x += vx;
+                    seg.y += vy;
+
+                    // Gravity
+                    seg.y += GRAVITY;
+
+                    // Procedural Wind Field
+                    // Wind varies by time, global wave, and local segment index (ripple)
+                    const windX = Math.sin(time * WIND_SPEED * 1000 + i * 0.2) * WIND_AMPLITUDE;
+                    const windY = Math.cos(time * WIND_SPEED * 500 + i * 0.1) * (WIND_AMPLITUDE * 0.2);
+                    
+                    seg.x += windX;
+                    seg.y += windY;
+                }
+
+                // 2. Constraint Solving (Stick constraints)
+                for (let k = 0; k < ITERATIONS; k++) {
+                    for (let i = 0; i < this.segments.length - 1; i++) {
+                        const p1 = this.segments[i];
+                        const p2 = this.segments[i+1];
+
+                        const dx = p2.x - p1.x;
+                        const dy = p2.y - p1.y;
+                        const dist = Math.sqrt(dx * dx + dy * dy);
+                        
+                        if (dist === 0) continue;
+
+                        const diff = SEGMENT_LENGTH - dist;
+                        const percent = diff / dist * STIFFNESS;
+                        const offsetX = dx * percent;
+                        const offsetY = dy * percent;
+
+                        if (!p1.pinned) {
+                            p1.x -= offsetX;
+                            p1.y -= offsetY;
+                        }
+                        if (!p2.pinned) {
+                            p2.x += offsetX;
+                            p2.y += offsetY;
+                        }
+                    }
+                }
+            }
+
+            draw() {
+                ctx.beginPath();
+                
+                // Move to first point
+                ctx.moveTo(this.segments[0].x, this.segments[0].y);
+
+                // Catmull-Rom or simple Quadratic Bezier to smooth the line
+                // We'll use a midpoint approach for smooth curves
+                for (let i = 0; i < this.segments.length - 1; i++) {
+                    const p0 = this.segments[i];
+                    const p1 = this.segments[i+1];
+                    
+                    // Calculate midpoint
+                    const midX = (p0.x + p1.x) / 2;
+                    const midY = (p0.y + p1.y) / 2;
+                    
+                    ctx.quadraticCurveTo(p0.x, p0.y, midX, midY);
+                }
+                
+                // Connect to last segment
+                const last = this.segments[this.segments.length - 1];
+                ctx.lineTo(last.x, last.y);
+
+                // Stroke Setup
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                
+                // Create Gradient based on ribbon path
+                // Sampling points along the path for dynamic gradient
+                const grad = ctx.createLinearGradient(
+                    this.segments[0].x, this.segments[0].y,
+                    last.x, last.y
+                );
+                
+                // Base colors
+                const c = this.color;
+                grad.addColorStop(0, `rgba(${c.r}, ${c.g}, ${c.b}, 0.9)`);
+                grad.addColorStop(0.5, `rgba(${Math.min(255, c.r + 50)}, ${Math.min(255, c.g + 50)}, ${Math.min(255, c.b + 50)}, 0.8)`);
+                grad.addColorStop(1, `rgba(${Math.max(0, c.r - 50)}, ${Math.max(0, c.g - 50)}, ${Math.max(0, c.b - 50)}, 0.6)`);
+
+                ctx.lineWidth = RIBBON_WIDTH;
+                ctx.strokeStyle = grad;
+                
+                // Global composite to make ribbons glow slightly
+                ctx.globalCompositeOperation = 'screen';
+                ctx.stroke();
+                
+                // Reset composite
+                ctx.globalCompositeOperation = 'source-over';
+
+                // Add Sheen (Specular Highlight)
+                // We draw a thinner line on top where the ribbon faces the light
+                this.drawSheen();
+            }
+
+            drawSheen() {
+                // Calculate a "sheen mask" based on tangent vs light
+                // We iterate segments again to draw the highlight
+                
+                ctx.beginPath();
+                ctx.moveTo(this.segments[0].x, this.segments[0].y);
+
+                for (let i = 0; i < this.segments.length - 1; i++) {
+                    const p0 = this.segments[i];
+                    const p1 = this.segments[i+1];
+                    const midX = (p0.x + p1.x) / 2;
+                    const midY = (p0.y + p1.y) / 2;
+                    ctx.quadraticCurveTo(p0.x, p0.y, midX, midY);
+                }
+                const last = this.segments[this.segments.length - 1];
+                ctx.lineTo(last.x, last.y);
+
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+
+                // Create a gradient for the sheen that fades in and out
+                // based on the "bend" towards light
+                const sheenGrad = ctx.createLinearGradient(
+                    this.segments[0].x, this.segments[0].y,
+                    last.x, last.y
+                );
+
+                // Calculate sheen intensity at a few points
+                // Simple approximation: if tangent aligns with light, bright.
+                // Since we can't easily vary color per pixel in a stroke gradient without complex logic,
+                // we will use a semi-transparent white stroke that simulates the "fold" highlight.
+                
+                sheenGrad.addColorStop(0, 'rgba(255, 255, 255, 0.0)');
+                sheenGrad.addColorStop(0.3, 'rgba(255, 255, 255, 0.4)');
+                sheenGrad.addColorStop(0.6, 'rgba(255, 255, 255, 0.0)');
+                sheenGrad.addColorStop(0.8, 'rgba(255, 255, 255, 0.3)');
+                sheenGrad.addColorStop(1, 'rgba(255, 255, 255, 0.0)');
+
+                // Draw a thinner line offset slightly to simulate surface reflection
+                ctx.lineWidth = RIBBON_WIDTH * 0.3;
+                ctx.strokeStyle = sheenGrad;
+                
+                // Shift the stroke slightly to look like a highlight on the edge
+                // We do this by drawing the path, but to offset it correctly in 2D canvas is tricky.
+                // Instead, we just draw a high-contrast inner line.
+                ctx.stroke();
+            }
+        }
+
+        let ribbons = [];
+
+        function init() {
+            resize();
+            window.addEventListener('resize', resize);
+            
+            // Define ribbon colors (HSL-ish converted to RGB for easier manipulation)
+            // Cyan, Purple, Magenta, Blue, Teal
+            const colors = [
+                { r: 0, g: 255, b: 255 },   // Cyan
+                { r: 180, g: 0, b: 255 },    // Purple
+                { r: 255, g: 0, b: 200 },    // Magenta
+                { r: 0, g: 100, b: 255 },    // Blue
+                { r: 0, g: 255, b: 150 }     // Teal
+            ];
+
+            ribbons = [];
+            for (let i = 0; i < RIBBON_COUNT; i++) {
+                ribbons.push(new Ribbon(i, RIBBON_COUNT, colors[i % colors.length]));
+            }
+        }
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            
+            // Re-init ribbons on resize to position them correctly
+            const colors = [
+                { r: 0, g: 255, b: 255 },
+                { r: 180, g: 0, b: 255 },
+                { r: 255, g: 0, b: 200 },
+                { r: 0, g: 100, b: 255 },
+                { r: 0, g: 255, b: 150 }
+            ];
+            
+            ribbons = [];
+            for (let i = 0; i < RIBBON_COUNT; i++) {
+                ribbons.push(new Ribbon(i, RIBBON_COUNT, colors[i % colors.length]));
+            }
+        }
+
+        function animate() {
+            time = performance.now();
+            
+            // Clear screen with a slight fade for motion blur effect (optional, here we do clean clear)
+            ctx.fillStyle = '#050508';
+            ctx.fillRect(0, 0, width, height);
+
+            // Update and Draw
+            for (let ribbon of ribbons) {
+                ribbon.update();
+                ribbon.draw();
+            }
+
+            requestAnimationFrame(animate);
+        }
+
+        init();
+        animate();
+
+    </script>
+</body>
+</html>

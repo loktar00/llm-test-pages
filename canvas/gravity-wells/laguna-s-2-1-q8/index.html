@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Gravity Painting</title>
+<style>
+  * { margin: 0; padding: 0; overflow: hidden; }
+  body, html { width: 100%; height: 100%; background: #000; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script>
+(() => {
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  
+  function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  class GravityWell {
+    constructor() {
+      this.reset();
+      this.id = Math.random();
+    }
+
+    reset() {
+      this.x = Math.random() * canvas.width;
+      this.y = Math.random() * canvas.height;
+      this.vx = (Math.random() - 0.5) * 0.3;
+      this.vy = (Math.random() - 0.5) * 0.3;
+      this.mass = 150 + Math.random() * 300;
+      this.splitTimer = 5000 + Math.random() * 10000;
+      this.mergeRadius = 100 + Math.random() * 100;
+    }
+
+    update(dt) {
+      this.x += this.vx * dt;
+      this.y += this.vy * dt;
+
+      // Bounce off edges
+      if (this.x < 50 || this.x > canvas.width - 50) {
+        this.vx *= -1;
+        this.x = Math.max(50, Math.min(canvas.width - 50, this.x));
+      }
+      if (this.y < 50 || this.y > canvas.height - 50) {
+        this.vy *= -1;
+        this.y = Math.max(50, Math.min(canvas.height - 50, this.y));
+      }
+
+      this.splitTimer -= dt * 1000;
+    }
+
+    attract(px, py, dt) {
+      const dx = this.x - px;
+      const dy = this.y - py;
+      const distSq = dx * dx + dy * dy + 100;
+      const force = this.mass / distSq;
+      const ax = (dx / Math.sqrt(distSq)) * force;
+      const ay = (dy / Math.sqrt(distSq)) * force;
+      return { ax, ay };
+    }
+  }
+
+  const wells = [];
+  for (let i = 0; i < 4; i++) {
+    wells.push(new GravityWell());
+  }
+
+  const particles = [];
+  const emitRate = 2000; // particles per second per edge
+  let lastEmit = 0;
+
+  function emitParticles(dt) {
+    const count = Math.floor(emitRate * dt * 4);
+    for (let i = 0; i < count; i++) {
+      const edge = Math.floor(Math.random() * 4);
+      let x, y;
+      if (edge === 0) { // top
+        x = Math.random() * canvas.width;
+        y = -2;
+      } else if (edge === 1) { // right
+        x = canvas.width + 2;
+        y = Math.random() * canvas.height;
+      } else if (edge === 2) { // bottom
+        x = Math.random() * canvas.width;
+        y = canvas.height + 2;
+      } else { // left
+        x = -2;
+        y = Math.random() * canvas.height;
+      }
+      particles.push({
+        x, y,
+        vx: (Math.random() - 0.5) * 0.5,
+        vy: (Math.random() - 0.5) * 0.5,
+        life: 1,
+        maxLife: 10 + Math.random() * 20,
+        size: 1 + Math.random() * 2,
+        hue: Math.floor(Math.random() * 60) // warm colors
+      });
+    }
+  }
+
+  let lastTime = 0;
+  let mergeTimer = 0;
+  let splitTimer = 0;
+
+  function animate(time) {
+    const dt = (time - lastTime) / 1000;
+    lastTime = time;
+    if (dt > 0.1) return requestAnimationFrame(animate);
+
+    // Fade canvas slowly
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.03)';
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.globalCompositeOperation = 'lighter';
+
+    emitParticles(dt);
+
+    // Update wells
+    for (const well of wells) {
+      well.update(dt);
+    }
+
+    // Handle splitting — occasionally split a well into two
+    splitTimer -= dt * 1000;
+    if (splitTimer <= 0 && wells.length < 6) {
+      const candidates = wells.filter(w => w.mass > 300);
+      if (candidates.length > 0) {
+        const w = candidates[Math.floor(Math.random() * candidates.length)];
+        const child = new GravityWell();
+        child.x = w.x + (Math.random() - 0.5) * 40;
+        child.y = w.y + (Math.random() - 0.5) * 40;
+        child.mass = Math.min(w.mass, 250);
+        w.mass = Math.max(w.mass / 2, 150);
+        wells.push(child);
+      }
+      splitTimer = 15000 + Math.random() * 20000;
+    }
+
+    // Handle merging — occasionally merge two nearby wells
+    mergeTimer -= dt * 1000;
+    if (mergeTimer <= 0 && wells.length > 3) {
+      let merged = false;
+      for (let i = 0; i < wells.length; i++) {
+        for (let j = i + 1; j < wells.length; j++) {
+          const dx = wells[i].x - wells[j].x;
+          const dy = wells[i].y - wells[j].y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < 80) {
+            // Merge j into i
+            wells[i].mass += wells[j].mass * 0.6;
+            wells[i].vx = (wells[i].vx + wells[j].vx) / 2;
+            wells[i].vy = (wells[i].vy + wells[j].vy) / 2;
+            wells.splice(j, 1);
+            merged = true;
+            break;
+          }
+        }
+        if (merged) break;
+      }
+      mergeTimer = 10000 + Math.random() * 15000;
+    }
+
+    // Update particles
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+
+      // Apply gravity from all wells
+      for (const well of wells) {
+        const { ax, ay } = well.attract(p.x, p.y, dt);
+        p.vx += ax * dt;
+        p.vy += ay * dt;
+      }
+
+      // Limit speed
+      const speed = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+      if (speed > 10) {
+        p.vx = (p.vx / speed) * 10;
+        p.vy = (p.vy / speed) * 10;
+      }
+
+      p.x += p.vx;
+      p.y += p.vy;
+      p.life -= dt / p.maxLife;
+
+      if (p.life <= 0 ||
+          p.x < -50 || p.x > canvas.width + 50 ||
+          p.y < -50 || p.y > canvas.height + 50) {
+        particles.splice(i, 1);
+        continue;
+      }
+
+      // Draw particle
+      const brightness = p.life * 255;
+      ctx.fillStyle = `hsla(${p.hue}, 100%, 65%, ${brightness / 255})`;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Draw gravity wells as faint circles
+    for (const well of wells) {
+      const radius = Math.sqrt(well.mass) * 2;
+      ctx.strokeStyle = `hsla(200, 100%, 70%, 0.2)`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(well.x, well.y, radius, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    requestAnimationFrame(animate);
+  }
+
+  requestAnimationFrame(animate);
+})();
+</script>
+</body>
+</html>

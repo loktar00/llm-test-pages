@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ragdoll Dojo</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #1a1a1a;
+            font-family: 'Courier New', Courier, monospace;
+        }
+        canvas {
+            display: block;
+        }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: rgba(255, 255, 255, 0.5);
+            pointer-events: none;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        #slowmo-indicator {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 40px;
+            font-weight: bold;
+            text-shadow: 0 0 10px #ff0055;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s;
+        }
+    </style>
+</head>
+<body>
+    <div id="ui">Ragdoll Dojo // Physics Simulation</div>
+    <div id="slowmo-indicator">IMPACT</div>
+    <canvas id="canvas"></canvas>
+
+<script>
+/**
+ * RAGDOLL DOJO
+ * A self-contained HTML5 Canvas physics simulation.
+ * Features: Verlet integration, Distance constraints, Trampolines, Seesaws, Swinging Logs, Slow-motion.
+ */
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const slowmoText = document.getElementById('slowmo-indicator');
+
+let width, height;
+const gravity = 0.5;
+const friction = 0.99;
+const groundFriction = 0.8;
+const bounce = 0.7;
+
+// Simulation State
+let particles = [];
+let constraints = [];
+let obstacles = [];
+let ragdolls = [];
+let timeScale = 1.0;
+let slowMoTimer = 0;
+let spawnTimer = 0;
+let particlesCount = 0;
+
+// Configuration
+const MAX_PARTICLES = 400; // Performance cap
+const RAGDOLL_SCALE = 1.0;
+const JOINT_STIFFNESS = 1.0;
+
+// --- Vector Math Helpers ---
+const vec = (x, y) => ({ x, y });
+const add = (v1, v2) => ({ x: v1.x + v2.x, y: v1.y + v2.y });
+const sub = (v1, v2) => ({ x: v1.x - v2.x, y: v1.y - v2.y });
+const mult = (v, s) => ({ x: v.x * s, y: v.y * s });
+const distSq = (v1, v2) => (v1.x - v2.x) ** 2 + (v1.y - v2.y) ** 2;
+const dist = (v1, v2) => Math.sqrt(distSq(v1, v2));
+
+// --- Classes ---
+
+class Particle {
+    constructor(x, y, mass = 1, isStatic = false) {
+        this.x = x;
+        this.y = y;
+        this.oldx = x;
+        this.oldy = y;
+        this.mass = mass;
+        this.isStatic = isStatic;
+        this.life = 1.0; // For fading out
+        this.dissolving = false;
+    }
+
+    update() {
+        if (this.isStatic) return;
+
+        if (this.dissolving) {
+            this.life -= 0.02;
+            return;
+        }
+
+        const vx = (this.x - this.oldx) * friction;
+        const vy = (this.y - this.oldy) * friction;
+
+        this.oldx = this.x;
+        this.oldy = this.y;
+
+        this.x += vx * timeScale;
+        this.y += vy * timeScale;
+        this.y += gravity * timeScale;
+    }
+
+    constrain() {
+        if (this.isStatic) return;
+
+        // Floor
+        if (this.y > height - 50) {
+            const vx = (this.x - this.oldx) * groundFriction;
+            this.y = height - 50;
+            this.oldy = this.y; // Kill vertical velocity
+            this.oldx = this.x - vx;
+        }
+
+        // Walls
+        if (this.x < 0) {
+            this.x = 0;
+            this.oldx = this.x + (this.x - this.oldx) * 0.5;
+        }
+        if (this.x > width) {
+            this.x = width;
+            this.oldx = this.x + (this.x - this.oldx) * 0.5;
+        }
+    }
+}
+
+class Constraint {
+    constructor(p1, p2, length = null, stiffness = 1.0) {
+        this.p1 = p1;
+        this.p2 = p2;
+        this.length = length || dist(p1, p2);
+        this.stiffness = stiffness;
+        this.active = true;
+    }
+
+    resolve() {
+        if (!this.active) return;
+
+        const dx = this.p2.x - this.p1.x;
+        const dy = this.p2.y - this.p1.y;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        
+        if (d === 0) return;
+
+        const diff = (this.length - d) / d * this.stiffness * timeScale;
+        const offsetX = dx * diff * 0.5;
+        const offsetY = dy * diff * 0.5;
+
+        if (!this.p1.isStatic) {
+            this.p1.x -= offsetX;
+            this.p1.y -= offsetY;
+        }
+        if (!this.p2.isStatic) {
+            this.p2.x += offsetX;
+            this.p2.y += offsetY;
+        }
+    }
+}
+
+class Ragdoll {
+    constructor(x, y, scale = 1) {
+        this.scale = scale;
+        this.particles = [];
+        this.constraints = [];
+        this.id = Math.random();
+        this.settledTime = 0;
+
+        // Body Proportions
+        const headR = 10 * scale;
+        const neckLen = 10 * scale;
+        const torsoLen = 35 * scale;
+        const armLen = 25 * scale;
+        const legLen = 35 * scale;
+
+        // Create Particles
+        const head = new Particle(x, y);
+        const neck = new Particle(x, y + headR + neckLen);
+        const shoulderL = new Particle(x - 10 * scale, y + headR + neckLen);
+        const shoulderR = new Particle(x + 10 * scale, y + headR + neckLen);
+        const hip = new Particle(x, y + headR + neckLen + torsoLen);
+        
+        const elbowL = new Particle(x - 20 * scale, y + headR + neckLen + armLen);
+        const handL = new Particle(x - 20 * scale, y + headR + neckLen + armLen * 2);
+        
+        const elbowR = new Particle(x + 20 * scale, y + headR + neckLen + armLen);
+        const handR = new Particle(x + 20 * scale, y + headR + neckLen + armLen * 2);
+
+        const kneeL = new Particle(x - 10 * scale, y + headR + neckLen + torsoLen + legLen);
+        const footL = new Particle(x - 10 * scale, y + headR + neckLen + torsoLen + legLen * 2);
+
+        const kneeR = new Particle(x + 10 * scale, y + headR + neckLen + torsoLen + legLen);
+        const footR = new Particle(x + 10 * scale, y + headR + neckLen + torsoLen + legLen * 2);
+
+        this.particles = [head, neck, shoulderL, shoulderR, hip, elbowL, handL, elbowR, handR, kneeL, footL, kneeR, footR];
+        particles.push(...this.particles);
+
+        // Structural Constraints
+        this.addConstraint(head, neck);
+        this.addConstraint(neck, shoulderL);
+        this.addConstraint(neck, shoulderR);
+        this.addConstraint(shoulderL, shoulderR); // Collar bone
+        this.addConstraint(shoulderL, hip);
+        this.addConstraint(shoulderR, hip);
+        this.addConstraint(hip, kneeL);
+        this.addConstraint(hip, kneeR);
+        this.addConstraint(kneeL, footL);
+        this.addConstraint(kneeR, footR);
+        
+        // Arms
+        this.addConstraint(shoulderL, elbowL);
+        this.addConstraint(elbowL, handL);
+        this.addConstraint(shoulderR, elbowR);
+        this.addConstraint(elbowR, handR);
+
+        // Cross bracing (Internal organs/bones to prevent collapse)
+        this.addConstraint(head, shoulderL, null, 0.1);
+        this.addConstraint(head, shoulderR, null, 0.1);
+        this.addConstraint(shoulderL, elbowR, null, 0.05); // Soft cross
+        this.addConstraint(shoulderR, elbowL, null, 0.05);
+        this.addConstraint(hip, elbowL, null, 0.05);
+        this.addConstraint(hip, elbowR, null, 0.05);
+        this.addConstraint(kneeL, kneeR, null, 0.5); // Thigh width
+
+        ragdolls.push(this);
+    }
+
+    addConstraint(p1, p2, len = null, stiff = 1.0) {
+        const c = new Constraint(p1, p2, len, stiff);
+        this.constraints.push(c);
+        constraints.push(c);
+    }
+
+    checkSettled() {
+        // Check if all particles are moving slowly
+        let totalVel = 0;
+        for (let p of this.particles) {
+            if (p.dissolving) return;
+            totalVel += Math.abs(p.x - p.oldx) + Math.abs(p.y - p.oldy);
+        }
+        
+        if (totalVel < 1.0) {
+            this.settledTime++;
+        } else {
+            this.settledTime = 0;
+        }
+
+        // If settled for 100 frames, dissolve
+        if (this.settledTime > 100) {
+            this.dissolve();
+        }
+    }
+
+    dissolve() {
+        for (let p of this.particles) {
+            p.dissolving = true;
+        }
+        // Remove constraints immediately to save CPU
+        this.constraints.forEach(c => c.active = false);
+    }
+
+    draw(ctx) {
+        ctx.strokeStyle = `rgba(255, 255, 255, ${this.particles[0].life})`;
+        ctx.lineWidth = 2;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+
+        ctx.beginPath();
+        // Draw Body
+        // Head
+        const head = this.particles[0];
+        const neck = this.particles[1];
+        const sL = this.particles[2];
+        const sR = this.particles[3];
+        const hip = this.particles[4];
+        
+        ctx.moveTo(head.x, head.y);
+        ctx.lineTo(neck.x, neck.y); // Neck
+        ctx.moveTo(sL.x, sL.y);
+        ctx.lineTo(sR.x, sR.y); // Shoulders
+        ctx.moveTo(sL.x, sL.y);
+        ctx.lineTo(hip.x, hip.y); // Side torso
+        ctx.moveTo(sR.x, sR.y);
+        ctx.lineTo(hip.x, hip.y); // Side torso
+        
+        // Arms
+        ctx.moveTo(sL.x, sL.y);
+        ctx.lineTo(this.particles[5].x, this.particles[5].y); // Elbow
+        ctx.lineTo(this.particles[6].x, this.particles[6].y); // Hand
+        
+        ctx.moveTo(sR.x, sR.y);
+        ctx.lineTo(this.particles[7].x, this.particles[7].y); // Elbow
+        ctx.lineTo(this.particles[8].x, this.particles[8].y); // Hand
+
+        // Legs
+        ctx.moveTo(hip.x, hip.y);
+        ctx.lineTo(this.particles[9].x, this.particles[9].y); // Knee
+        ctx.lineTo(this.particles[10].x, this.particles[10].y); // Foot
+
+        ctx.moveTo(hip.x, hip.y);
+        ctx.lineTo(this.particles[11].x, this.particles[11].y); // Knee
+        ctx.lineTo(this.particles[12].x, this.particles[12].y); // Foot
+
+        ctx.stroke();
+
+        // Draw Head Circle
+        ctx.beginPath();
+        ctx.arc(head.x, head.y, 10 * this.scale, 0, Math.PI * 2);
+        ctx.stroke();
+    }
+}
+
+// --- Obstacles ---
+
+class Trampoline {
+    constructor(x, y, w) {
+        this.x = x;
+        this.y = y;
+        this.w = w;
+        this.h = 10;
+        this.particles = [];
+        this.constraints = [];
+        const segments = 8;
+        const segW = w / segments;
+        
+        // Create anchor points
+        let prevP = new Particle(x, y, 0, true); // Static left
+        this.particles.push(prevP);
+
+        for (let i = 1; i <= segments; i++) {
+            const isStatic = i === segments;
+            const p = new Particle(x + i * segW, y, 1, isStatic);
+            this.particles.push(p);
+            constraints.push(new Constraint(prevP, p, segW, 1.0));
+            prevP = p;
+        }
+    }
+
+    update() {
+        // Add upward force to non-static particles to simulate tension
+        this.particles.forEach(p => {
+            if (!p.isStatic && p.y > this.y) {
+                p.y -= 0.5 * timeScale; // Tension
+                p.y -= (p.y - this.y) * 0.1 * timeScale; // Spring back
+            }
+        });
+    }
+
+    draw(ctx) {
+        ctx.fillStyle = '#00ffcc';
+        ctx.beginPath();
+        ctx.moveTo(this.particles[0].x, this.particles[0].y);
+        for(let i=1; i<this.particles.length; i++) {
+            ctx.lineTo(this.particles[i].x, this.particles[i].y);
+        }
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = '#00ffcc';
+        ctx.stroke();
+        
+        // Draw legs
+        ctx.beginPath();
+        ctx.moveTo(this.particles[0].x, this.particles[0].y);
+        ctx.lineTo(this.particles[0].x, height);
+        ctx.moveTo(this.particles[this.particles.length-1].x, this.particles[this.particles.length-1].y);
+        ctx.lineTo(this.particles[this.particles.length-1].x, height);
+        ctx.strokeStyle = '#555';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+    }
+}
+
+class Seesaw {
+    constructor(x, y, w) {
+        this.pivot = new Particle(x, y, 0, true);
+        this.w = w;
+        this.particles = [];
+        
+        // Create a rigid body out of particles
+        const segments = 5;
+        const segW = w / segments;
+        
+        // Left side
+        for(let i=0; i<=segments; i++) {
+            this.particles.push(new Particle(x - (segments-i)*segW, y, 1));
+        }
+        // Right side
+        for(let i=1; i<=segments; i++) {
+            this.particles.push(new Particle(x + i*segW, y, 1));
+        }
+
+        // Constraints to make it rigid
+        for(let i=0; i<this.particles.length-1; i++) {
+            constraints.push(new Constraint(this.particles[i], this.particles[i+1], segW, 1.0));
+            constraints.push(new Constraint(this.particles[i], this.particles[i+2] || this.particles[this.particles.length-1], segW*2, 1.0));
+        }
+        
+        // Pivot constraint (Hinge)
+        // The middle particle is index segments
+        this.pivotConstraint = new Constraint(this.pivot, this.particles[segments], 0, 1.0);
+        constraints.push(this.pivotConstraint);
+        
+        // Add pivot to simulation
+        particles.push(this.pivot);
+        particles.push(...this.particles);
+    }
+
+    draw(ctx) {
+        ctx.fillStyle = '#ffaa00';
+        ctx.fillRect(this.pivot.x - 5, this.pivot.y, 10, height - this.pivot.y);
+        
+        ctx.beginPath();
+        ctx.moveTo(this.particles[0].x, this.particles[0].y);
+        for(let p of this.particles) {
+            ctx.lineTo(p.x, p.y);
+        }
+        ctx.lineWidth = 8;
+        ctx.strokeStyle = '#ffaa00';
+        ctx.lineCap = 'round';
+        ctx.stroke();
+        
+        // Pivot circle
+        ctx.beginPath();
+        ctx.arc(this.pivot.x, this.pivot.y, 8, 0, Math.PI*2);
+        ctx.fillStyle = '#fff';
+        ctx.fill();
+    }
+}
+
+class SwingingLog {
+    constructor(x, y, len) {
+        this.pivot = new Particle(x, y, 0, true);
+        this.len = len;
+        
+        // Log segments
+        const segments = 6;
+        const segLen = len / segments;
+        this.particles = [];
+        
+        for(let i=0; i<=segments; i++) {
+            this.particles.push(new Particle(x + i*segLen, y, 1));
+        }
+        
+        // Rigid constraints
+        for(let i=0; i<this.particles.length-1; i++) {
+            constraints.push(new Constraint(this.particles[i], this.particles[i+1], segLen, 1.0));
+            if(i < this.particles.length-2)
+                constraints.push(new Constraint(this.particles[i], this.particles[i+2], segLen*2, 1.0));
+        }
+        
+        // Hinge
+        constraints.push(new Constraint(this.pivot, this.particles[0], 0, 1.0));
+        
+        particles.push(this.pivot);
+        particles.push(...this.particles);
+    }
+
+    draw(ctx) {
+        ctx.beginPath();
+        ctx.moveTo(this.pivot.x, this.pivot.y);
+        ctx.lineTo(this.particles[this.particles.length-1].x, this.particles[this.particles.length-1].y);
+        ctx.lineWidth = 12;
+        ctx.strokeStyle = '#8b4513';
+        ctx.lineCap = 'round';
+        ctx.stroke();
+        
+        ctx.beginPath();
+        ctx.arc(this.pivot.x, this.pivot.y, 6, 0, Math.PI*2);
+        ctx.fillStyle = '#fff';
+        ctx.fill();
+    }
+}
+
+// --- Core Logic ---
+
+function resize() {
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = width;
+    canvas.height = height;
+    initLevel();
+}
+
+function initLevel() {
+    // Clear existing
+    particles = [];
+    constraints = [];
+    ragdolls = [];
+    obstacles = [];
+    
+    // Add Floor (Static particles)
+    const floorY = height - 50;
+    const floorSegs = width / 50;
+    let prevFloor = null;
+    for(let x=0; x<=width; x+=50) {
+        const p = new Particle(x, floorY, 0, true);
+        particles.push(p);
+        if(prevFloor) constraints.push(new Constraint(prevFloor, p, 50, 1.0));
+        prevFloor = p;
+    }
+
+    // Add Walls (Static)
+    particles.push(new Particle(0, 0, 0, true));
+    particles.push(new Particle(0, height, 0, true));
+    particles.push(new Particle(width, 0, 0, true));
+    particles.push(new Particle(width, height, 0, true));
+
+    // Obstacles
+    obstacles.push(new Trampoline(width * 0.2, height * 0.7, 150));
+    obstacles.push(new Trampoline(width * 0.7, height * 0.6, 150));
+    
+    obstacles.push(new Seesaw(width * 0.5, height * 0.85, 300));
+    obstacles.push(new Seesaw(width * 0.8, height * 0.6, 200));
+
+    obstacles.push(new SwingingLog(width * 0.3, height * 0.2, 200));
+    obstacles.push(new SwingingLog(width * 0.6, height * 0.3, 250));
+}
+
+function spawnRagdoll() {
+    const x = Math.random() * (width * 0.8) + width * 0.1;
+    const y = -50;
+    
+    // 10% chance of double spawn
+    if (Math.random() < 0.1) {
+        new Ragdoll(x, y);
+        new Ragdoll(x + 20, y + 20);
+    } else {
+        new Ragdoll(x, y);
+    }
+}
+
+function checkCollisions() {
+    // Simple Particle-Particle collision for ragdolls
+    // Optimization: Only check particles in ragdolls, not static floor
+    
+    // Check against Obstacles
+    obstacles.forEach(obs => {
+        if (obs instanceof Trampoline) {
+            // Trampoline collision is handled by physics constraints mostly, 
+            // but we need to push particles up if they penetrate too much
+            obs.particles.forEach(op => {
+                particles.forEach(rp => {
+                    if (rp.dissolving || rp.isStatic) return;
+                    const d = dist(rp, op);
+                    const r = 10;
+                    if (d < r) {
+                        const angle = Math.atan2(rp.y - op.y, rp.x - op.x);
+                        const force = 0.5; // Push out
+                        rp.x += Math.cos(angle) * force;
+                        rp.y += Math.sin(angle) * force;
+                    }
+                });
+            });
+        }
+    });
+
+    // Particle-Particle (Self and Inter-ragdoll)
+    // This is O(N^2) but N is small enough (<400)
+    for (let i = 0; i < particles.length; i++) {
+        for (let j = i + 1; j < particles.length; j++) {
+            const p1 = particles[i];
+            const p2 = particles[j];
+            
+            if (p1.isStatic || p2.isStatic) continue;
+            if (p1.dissolving || p2.dissolving) continue;
+
+            const dx = p1.x - p2.x;
+            const dy = p1.y - p2.y;
+            const d = Math.sqrt(dx*dx + dy*dy);
+            const minDist = 10; // Radius sum approx
+
+            if (d < minDist && d > 0) {
+                // Collision detected
+                
+                // Slow Motion Logic
+                const v1 = Math.abs(p1.x - p1.oldx) + Math.abs(p1.y - p1.oldy);
+                const v2 = Math.abs(p2.x - p2.oldx) + Math.abs(p2.y - p2.oldy);
+                if ((v1 + v2) > 15 && timeScale > 0.8) {
+                    triggerSlowMo();
+                }
+
+                // Resolve
+                const overlap = minDist - d;
+                const nx = dx / d;
+                const ny = dy / d;
+                
+                // Move apart
+                const moveX = nx * overlap * 0.5;
+                const moveY = ny * overlap * 0.5;
+                
+                p1.x += moveX;
+                p1.y += moveY;
+                p2.x -= moveX;
+                p2.y -= moveY;
+            }
+        }
+    }
+}
+
+function triggerSlowMo() {
+    timeScale = 0.1;
+    slowMoTimer = 60; // Frames to stay slow
+    slowmoText.style.opacity = 1;
+}
+
+function update() {
+    // Spawn Logic
+    spawnTimer++;
+    if (spawnTimer > 200 || particles.length < 20) {
+        spawnRagdoll();
+        spawnTimer = 0;
+    }
+
+    // Slow Mo Logic
+    if (slowMoTimer > 0) {
+        slowMoTimer--;
+        if (slowMoTimer <= 0) {
+            timeScale = 1.0;
+            slowmoText.style.opacity = 0;
+        }
+    }
+
+    // Verlet Integration
+    for (let p of particles) {
+        p.update();
+    }
+
+    // Constraints (Iterate multiple times for stiffness)
+    for (let i = 0; i < 5; i++) {
+        for (let c of constraints) {
+            c.resolve();
+        }
+        for (let p of particles) {
+            p.constrain();
+        }
+    }
+
+    // Obstacles specific logic
+    obstacles.forEach(obs => {
+        if (obs.update) obs.update();
+    });
+
+    checkCollisions();
+
+    // Ragdoll Logic
+    for (let i = ragdolls.length - 1; i >= 0; i--) {
+        const r = ragdolls[i];
+        r.checkSettled();
+        // Remove dead ragdolls
+        if (r.particles[0].life <= 0) {
+            // Clean up particles array
+            const pSet = new Set(r.particles);
+            particles = particles.filter(p => !pSet.has(p));
+            // Clean up constraints
+            constraints = constraints.filter(c => !r.constraints.includes(c));
+            
+            ragdolls.splice(i, 1);
+        }
+    }
+}
+
+function draw() {
+    // Background
+    ctx.fillStyle = '#1a1a1a';
+    ctx.fillRect(0, 0, width, height);
+
+    // Draw Floor
+    ctx.fillStyle = '#333';
+    ctx.fillRect(0, height - 50, width, 50);
+    ctx.strokeStyle = '#555';
+    ctx.beginPath();
+    ctx.moveTo(0, height - 50);
+    ctx.lineTo(width, height - 50);
+    ctx.stroke();
+
+    // Draw Obstacles
+    obstacles.forEach(obs => obs.draw(ctx));
+
+    // Draw Ragdolls
+    ragdolls.forEach(r => r.draw(ctx));
+}
+
+function loop() {
+    update();
+    draw();
+    requestAnimationFrame(loop);
+}
+
+// --- Initialization ---
+window.addEventListener('resize', resize);
+resize();
+loop();
+
+</script>
+</body>
+</html>

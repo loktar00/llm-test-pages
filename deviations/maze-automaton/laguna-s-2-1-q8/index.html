@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Evolving Maze</title>
+<style>
+  * { margin: 0; padding: 0; overflow: hidden; background: #000; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="mazeCanvas"></canvas>
+<script>
+const canvas = document.getElementById('mazeCanvas');
+const ctx = canvas.getContext('2d');
+
+function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+const W = canvas.width;
+const H = canvas.height;
+const cols = Math.floor(W / 4);
+const rows = Math.floor(H / 4);
+const cellSize = 4;
+
+// Grid: 0 = wall, 1 = corridor
+let grid = new Uint8Array(cols * rows);
+let pheromones = new Float32Array(cols * rows);
+
+// Regions for concurrent growth and solving
+const regions = [];
+const regionSize = 32;
+
+class Region {
+    constructor(x, y, w, h) {
+        this.x = x; this.y = y; this.w = w; this.h = h;
+        this.state = 'growing'; // 'growing', 'solving', 'idle'
+        this.ants = [];
+        this.seedTimer = 0;
+    }
+
+    getIndex(cx, cy) {
+        if (cx < 0 || cx >= cols || cy < 0 || cy >= rows) return -1;
+        return cy * cols + cx;
+    }
+
+    // Check neighbors for Mazectric rules
+    countNeighbors(cx, cy) {
+        let count = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+                if (dx === 0 && dy === 0) continue;
+                const nx = cx + dx, ny = cy + dy;
+                if (nx >= 0 && nx < cols && ny >= 0 && ny < rows) {
+                    if (grid[ny * cols + nx] === 1) count++;
+                }
+            }
+        }
+        return count;
+    }
+
+    // Mazectric cellular automaton step
+    grow() {
+        const next = new Uint8Array(cols * rows);
+        let corridorCount = 0;
+
+        for (let y = this.y; y < this.y + this.h; y++) {
+            for (let x = this.x; x < this.x + this.w; x++) {
+                const idx = this.getIndex(x, y);
+                if (idx < 0) continue;
+                
+                const current = grid[idx];
+                const neighbors = this.countNeighbors(x, y);
+
+                // Mazectric rules:
+                // - A wall becomes a corridor if it has exactly 1 neighbor
+                // - A corridor stays a corridor if it has 1-2 neighbors
+                // - Otherwise it becomes a wall
+                if (current === 0 && neighbors === 1) {
+                    next[idx] = 1;
+                } else if (current === 1 && (neighbors === 1 || neighbors === 2)) {
+                    next[idx] = 1;
+                } else {
+                    next[idx] = 0;
+                }
+
+                if (next[idx] === 1) corridorCount++;
+            }
+        }
+
+        // Copy next state
+        for (let y = this.y; y < this.y + this.h; y++) {
+            for (let x = this.x; x < this.x + this.w; x++) {
+                const idx = this.getIndex(x, y);
+                if (idx >= 0) grid[idx] = next[idx];
+            }
+        }
+
+        // Transition to solving when enough corridors exist
+        if (corridorCount > (this.w * this.h * 0.25)) {
+            this.state = 'solving';
+            this.spawnAnts();
+        }
+    }
+
+    spawnAnts() {
+        // Spawn ants at corridor cells along the region boundary
+        const attempts = 6;
+        for (let i = 0; i < attempts; i++) {
+            const side = Math.floor(Math.random() * 4);
+            let sx, sy;
+            if (side === 0) { sx = this.x; sy = this.y + Math.floor(Math.random() * this.h); }
+            else if (side === 1) { sx = this.x + this.w - 1; sy = this.y + Math.floor(Math.random() * this.h); }
+            else if (side === 2) { sx = this.x + Math.floor(Math.random() * this.w); sy = this.y; }
+            else { sx = this.x + Math.floor(Math.random() * this.w); sy = this.y + this.h - 1; }
+
+            const idx = this.getIndex(sx, sy);
+            if (idx >= 0 && grid[idx] === 1) {
+                this.ants.push(new Ant(sx, sy));
+            }
+        }
+    }
+
+    solve() {
+        // Update ants
+        for (let i = this.ants.length - 1; i >= 0; i--) {
+            const ant = this.ants[i];
+            ant.update();
+            ant.leavePheromone();
+
+            // Remove ant occasionally to keep things dynamic
+            if (Math.random() < 0.003 || !ant.inRegion(this)) {
+                this.ants.splice(i, 1);
+            }
+        }
+
+        // Fade pheromones
+        for (let y = this.y; y < this.y + this.h; y++) {
+            for (let x = this.x; x < this.x + this.w; x++) {
+                const idx = this.getIndex(x, y);
+                if (idx >= 0) {
+                    pheromones[idx] *= 0.96;
+                    if (pheromones[idx] < 0.01) pheromones[idx] = 0;
+                }
+            }
+        }
+
+        // Re-seed periodically
+        this.seedTimer++;
+        if (this.seedTimer > 120) {
+            this.reseed();
+            this.seedTimer = 0;
+        }
+    }
+
+    reseed() {
+        // Pick a random point in the region and reset a small area to walls
+        const cx = this.x + Math.floor(Math.random() * (this.w - 4)) + 2;
+        const cy = this.y + Math.floor(Math.random() * (this.h - 4)) + 2;
+        
+        for (let dy = -2; dy <= 2; dy++) {
+            for (let dx = -2; dx <= 2; dx++) {
+                const nx = cx + dx, ny = cy + dy;
+                const idx = this.getIndex(nx, ny);
+                if (idx >= 0) {
+                    grid[idx] = 0;
+                    pheromones[idx] = 0;
+                }
+            }
+        }
+
+        // Seed the center with a corridor
+        const centerIdx = this.getIndex(cx, cy);
+        if (centerIdx >= 0) grid[centerIdx] = 1;
+
+        // Transition back to growing
+        this.state = 'growing';
+        this.ants = [];
+    }
+
+    update() {
+        if (this.state === 'growing') {
+            this.grow();
+        } else if (this.state === 'solving') {
+            this.solve();
+        }
+    }
+}
+
+class Ant {
+    constructor(x, y) {
+        this.x = x;
+        this.y = y;
+        this.dirX = (Math.random() - 0.5) * 2;
+        this.dirY = (Math.random() - 0.5) * 2;
+        this.speed = 0.3;
+    }
+
+    update() {
+        // Find open neighbors
+        const neighbors = [];
+        for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+                if (dx === 0 && dy === 0) continue;
+                const nx = Math.floor(this.x) + dx;
+                const ny = Math.floor(this.y) + dy;
+                if (nx >= 0 && nx < cols && ny >= 0 && ny < rows) {
+                    if (grid[ny * cols + nx] === 1) {
+                        neighbors.push({dx, dy, nx, ny});
+                    }
+                }
+            }
+        }
+
+        if (neighbors.length > 0) {
+            // Bias toward current direction but allow exploration
+            let bestDir = neighbors[0];
+            let bestScore = -Infinity;
+
+            for (const n of neighbors) {
+                // Distance in direction of current heading
+                const alignment = n.dx * this.dirX + n.dy * this.dirY;
+                const distScore = alignment * 2;
+                
+                // Attract to pheromones
+                const pidx = n.ny * cols + n.nx;
+                const pheromoneScore = pheromones[pidx] * 3;
+
+                // Random factor for exploration
+                const rand = Math.random();
+
+                const score = distScore + pheromoneScore + rand;
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestDir = n;
+                }
+            }
+
+            this.dirX = bestDir.dx;
+            this.dirY = bestDir.dy;
+            this.x += this.dirX * this.speed;
+            this.y += this.dirY * this.speed;
+
+            // Clamp position
+            this.x = Math.max(0, Math.min(cols - 0.01, this.x));
+            this.y = Math.max(0, Math.min(rows - 0.01, this.y));
+        }
+    }
+
+    leavePheromone() {
+        const cx = Math.floor(this.x);
+        const cy = Math.floor(this.y);
+        const idx = cy * cols + cx;
+        if (idx >= 0 && idx < cols * rows) {
+            pheromones[idx] += 0.3;
+            if (pheromones[idx] > 2.0) pheromones[idx] = 2.0;
+        }
+    }
+
+    inRegion(region) {
+        return this.x >= region.x && this.x < region.x + region.w &&
+               this.y >= region.y && this.y < region.y + region.h;
+    }
+}
+
+// Initialize regions
+function initRegions() {
+    regions.length = 0;
+    for (let y = 0; y < rows; y += regionSize) {
+        for (let x = 0; x < cols; x += regionSize) {
+            const w = Math.min(regionSize, cols - x);
+            const h = Math.min(regionSize, rows - y);
+            const region = new Region(x, y, w, h);
+            
+            // Seed initial corridors
+            const seedX = x + Math.floor(w / 2);
+            const seedY = y + Math.floor(h / 2);
+            const idx = seedY * cols + seedX;
+            if (idx < cols * rows) grid[idx] = 1;
+            
+            // Add a few more seeds for organic growth
+            for (let i = 0; i < 3; i++) {
+                const sx = x + Math.floor(Math.random() * w);
+                const sy = y + Math.floor(Math.random() * h);
+                const sidx = sy * cols + sx;
+                if (sidx < cols * rows) grid[sidx] = 1;
+            }
+            
+            regions.push(region);
+        }
+    }
+}
+
+initRegions();
+
+// Animation loop
+function animate() {
+    requestAnimationFrame(animate);
+
+    // Update regions
+    for (const region of regions) {
+        region.update();
+    }
+
+    // Render
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+
+    // Draw maze corridors
+    ctx.fillStyle = '#0d1b2a';
+    for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+            if (grid[y * cols + x] === 1) {
+                ctx.fillRect(x * cellSize, y * cellSize, cellSize, cellSize);
+            }
+        }
+    }
+
+    // Draw pheromones with glow effect
+    for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+            const p = pheromones[y * cols + x];
+            if (p > 0.05) {
+                const intensity = Math.min(1, p * 0.5);
+                const r = Math.floor(255 * intensity);
+                const g = Math.floor(200 * intensity);
+                ctx.fillStyle = `rgba(${r}, ${g}, 100, ${intensity * 0.7})`;
+                ctx.beginPath();
+                ctx.arc(
+                    x * cellSize + cellSize / 2,
+                    y * cellSize + cellSize / 2,
+                    cellSize * 0.6 * intensity,
+                    0, Math.PI * 2
+                );
+                ctx.fill();
+            }
+        }
+    }
+
+    // Draw ants as bright points
+    for (const region of regions) {
+        for (const ant of region.ants) {
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath();
+            ctx.arc(
+                ant.x * cellSize + cellSize / 2,
+                ant.y * cellSize + cellSize / 2,
+                cellSize * 0.5,
+                0, Math.PI * 2
+            );
+            ctx.fill();
+        }
+    }
+}
+
+animate();
+
+// Handle window resize
+window.addEventListener('resize', () => {
+    resize();
+    const newCols = Math.floor(W / 4);
+    const newRows = Math.floor(H / 4);
+    
+    if (newCols !== cols || newRows !== rows) {
+        grid = new Uint8Array(newCols * newRows);
+        pheromones = new Float32Array(newCols * newRows);
+        initRegions();
+    }
+});
+</script>
+</body>
+</html>

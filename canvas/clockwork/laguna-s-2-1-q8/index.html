@@ -1,0 +1,635 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Clockwork Machine Screensaver</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background: #000;
+  }
+  canvas {
+    display: block;
+  }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script>
+(() => {
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+
+  // Resize
+  function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // Utility functions
+  function rand(min, max) {
+    return Math.random() * (max - min) + min;
+  }
+
+  function lerp(a, b, t) {
+    return a + (b - a) * t;
+  }
+
+  // Vector
+  class Vec {
+    constructor(x = 0, y = 0) {
+      this.x = x;
+      this.y = y;
+    }
+    add(v) { this.x += v.x; this.y += v.y; return this; }
+    sub(v) { this.x -= v.x; this.y -= v.y; return this; }
+    mul(s) { this.x *= s; this.y *= s; return this; }
+    static add(a, b) { return new Vec(a.x + b.x, a.y + b.y); }
+    static sub(a, b) { return new Vec(a.x - b.x, a.y - b.y); }
+    static mul(v, s) { return new Vec(v.x * s, v.y * s); }
+  }
+
+  // Gear class
+  class Gear {
+    constructor(x, y, teeth, radius, color = '#c9a88a') {
+      this.x = x;
+      this.y = y;
+      this.teeth = teeth;
+      this.radius = radius; // pitch radius
+      this.color = color;
+      this.angle = 0;
+      this.speed = 0;
+      this.driveRatio = 1; // ratio relative to driver gear
+    }
+
+    draw(ctx) {
+      const outerR = this.radius * 1.15;
+      const innerR = this.radius * 0.85;
+
+      ctx.save();
+      ctx.translate(this.x, this.y);
+      ctx.rotate(this.angle);
+
+      // Main circle
+      ctx.beginPath();
+      ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
+      ctx.fillStyle = this.color;
+      ctx.fill();
+
+      // Draw teeth
+      ctx.fillStyle = '#a88b75';
+      for (let i = 0; i < this.teeth; i++) {
+        const a = (i / this.teeth) * Math.PI * 2;
+        const sx = Math.cos(a) * innerR;
+        const sy = Math.sin(a) * innerR;
+        const ex = Math.cos(a) * outerR;
+        const ey = Math.sin(a) * outerR;
+        const mx = Math.cos(a + 0.1) * outerR;
+        const my = Math.sin(a + 0.1) * outerR;
+
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(ex, ey);
+        ctx.lineTo(mx, my);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      // Center hole
+      ctx.beginPath();
+      ctx.arc(0, 0, this.radius * 0.25, 0, Math.PI * 2);
+      ctx.fillStyle = '#333';
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    update(deltaTime) {
+      this.angle += this.speed * deltaTime;
+    }
+
+    setSpeed(rpm) {
+      this.speed = rpm * (Math.PI / 30);
+    }
+  }
+
+  // Chain class between two gears
+  class Chain {
+    constructor(gearA, gearB, offset = 10) {
+      this.gearA = gearA;
+      this.gearB = gearB;
+      this.offset = offset;
+    }
+
+    draw(ctx) {
+      const dx = this.gearB.x - this.gearA.x;
+      const dy = this.gearB.y - this.gearA.y;
+      const dist = Math.hypot(dx, dy);
+      const nx = dx / dist;
+      const ny = dy / dist;
+
+      // Tangent points
+      const rA = this.gearA.radius + this.offset;
+      const rB = this.gearB.radius + this.offset;
+
+      // Perpendicular vector
+      const px = -ny;
+      const py = nx;
+
+      // Upper tangent
+      const ax1 = this.gearA.x + px * rA;
+      const ay1 = this.gearA.y + py * rA;
+      const bx1 = this.gearB.x + px * rB;
+      const by1 = this.gearB.y + py * rB;
+
+      // Lower tangent
+      const ax2 = this.gearA.x - px * rA;
+      const ay2 = this.gearA.y - py * rA;
+      const bx2 = this.gearB.x - px * rB;
+      const by2 = this.gearB.y - py * rB;
+
+      ctx.strokeStyle = '#555';
+      ctx.lineWidth = 4;
+
+      // Upper chain
+      ctx.beginPath();
+      ctx.moveTo(ax1, ay1);
+      ctx.lineTo(bx1, by1);
+      ctx.stroke();
+
+      // Lower chain
+      ctx.beginPath();
+      ctx.moveTo(ax2, ay2);
+      ctx.lineTo(bx2, by2);
+      ctx.stroke();
+
+      // Draw links
+      const numLinks = Math.floor(dist / 10);
+      for (let i = 0; i < numLinks; i++) {
+        const t = i / numLinks;
+        const lx = lerp(ax1, bx1, t) + Math.sin(this.gearA.angle * 2 + t * Math.PI * 2) * 2;
+        const ly = lerp(ay1, by1, t) + Math.cos(this.gearA.angle * 2 + t * Math.PI * 2) * 2;
+        ctx.beginPath();
+        ctx.arc(lx, ly, 3, 0, Math.PI * 2);
+        ctx.fillStyle = '#666';
+        ctx.fill();
+      }
+    }
+  }
+
+  // Piston class
+  class Piston {
+    constructor(x, y, stroke = 60) {
+      this.x = x;
+      this.y = y;
+      this.stroke = stroke;
+      this.progress = 0;
+      this.direction = 1;
+      this.speed = 0.02;
+    }
+
+    draw(ctx) {
+      const rodLength = this.stroke / 2;
+      const yPos = this.y + Math.sin(this.progress) * rodLength;
+
+      // Cylinder
+      ctx.fillStyle = '#444';
+      ctx.fillRect(this.x - 15, this.y - 40, 30, 80);
+
+      // Piston head
+      ctx.fillStyle = '#b5651d';
+      ctx.beginPath();
+      ctx.ellipse(this.x, yPos, 20, 8, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Connecting rod
+      ctx.strokeStyle = '#888';
+      ctx.lineWidth = 6;
+      ctx.beginPath();
+      ctx.moveTo(this.x, yPos);
+      ctx.lineTo(this.x, this.y + 40);
+      ctx.stroke();
+
+      // Crank
+      ctx.beginPath();
+      ctx.arc(this.x, this.y + 40, 10, 0, Math.PI * 2);
+      ctx.fillStyle = '#999';
+      ctx.fill();
+    }
+
+    update() {
+      this.progress += 0.05 * this.direction;
+      if (this.progress > Math.PI) this.direction = -1;
+      if (this.progress < 0) this.direction = 1;
+    }
+  }
+
+  // Escapement
+  class Escapement {
+    constructor(gear, x, y) {
+      this.gear = gear;
+      this.x = x;
+      this.y = y;
+      this.pallets = [];
+      this.angle = 0;
+      this.speed = gear.speed * 2;
+    }
+
+    draw(ctx) {
+      ctx.save();
+      ctx.translate(this.x, this.y);
+      ctx.rotate(this.angle);
+
+      // Pallet fork
+      ctx.fillStyle = '#b5651d';
+      ctx.beginPath();
+      ctx.moveTo(-40, 0);
+      ctx.lineTo(40, 0);
+      ctx.lineTo(30, 20);
+      ctx.lineTo(-30, 20);
+      ctx.closePath();
+      ctx.fill();
+
+      // Pallet stones
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(-25, 10, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(25, 10, 6, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    update(deltaTime) {
+      this.angle += this.speed * deltaTime * 0.5;
+    }
+  }
+
+  // Bird automaton
+  class Bird {
+    constructor(x, y) {
+      this.x = x;
+      this.y = y;
+      this.active = false;
+      this.timer = 0;
+      this.flapProgress = 0;
+    }
+
+    draw(ctx) {
+      if (!this.active) return;
+
+      const flapOffset = Math.sin(this.flapProgress) * 15;
+      const flapOffset2 = Math.cos(this.flapProgress * 2) * 8;
+
+      ctx.save();
+      ctx.translate(this.x, this.y);
+
+      // Body
+      ctx.fillStyle = '#f0e6d2';
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 15, 10, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Head
+      ctx.beginPath();
+      ctx.arc(15, -5, 8, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Wing
+      ctx.fillStyle = '#e6cc9c';
+      ctx.beginPath();
+      ctx.ellipse(-5, 0, 10, 4, 0, 0, Math.PI * 2);
+      ctx.save();
+      ctx.translate(-5, 0);
+      ctx.rotate(Math.sin(this.flapProgress) * 0.5);
+      ctx.ellipse(0, 0, 10, 4, 0, 0, Math.PI * 2);
+      ctx.restore();
+
+      // Tail
+      ctx.fillStyle = '#d4b96a';
+      ctx.beginPath();
+      ctx.moveTo(-12, 0);
+      ctx.lineTo(-20, 5);
+      ctx.lineTo(-20, -5);
+      ctx.closePath();
+      ctx.fill();
+
+      // Eye
+      ctx.fillStyle = '#000';
+      ctx.beginPath();
+      ctx.arc(18, -5, 2, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    update(deltaTime) {
+      if (this.active) {
+        this.timer -= deltaTime;
+        this.flapProgress += 0.3;
+        if (this.timer <= 0) {
+          this.active = false;
+        }
+      }
+    }
+
+    activate() {
+      this.active = true;
+      this.timer = 10; // seconds visible
+      this.flapProgress = 0;
+    }
+  }
+
+  // Loose gear with physics
+  class LooseGear {
+    constructor(x, y, gear) {
+      this.x = x;
+      this.y = y;
+      this.vx = rand(-3, 3);
+      this.vy = rand(-5, -2);
+      this.gravity = 0.3;
+      this.angle = 0;
+      this.angularVel = rand(-0.2, 0.2);
+      this.teeth = gear.teeth;
+      this.radius = gear.radius;
+      this.color = gear.color;
+      this.returnTimer = 0;
+      this.targetX = gear.x;
+      this.targetY = gear.y;
+    }
+
+    draw(ctx) {
+      const g = new Gear(this.x, this.y, this.teeth, this.radius, this.color);
+      g.angle = this.angle;
+      g.draw(ctx);
+    }
+
+    update(deltaTime, looseGears, gears, repairArm) {
+      this.angle += this.angularVel;
+      this.vy += this.gravity;
+      this.x += this.vx;
+      this.y += this.vy;
+
+      // Bounce off canvas edges
+      if (this.x < this.radius) { this.x = this.radius; this.vx *= -0.6; }
+      if (this.x > canvas.width - this.radius) { this.x = canvas.width - this.radius; this.vx *= -0.6; }
+      if (this.y > canvas.height - this.radius) { this.y = canvas.height - this.radius; this.vy *= -0.5; this.vx *= 0.9; }
+
+      // After some time, start returning to original position
+      this.returnTimer += deltaTime;
+      if (this.returnTimer > 3) {
+        const dx = this.targetX - this.x;
+        const dy = this.targetY - this.y;
+        this.vx += dx * 0.01;
+        this.vy += dy * 0.01;
+
+        // Check if close enough to reseat
+        const dist = Math.hypot(dx, dy);
+        if (dist < 5 && dist > 0.1) {
+          // Trigger repair arm animation
+          repairArm.activate(this.targetX, this.targetY);
+          return false; // remove from loose gears
+        }
+      }
+
+      return true;
+    }
+  }
+
+  // Repair arm
+  class RepairArm {
+    constructor(x, y) {
+      this.x = x;
+      this.y = y;
+      this.targetX = x;
+      this.targetY = y;
+      this.active = false;
+      this.timer = 0;
+      this.progress = 0;
+    }
+
+    draw(ctx) {
+      if (!this.active) return;
+
+      const t = this.progress;
+      const cx = lerp(this.x, this.targetX, t);
+      const cy = lerp(this.y, this.targetY, t);
+
+      // Arm
+      ctx.strokeStyle = '#888';
+      ctx.lineWidth = 8;
+      ctx.beginPath();
+      ctx.moveTo(this.x, this.y);
+      ctx.lineTo(cx, cy);
+      ctx.stroke();
+
+      // Grabbers
+      ctx.fillStyle = '#aaa';
+      ctx.beginPath();
+      ctx.ellipse(cx + 5, cy, 6, 3, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(cx - 5, cy, 6, 3, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    update(deltaTime) {
+      if (this.active) {
+        this.progress += deltaTime * 0.5;
+        this.timer += deltaTime;
+        if (this.timer > 2) {
+          this.active = false;
+          this.progress = 0;
+        }
+      }
+    }
+
+    activate(x, y) {
+      this.targetX = x;
+      this.targetY = y;
+      this.active = true;
+      this.timer = 0;
+      this.progress = 0;
+    }
+  }
+
+  // Main Clockwork Machine
+  class ClockworkMachine {
+    constructor() {
+      this.gears = [];
+      this.chains = [];
+      this.pistons = [];
+      this.escapement = null;
+      this.bird = null;
+      this.looseGears = [];
+      this.repairArm = null;
+      this.timeSinceBird = 0;
+      this.timeSinceLoose = 0;
+      this.mainGearRadius = 60;
+      this.mainSpeed = 0.5; // rotations per second
+    }
+
+    init() {
+      const cx = canvas.width / 2;
+      const cy = canvas.height / 2;
+
+      // Main drive gear (center)
+      const mainGear = new Gear(cx, cy, 12, this.mainGearRadius, '#c9a88a');
+      mainGear.setSpeed(this.mainSpeed * 60); // RPM
+      this.gears.push(mainGear);
+
+      // Large gear top-left
+      const largeGear = new Gear(cx - 150, cy - 120, 24, 120, '#d4b89a');
+      largeGear.setSpeed((mainGear.radius / largeGear.radius) * mainGear.speed * mainGear.radius / largeGear.radius * 60);
+      largeGear.speed = mainGear.speed * (mainGear.radius / largeGear.radius);
+      this.gears.push(largeGear);
+
+      // Small gear driven by large
+      const smallGear = new Gear(cx + 150, cy - 120, 8, 40, '#b5651d');
+      smallGear.speed = largeGear.speed * (largeGear.radius / smallGear.radius) * -1;
+      this.gears.push(smallGear);
+
+      // Medium gear right side
+      const medGear = new Gear(cx + 200, cy + 60, 16, 80, '#a88b75');
+      medGear.speed = smallGear.speed * (smallGear.radius / medGear.radius) * -1;
+      this.gears.push(medGear);
+
+      // Small idler gear
+      const idlerGear = new Gear(cx + 80, cy + 100, 6, 30, '#d4b89a');
+      idlerGear.speed = medGear.speed * (medGear.radius / idlerGear.radius) * -1;
+      this.gears.push(idlerGear);
+
+      // Bottom large gear
+      const bottomGear = new Gear(cx, cy + 180, 18, 90, '#c9a88a');
+      bottomGear.speed = idlerGear.speed * (idlerGear.radius / bottomGear.radius) * -1;
+      this.gears.push(bottomGear);
+
+      // Top center small gear
+      const topGear = new Gear(cx - 200, cy + 80, 10, 50, '#b5651d');
+      topGear.speed = bottomGear.speed * (bottomGear.radius / topGear.radius) * -1;
+      this.gears.push(topGear);
+
+      // Chains between some gears
+      this.chains.push(new Chain(mainGear, largeGear));
+      this.chains.push(new Chain(smallGear, medGear));
+      this.chains.push(new Chain(medGear, idlerGear));
+
+      // Pistons
+      this.pistons.push(new Piston(cx - 250, cy - 50, 40));
+      this.pistons.push(new Piston(cx + 280, cy + 100, 50));
+
+      // Escapement
+      this.escapement = new Escapement(mainGear, cx - 30, cy + 80);
+
+      // Bird
+      this.bird = new Bird(cx - 100, cy - 150);
+
+      // Repair arm
+      this.repairArm = new RepairArm(cx - 300, cy - 200);
+    }
+
+    draw() {
+      const now = performance.now();
+      const deltaTime = 0.016; // approximate
+
+      // Clear
+      ctx.fillStyle = '#111';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Draw background gears pattern
+      ctx.fillStyle = '#222';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Draw chains
+      this.chains.forEach(chain => chain.draw(ctx));
+
+      // Draw gears
+      this.gears.forEach(gear => gear.draw(ctx));
+
+      // Draw pistons
+      this.pistons.forEach(piston => piston.draw(ctx));
+
+      // Draw escapement
+      this.escapement.draw(ctx);
+
+      // Draw bird
+      this.bird.draw(ctx);
+
+      // Draw loose gears
+      this.looseGears.forEach(g => g.draw(ctx));
+
+      // Draw repair arm
+      this.repairArm.draw(ctx);
+    }
+
+    update(deltaTime) {
+      // Update gears
+      this.gears.forEach(gear => gear.update(deltaTime));
+
+      // Update chains
+      // (static for now)
+
+      // Update pistons
+      this.pistons.forEach(piston => piston.update());
+
+      // Update escapement
+      this.escapement.update(deltaTime);
+
+      // Update bird
+      this.bird.update(deltaTime);
+      this.timeSinceBird += deltaTime;
+      if (!this.bird.active && this.timeSinceBird > 45) {
+        this.bird.activate();
+        this.timeSinceBird = 0;
+      }
+
+      // Update loose gears
+      this.looseGears = this.looseGears.filter(g => {
+        const alive = g.update(deltaTime, this.looseGears, this.gears, this.repairArm);
+        return alive;
+      });
+
+      // Occasionally spawn a loose gear
+      this.timeSinceLoose += deltaTime;
+      if (this.timeSinceLoose > rand(30, 60)) {
+        const gearIdx = Math.floor(rand(0, this.gears.length));
+        const gear = this.gears[gearIdx];
+        this.looseGears.push(new LooseGear(gear.x, gear.y, gear));
+        this.timeSinceLoose = 0;
+      }
+
+      // Update repair arm
+      this.repairArm.update(deltaTime);
+    }
+  }
+
+  const machine = new ClockworkMachine();
+  machine.init();
+
+  let lastTime = 0;
+  function animate(time) {
+    if (!lastTime) lastTime = time;
+    const deltaTime = (time - lastTime) / 1000;
+    lastTime = time;
+
+    // Cap deltaTime for stability
+    const dt = Math.min(deltaTime, 0.1);
+
+    machine.update(dt);
+    machine.draw();
+
+    requestAnimationFrame(animate);
+  }
+
+  requestAnimationFrame(animate);
+})();
+</script>
+</body>
+</html>

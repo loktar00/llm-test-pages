@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Orbital Junk</title>
+<style>
+  body { margin: 0; overflow: hidden; background: #000; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+let W, H, cx, cy, earthR;
+const objects = [];
+const debris = [];
+const stars = [];
+
+// Configuration
+const MAX_ORBITS = 8;
+const BASE_SPEED = 0.002;
+const DRONE_SPEED = 1.5;
+const DRONE_RANGE = 60;
+const G = 0.05;
+
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  cx = W * 0.25;
+  cy = H * 0.75;
+  earthR = Math.min(W, H) * 0.15;
+  initStars();
+}
+
+function initStars() {
+  stars.length = 0;
+  for (let i = 0; i < 300; i++) {
+    stars.push({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      size: Math.random() * 1.5,
+      alpha: Math.random() * 0.8 + 0.2,
+      twinkle: Math.random() * 0.02
+    });
+  }
+}
+
+class Satellite {
+  constructor(orbitIndex) {
+    this.orbitIndex = orbitIndex;
+    this.radius = earthR + 40 + orbitIndex * (Math.min(W, H) * 0.08);
+    this.angle = Math.random() * Math.PI * 2;
+    this.speed = (BASE_SPEED / (orbitIndex + 1)) * (0.8 + Math.random() * 0.4);
+    this.size = 1.5 + Math.random() * 1.5;
+    this.glintPhase = Math.random() * Math.PI * 2;
+    this.glintSpeed = 0.05 + Math.random() * 0.1;
+    this.color = `hsl(${180 + Math.random() * 60}, 70%, 70%)`;
+    this.dead = false;
+  }
+
+  update() {
+    this.angle += this.speed;
+    this.glintPhase += this.glintSpeed;
+    this.x = cx + Math.cos(this.angle) * this.radius;
+    this.y = cy + Math.sin(this.angle) * this.radius;
+  }
+
+  draw() {
+    const glint = 0.5 + 0.5 * Math.sin(this.glintPhase);
+    ctx.fillStyle = this.color;
+    ctx.globalAlpha = 0.4 + glint * 0.6;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Glint effect
+    if (glint > 0.8) {
+      ctx.globalAlpha = (glint - 0.8) * 5;
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, this.size * 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+class Debris {
+  constructor(x, y, vx, vy) {
+    this.x = x;
+    this.y = y;
+    this.vx = vx;
+    this.vy = vy;
+    this.life = 1;
+    this.decay = 0.005 + Math.random() * 0.01;
+    this.size = 0.5 + Math.random() * 1.5;
+    this.color = `hsl(${Math.random() * 60 + 20}, 90%, 60%)`;
+  }
+
+  update() {
+    // Slight gravitational pull toward earth
+    const dx = cx - this.x;
+    const dy = cy - this.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    const force = G / (dist * 0.01);
+    this.vx += (dx / dist) * force;
+    this.vy += (dy / dist) * force;
+    
+    this.x += this.vx;
+    this.y += this.vy;
+    this.life -= this.decay;
+  }
+
+  draw() {
+    ctx.globalAlpha = this.life;
+    ctx.fillStyle = this.color;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+}
+
+class Drone {
+  constructor() {
+    this.x = cx + earthR + 100;
+    this.y = cy - 100;
+    this.vx = 0;
+    this.vy = 0;
+    this.target = null;
+    this.angle = 0;
+  }
+
+  update() {
+    // Find nearest object
+    let minDist = Infinity;
+    this.target = null;
+    
+    for (let obj of objects) {
+      const dx = obj.x - this.x;
+      const dy = obj.y - this.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < minDist) {
+        minDist = dist;
+        this.target = obj;
+      }
+    }
+
+    if (this.target) {
+      const dx = this.target.x - this.x;
+      const dy = this.target.y - this.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      
+      if (dist > 0) {
+        this.vx += (dx / dist) * 0.1;
+        this.vy += (dy / dist) * 0.1;
+      }
+      
+      if (dist < DRONE_RANGE) {
+        // Collision - absorb object
+        this.target.dead = true;
+        // Create small debris burst
+        for (let i = 0; i < 3; i++) {
+          debris.push(new Debris(
+            this.target.x, 
+            this.target.y, 
+            (Math.random() - 0.5) * 2,
+            (Math.random() - 0.5) * 2
+          ));
+        }
+      }
+    }
+
+    // Limit speed
+    const speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+    if (speed > DRONE_SPEED) {
+      this.vx = (this.vx / speed) * DRONE_SPEED;
+      this.vy = (this.vy / speed) * DRONE_SPEED;
+    }
+
+    this.x += this.vx;
+    this.y += this.vy;
+    this.angle = Math.atan2(this.vy, this.vx);
+  }
+
+  draw() {
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.angle);
+    
+    // Drone body
+    ctx.fillStyle = '#4a9eff';
+    ctx.globalAlpha = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(8, 0);
+    ctx.lineTo(-4, -4);
+    ctx.lineTo(-2, 0);
+    ctx.lineTo(-4, 4);
+    ctx.closePath();
+    ctx.fill();
+    
+    // Engine glow
+    ctx.globalAlpha = 0.4 + Math.random() * 0.3;
+    ctx.fillStyle = '#88ccff';
+    ctx.beginPath();
+    ctx.arc(-3, 0, 3, 0, Math.PI * 2);
+    ctx.fill();
+    
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+}
+
+const drone = new Drone();
+
+function initObjects() {
+  for (let i = 0; i < MAX_ORBITS; i++) {
+    const count = 15 + Math.floor(Math.random() * 20);
+    for (let j = 0; j < count; j++) {
+      objects.push(new Satellite(i));
+    }
+  }
+}
+
+function drawEarth() {
+  // Atmosphere glow
+  const grad = ctx.createRadialGradient(cx, cy, earthR * 0.9, cx, cy, earthR * 1.4);
+  grad.addColorStop(0, 'rgba(60, 140, 255, 0.3)');
+  grad.addColorStop(0.5, 'rgba(40, 100, 200, 0.1)');
+  grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(cx, cy, earthR * 1.4, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Earth body
+  const earthGrad = ctx.createRadialGradient(cx - earthR * 0.3, cy - earthR * 0.3, 0, cx, cy, earthR);
+  earthGrad.addColorStop(0, '#4a9eff');
+  earthGrad.addColorStop(0.3, '#2266cc');
+  earthGrad.addColorStop(0.7, '#1a4488');
+  earthGrad.addColorStop(1, '#0a1a33');
+  ctx.fillStyle = earthGrad;
+  ctx.beginPath();
+  ctx.arc(cx, cy, earthR, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Continents (simplified)
+  ctx.fillStyle = '#2d8a4e';
+  ctx.globalAlpha = 0.6;
+  ctx.beginPath();
+  ctx.ellipse(cx - earthR * 0.2, cy - earthR * 0.3, earthR * 0.3, earthR * 0.4, -0.3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(cx + earthR * 0.4, cy + earthR * 0.2, earthR * 0.2, earthR * 0.25, 0.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // Cloud wisps
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 5; i++) {
+    const angle = (i / 5) * Math.PI * 2 + Date.now() * 0.0001;
+    const r = earthR * 0.7;
+    ctx.beginPath();
+    ctx.arc(cx + Math.cos(angle) * r * 0.5, cy + Math.sin(angle) * r * 0.5, 15, 0, Math.PI);
+    ctx.stroke();
+  }
+}
+
+function drawOrbitLines() {
+  ctx.strokeStyle = 'rgba(100, 150, 255, 0.08)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < MAX_ORBITS; i++) {
+    const r = earthR + 40 + i * (Math.min(W, H) * 0.08);
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+}
+
+function drawStars() {
+  for (let star of stars) {
+    const twinkle = Math.sin(Date.now() * star.twinkle) * 0.3 + 0.7;
+    ctx.globalAlpha = star.alpha * twinkle;
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function checkCollisions() {
+  for (let i = 0; i < objects.length; i++) {
+    if (objects[i].dead) continue;
+    for (let j = i + 1; j < objects.length; j++) {
+      if (objects[j].dead) continue;
+      const dx = objects[i].x - objects[j].x;
+      const dy = objects[i].y - objects[j].y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      
+      if (dist < objects[i].size + objects[j].size + 2) {
+        // Collision!
+        const midX = (objects[i].x + objects[j].x) / 2;
+        const midY = (objects[i].y + objects[j].y) / 2;
+        
+        // Create debris cloud
+        const numDebris = 8 + Math.floor(Math.random() * 8);
+        for (let k = 0; k < numDebris; k++) {
+          const angle = Math.random() * Math.PI * 2;
+          const speed = 1 + Math.random() * 3;
+          debris.push(new Debris(
+            midX, 
+            midY, 
+            Math.cos(angle) * speed,
+            Math.sin(angle) * speed
+          ));
+        }
+        
+        objects[i].dead = true;
+        objects[j].dead = true;
+      }
+    }
+  }
+}
+
+function spawnNewSatellites() {
+  // Occasionally add new satellites to replace destroyed ones
+  if (Math.random() < 0.02) {
+    const orbitIdx = Math.floor(Math.random() * MAX_ORBITS);
+    objects.push(new Satellite(orbitIdx));
+  }
+}
+
+function animate() {
+  ctx.fillStyle = '#000005';
+  ctx.fillRect(0, 0, W, H);
+  
+  drawStars();
+  drawOrbitLines();
+  drawEarth();
+  
+  // Update and draw satellites
+  for (let obj of objects) {
+    obj.update();
+    obj.draw();
+  }
+  
+  // Update and draw debris
+  for (let i = debris.length - 1; i >= 0; i--) {
+    debris[i].update();
+    debris[i].draw();
+    if (debris[i].life <= 0) {
+      debris.splice(i, 1);
+    }
+  }
+  
+  // Update and draw drone
+  drone.update();
+  drone.draw();
+  
+  // Check collisions
+  checkCollisions();
+  
+  // Remove dead objects
+  for (let i = objects.length - 1; i >= 0; i--) {
+    if (objects[i].dead) {
+      objects.splice(i, 1);
+    }
+  }
+  
+  // Spawn new satellites
+  spawnNewSatellites();
+  
+  requestAnimationFrame(animate);
+}
+
+window.addEventListener('resize', resize);
+resize();
+initObjects();
+animate();
+</script>
+</body>
+</html>

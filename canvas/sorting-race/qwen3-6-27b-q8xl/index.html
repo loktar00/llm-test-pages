@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sorting Race</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a1a; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', () => { resize(); if (race) race.resize(); });
+
+// Color palettes
+const palettes = [
+  ['#ff6b6b','#ee5a24','#f9ca24','#6ab04c','#22a6b3','#4834d4','#be2edd','#eb4d4b'],
+  ['#00b894','#00cec9','#0984e3','#6c5ce7','#fd79a8','#e17055','#fdcb6e','#74b9ff'],
+  ['#ff7675','#d63031','#e84393','#fd79a8','#a29bfe','#6c5ce7','#0984e3','#00b894'],
+  ['#55efc4','#81ecec','#74b9ff','#a29bfe','#dfe6e9','#ffeaa7','#fab1a0','#ff7675'],
+  ['#2d3436','#636e72','#b2bec3','#dfe6e9','#e17055','#fdcb6e','#00b894','#0984e3'],
+  ['#e84393','#fd79a8','#fdcB6e','#55efc4','#81ecec','#74b9ff','#a29bfe','#6c5ce7'],
+];
+
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function makeArray(n) {
+  const a = [];
+  for (let i = 0; i < n; i++) a.push(Math.floor(Math.random() * 99) + 1);
+  return a;
+}
+
+// Sorter base class
+class Sorter {
+  constructor(name, data, color, x, w, h) {
+    this.name = name;
+    this.data = [...data];
+    this.color = color;
+    this.x = x;
+    this.w = w;
+    this.h = h;
+    this.comparisons = 0;
+    this.swaps = 0;
+    this.finished = false;
+    this.finishTime = 0;
+    this.cursor = -1;
+    this.highlights = new Set();
+    this.active = false;
+    this.steps = [];
+    this.stepIndex = 0;
+    this.maxBars = data.length;
+    this.barW = (w - 20) / data.length;
+    this.maxVal = Math.max(...data);
+  }
+
+  draw() {
+    const barH = this.h - 50;
+    // Background
+    ctx.fillStyle = 'rgba(15,15,35,0.85)';
+    ctx.fillRect(this.x, 0, this.w, this.h);
+
+    // Border
+    ctx.strokeStyle = this.color;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(this.x + 1, 1, this.w - 2, this.h - 2);
+
+    // Title
+    ctx.fillStyle = this.color;
+    ctx.font = 'bold 14px "Segoe UI"';
+    ctx.textAlign = 'center';
+    ctx.fillText(this.name, this.x + this.w / 2, 18);
+
+    // Stats
+    ctx.font = '11px "Segoe UI"';
+    ctx.fillStyle = '#aaa';
+    ctx.textAlign = 'left';
+    ctx.fillText(`cmp: ${this.comparisons}`, this.x + 8, this.h - 18);
+    ctx.textAlign = 'right';
+    ctx.fillText(`swp: ${this.swaps}`, this.x + this.w - 8, this.h - 18);
+
+    if (this.finished) {
+      ctx.fillStyle = this.color;
+      ctx.font = 'bold 16px "Segoe UI"';
+      ctx.textAlign = 'center';
+      ctx.fillText('✓ DONE', this.x + this.w / 2, this.h - 38);
+    }
+
+    // Bars
+    const bw = Math.max(1, this.w - 20);
+    const barWidth = bw / this.maxBars;
+    for (let i = 0; i < this.data.length; i++) {
+      const val = this.data[i];
+      const bh = (val / this.maxVal) * (barH - 10);
+      const bx = this.x + 10 + i * barWidth;
+      const by = this.h - 40 - bh;
+
+      let col = this.color;
+      let alpha = 0.7;
+      if (this.highlights.has(i)) { alpha = 1.0; col = '#fff'; }
+      if (i === this.cursor) { col = '#ffff00'; alpha = 1.0; }
+
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = col;
+      ctx.fillRect(bx, by, Math.max(1, barWidth - 1), bh);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  step() {
+    if (this.finished) return false;
+    if (this.stepIndex >= this.steps.length) {
+      this.finished = true;
+      this.finishTime = performance.now();
+      return false;
+    }
+    const s = this.steps[this.stepIndex++];
+    this.cursor = s.cursor;
+    this.highlights = new Set(s.highlights);
+    if (s.compare) this.comparisons++;
+    if (s.swap !== undefined) {
+      this.swaps++;
+      [this.data[s.swap[0]], this.data[s.swap[1]]] = [this.data[s.swap[1]], this.data[s.swap[0]]];
+    }
+    return true;
+  }
+}
+
+// Sorting algorithms
+function bubbleSortSteps(data) {
+  const a = [...data];
+  const n = a.length;
+  const steps = [];
+  for (let i = 0; i < n - 1; i++) {
+    for (let j = 0; j < n - i - 1; j++) {
+      steps.push({ cursor: j, highlights: [j, j + 1], compare: true });
+      if (a[j] > a[j + 1]) {
+        [a[j], a[j + 1]] = [a[j + 1], a[j]];
+        steps[steps.length - 1].swap = [j, j + 1];
+      }
+    }
+  }
+  return steps;
+}
+
+function insertionSortSteps(data) {
+  const a = [...data];
+  const n = a.length;
+  const steps = [];
+  for (let i = 1; i < n; i++) {
+    let j = i;
+    steps.push({ cursor: i, highlights: [i], compare: false });
+    while (j > 0) {
+      steps.push({ cursor: j, highlights: [j - 1, j], compare: true });
+      if (a[j] < a[j - 1]) {
+        [a[j], a[j - 1]] = [a[j - 1], a[j]];
+        steps[steps.length - 1].swap = [j, j - 1];
+        j--;
+      } else {
+        break;
+      }
+    }
+  }
+  return steps;
+}
+
+function mergeSortSteps(data) {
+  const a = [...data];
+  const n = a.length;
+  const steps = [];
+  const arr = [...data];
+
+  function merge(l, m, r) {
+    const n1 = m - l;
+    const n2 = r - m;
+    const L = arr.slice(l, m);
+    const R = arr.slice(m, r);
+    let i = 0, j = 0, k = l;
+    while (i < n1 && j < n2) {
+      steps.push({ cursor: k, highlights: [l + i, m + j], compare: true });
+      if (L[i] <= R[j]) { arr[k] = L[i]; i++; }
+      else { arr[k] = R[j]; j++; }
+      steps.push({ cursor: k, highlights: [k], compare: false, swap: [k, k] });
+      k++;
+    }
+    while (i < n1) {
+      arr[k] = L[i];
+      steps.push({ cursor: k, highlights: [k], compare: false, swap: [k, k] });
+      i++; k++;
+    }
+    while (j < n2) {
+      arr[k] = R[j];
+      steps.push({ cursor: k, highlights: [k], compare: false, swap: [k, k] });
+      j++; k++;
+    }
+  }
+
+  function mergeSort(l, r) {
+    if (l >= r - 1) return;
+    const m = Math.floor((l + r) / 2);
+    mergeSort(l, m);
+    mergeSort(m, r);
+    merge(l, m, r);
+  }
+
+  mergeSort(0, n);
+  return steps;
+}
+
+function quicksortSteps(data) {
+  const a = [...data];
+  const steps = [];
+
+  function partition(lo, hi) {
+    const pivot = a[hi];
+    let i = lo - 1;
+    for (let j = lo; j < hi; j++) {
+      steps.push({ cursor: j, highlights: [j, hi], compare: true });
+      if (a[j] < pivot) {
+        i++;
+        [a[i], a[j]] = [a[j], a[i]];
+        steps[steps.length - 1].swap = [i, j];
+      }
+    }
+    [a[i + 1], a[hi]] = [a[hi], a[i + 1]];
+    steps.push({ cursor: i + 1, highlights: [i + 1, hi], compare: false, swap: [i + 1, hi] });
+    return i + 1;
+  }
+
+  function qs(lo, hi) {
+    if (lo < hi) {
+      const p = partition(lo, hi);
+      qs(lo, p - 1);
+      qs(p + 1, hi);
+    }
+  }
+
+  qs(0, a.length - 1);
+  return steps;
+}
+
+// Race controller
+let race = null;
+
+class Race {
+  constructor() {
+    this.phase = 'race'; // race, standings
+    this.startTime = performance.now();
+    this.standingsTime = 0;
+    this.palette = palettes[Math.floor(Math.random() * palettes.length)];
+    this.size = Math.floor(Math.random() * 20) + 20; // 20-39 bars
+    this.data = makeArray(this.size);
+    this.sorters = [];
+    this.init();
+  }
+
+  init() {
+    const panelW = W / 4;
+    const panelH = H;
+    const names = ['Bubble Sort', 'Insertion Sort', 'Merge Sort', 'Quicksort'];
+    const funcs = [bubbleSortSteps, insertionSortSteps, mergeSortSteps, quicksortSteps];
+    const colors = this.palette.slice(0, 4);
+
+    this.sorters = [];
+    for (let i = 0; i < 4; i++) {
+      const x = i * panelW;
+      const sorter = new Sorter(names[i], this.data, colors[i], x, panelW, panelH);
+      sorter.steps = funcs[i](this.data);
+      this.sorters.push(sorter);
+    }
+  }
+
+  resize() {
+    const panelW = W / 4;
+    for (let i = 0; i < this.sorters.length; i++) {
+      this.sorters[i].x = i * panelW;
+      this.sorters[i].w = panelW;
+      this.sorters[i].h = H;
+      this.sorters[i].barW = (panelW - 20) / this.size;
+    }
+  }
+
+  update() {
+    if (this.phase === 'race') {
+      let allDone = true;
+      for (const s of this.sorters) {
+        // Do multiple steps per frame for speed
+        for (let i = 0; i < 3; i++) {
+          if (!s.step()) break;
+        }
+        if (!s.finished) allDone = false;
+      }
+      if (allDone) {
+        this.phase = 'standings';
+        this.standingsTime = performance.now();
+        // Sort by finish time
+        this.sorters.sort((a, b) => a.finishTime - b.finishTime);
+      }
+    } else if (this.phase === 'standings') {
+      if (performance.now() - this.standingsTime > 2500) {
+        race = new Race();
+        return;
+      }
+    }
+  }
+
+  draw() {
+    ctx.clearRect(0, 0, W, H);
+
+    // Draw sorters
+    if (this.phase === 'race') {
+      for (const s of this.sorters) s.draw();
+    } else {
+      // Draw standings
+      ctx.fillStyle = '#0a0a1a';
+      ctx.fillRect(0, 0, W, H);
+
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 36px "Segoe UI"';
+      ctx.textAlign = 'center';
+      ctx.fillText('🏁 STANDINGS 🏁', W / 2, 80);
+
+      const medals = ['🥇', '🥈', '🥉', '4th'];
+      const sorted = [...this.sorters].sort((a, b) => a.finishTime - b.finishTime);
+
+      for (let i = 0; i < sorted.length; i++) {
+        const s = sorted[i];
+        const y = 150 + i * 110;
+
+        ctx.fillStyle = s.color;
+        ctx.fillRect(W / 2 - 200, y, 400, 80);
+        ctx.fillStyle = '#0a0a1a';
+        ctx.fillRect(W / 2 - 195, y + 5, 390, 70);
+
+        ctx.fillStyle = s.color;
+        ctx.font = 'bold 28px "Segoe UI"';
+        ctx.textAlign = 'left';
+        ctx.fillText(`${medals[i]}  ${s.name}`, W / 2 - 180, y + 40);
+
+        ctx.font = '16px "Segoe UI"';
+        ctx.fillStyle = '#ccc';
+        ctx.textAlign = 'right';
+        ctx.fillText(`cmp: ${s.comparisons}  |  swp: ${s.swaps}`, W / 2 + 180, y + 40);
+      }
+
+      ctx.fillStyle = '#666';
+      ctx.font = '14px "Segoe UI"';
+      ctx.textAlign = 'center';
+      ctx.fillText('Next race starting...', W / 2, H - 40);
+    }
+  }
+}
+
+// Main loop
+race = new Race();
+
+function loop() {
+  if (race) {
+    race.update();
+    race.draw();
+  }
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>

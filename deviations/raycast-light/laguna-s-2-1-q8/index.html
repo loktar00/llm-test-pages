@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Dynamic 2D Lighting Demo</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background:#000; }
+  canvas { display:block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+function resize(){
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+const W = canvas.width, H = canvas.height;
+
+// --- Obstacles: random convex polygons ---
+const NUM_OBSTACLES = 12;
+const OBSTACLE_VERTS = 5;
+const obstacles = [];
+
+function rand(min, max){ return Math.random() * (max - min) + min; }
+
+function makeObstacle(cx, cy, size){
+  const verts = [];
+  const r = size;
+  for(let i = 0; i < OBSTACLE_VERTS; i++){
+    const a = (i / OBSTACLE_VERTS) * Math.PI * 2 + rand(-0.2, 0.2);
+    const rr = r * rand(0.7, 1.0);
+    verts.push({ x: cx + Math.cos(a)*rr, y: cy + Math.sin(a)*rr });
+  }
+  return { verts };
+}
+
+// Arrange obstacles in a circle pattern across the room
+for(let i = 0; i < NUM_OBSTACLES; i++){
+  const angle = (i / NUM_OBSTACLES) * Math.PI * 2;
+  const radius = rand(W * 0.25, W * 0.42);
+  const cx = W/2 + Math.cos(angle)*radius;
+  const cy = H/2 + Math.sin(angle)*radius;
+  obstacles.push(makeObstacle(cx, cy, rand(20, 50)));
+}
+
+// --- Raycasting ---
+function raycast(origin, dir, maxDist){
+  const x1 = origin.x, y1 = origin.y;
+  const x2 = x1 + dir.x * maxDist;
+  const y2 = y1 + dir.y * maxDist;
+  
+  let closest = { t: Infinity, point: null, edgeNormal: null };
+
+  for(const obs of obstacles){
+    const v = obs.verts;
+    for(let i = 0; i < v.length; i++){
+      const a = v[i], b = v[(i+1) % v.length];
+      
+      // Segment intersection: line (x1,y1)-(x2,y2) vs segment a-b
+      const dx1 = x2 - x1, dy1 = y2 - y1;
+      const dx2 = b.x - a.x, dy2 = b.y - a.y;
+      
+      const denom = dx1 * dy2 - dy1 * dx2;
+      if(Math.abs(denom) < 1e-10) continue; // parallel
+      
+      const t = ((a.x - x1) * dy2 - (a.y - y1) * dx2) / denom;
+      const u = ((a.x - x1) * dy1 - (a.y - y1) * dx1) / denom;
+      
+      if(t > 0.001 && u >= 0 && u <= 1 && t < closest.t){
+        const px = x1 + t * dx1;
+        const py = y1 + t * dy1;
+        // Edge normal (perpendicular to segment, pointing outward from center)
+        const nx = -(b.y - a.y);
+        const ny = (b.x - a.x);
+        const len = Math.hypot(nx, ny);
+        const nnx = nx/len, nny = ny/len;
+        // Make sure normal points outward (away from obstacle center)
+        const cx2 = (a.x + b.x)/2, cy2 = (a.y + b.y)/2;
+        const dot = nnx * (cx2 - origin.x) + nny * (cy2 - origin.y);
+        const finalNormal = { x: nnx * Math.sign(dot), y: nny * Math.sign(dot) };
+        
+        closest = { t, point: {x:px, y:py}, edgeNormal: finalNormal };
+      }
+    }
+  }
+  
+  if(closest.t === Infinity || closest.t > maxDist){
+    return { hit: false };
+  }
+  return {
+    hit: true,
+    distance: closest.t * maxDist,
+    point: closest.point,
+    normal: closest.edgeNormal
+  };
+}
+
+// --- Light setup ---
+let lightPos = { x: W*0.3, y: H*0.5 };
+let targetPos = { x: W*0.7, y: H*0.5 };
+let hueOffset = 0;
+let hueOffset2 = Math.PI;
+let animTime = 0;
+
+function updateLights(dt){
+  animTime += dt;
+  hueOffset = animTime * 0.05;
+  hueOffset2 = hueOffset + Math.PI;
+  
+  // Drifting light
+  const driftRadius = Math.min(W, H) * 0.35;
+  lightPos.x = W/2 + Math.cos(animTime * 0.3) * driftRadius;
+  lightPos.y = H/2 + Math.sin(animTime * 0.2) * driftRadius * 0.6;
+  
+  // Second dimmer cool light orbiting in opposite direction
+  const driftRadius2 = Math.min(W, H) * 0.25;
+  const light2X = W/2 + Math.cos(-animTime * 0.4 + Math.PI) * driftRadius2;
+  const light2Y = H/2 + Math.sin(-animTime * 0.3 + Math.PI) * driftRadius2 * 0.5;
+  
+  return { light2: { x: light2X, y: light2Y } };
+}
+
+// --- Render ---
+const RAY_COUNT = 180;
+const LIGHT_RADIUS = Math.max(W, H) * 0.45;
+const LIGHT_RADIUS2 = Math.max(W, H) * 0.3;
+
+function render(){
+  ctx.clearRect(0, 0, W, H);
+  
+  // Dark background
+  ctx.fillStyle = '#050510';
+  ctx.fillRect(0, 0, W, H);
+  
+  // Compute light positions
+  const lights = updateLights(0.016);
+  
+  // Light colors with hue cycling
+  const r1 = 255, g1 = 180 + 60*Math.sin(hueOffset), b1 = 80 + 40*Math.cos(hueOffset * 0.7);
+  const r2 = 100 + 40*Math.sin(hueOffset2), g2 = 160 + 60*Math.cos(hueOffset2), b2 = 255;
+  
+  // Draw shadows for light 1
+  drawShadows(lightPos, {r: r1, g: g1, b: b1}, LIGHT_RADIUS, RAY_COUNT, 1.0);
+  
+  // Draw shadows for light 2 (additive, dimmer)
+  drawShadows(lights.light2, {r: r2, g: g2, b: b2}, LIGHT_RADIUS2, RAY_COUNT * 0.7, 0.5);
+  
+  // Glowing edges on obstacles (visible in light)
+  drawObstacleEdges(lightPos, LIGHT_RADIUS);
+  drawObstacleEdges(lights.light2, LIGHT_RADIUS2);
+  
+  requestAnimationFrame(render);
+}
+
+function drawShadows(origin, color, radius, rayCount, intensity){
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  
+  // For soft shadows, sample multiple rays per direction
+  const samples = 2;
+  const shadowPolylines = [];
+  
+  for(let i = 0; i < rayCount; i++){
+    const angle = (i / rayCount) * Math.PI * 2;
+    let maxDist = radius;
+    const points = [{x: origin.x, y: origin.y}];
+    
+    for(let s = 0; s < samples; s++){
+      const a = angle + (s/(samples)) * (2*Math.PI/rayCount) - (2*Math.PI/rayCount)/(samples+1);
+      const dir = { x: Math.cos(a), y: Math.sin(a) };
+      
+      // Subdivide steps for better accuracy
+      let dist = 0;
+      const step = 2;
+      let hit = null;
+      
+      // Coarse raymarch first
+      let coarseHit = false;
+      for(let d = 0; d < radius; d += 8){
+        const px = origin.x + dir.x * d;
+        const py = origin.y + dir.y * d;
+        if(pointInObstacle(px, py)){
+          maxDist = d;
+          coarseHit = true;
+          break;
+        }
+      }
+      
+      if(!coarseHit){
+        // Check raycast properly
+        const result = raycast(origin, dir, radius);
+        if(result.hit){
+          hit = result;
+          maxDist = result.distance;
+        }
+      }
+      
+      if(hit){
+        points.push(hit.point);
+      } else {
+        points.push({x: origin.x + dir.x * maxDist, y: origin.y + dir.y * maxDist});
+      }
+    }
+    
+    if(points.length > 1){
+      shadowPolylines.push(points);
+    }
+  }
+  
+  // Draw shadow fan
+  ctx.fillStyle = `rgba(${color.r},${color.g},${color.b},${0.02 * intensity})`;
+  
+  // Build shadow polygon by connecting ray endpoints
+  const poly = [];
+  poly.push({x: origin.x, y: origin.y});
+  
+  // Forward along rays
+  for(const pts of shadowPolylines){
+    if(pts.length > 1){
+      poly.push(pts[pts.length - 1]);
+    }
+  }
+  
+  // Back along reversed rays
+  for(let i = shadowPolylines.length - 1; i >= 0; i--){
+    if(shadowPolylines[i].length > 1){
+      poly.push(origin);
+    }
+  }
+  
+  ctx.beginPath();
+  ctx.moveTo(origin.x, origin.y);
+  for(let i = 0; i < shadowPolylines.length; i++){
+    const pts = shadowPolylines[i];
+    if(pts.length > 1){
+      ctx.lineTo(pts[pts.length-1].x, pts[pts.length-1].y);
+    }
+  }
+  for(let i = shadowPolylines.length - 1; i >= 0; i--){
+    ctx.lineTo(origin.x, origin.y);
+  }
+  ctx.closePath();
+  ctx.fill();
+  
+  ctx.restore();
+  
+  // Draw light itself
+  const grad = ctx.createRadialGradient(origin.x, origin.y, 0, origin.x, origin.y, radius * 0.5);
+  grad.addColorStop(0, `rgba(${color.r},${color.g},${color.b},${0.4 * intensity})`);
+  grad.addColorStop(1, `rgba(${color.r},${color.g},${color.b},0)`);
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(origin.x, origin.y, radius * 0.5, 0, Math.PI*2);
+  ctx.fill();
+}
+
+function pointInObstacle(px, py){
+  for(const obs of obstacles){
+    if(pointInPolygon(px, py, obs.verts)){
+      return true;
+    }
+  }
+  return false;
+}
+
+function pointInPolygon(x, y, verts){
+  let inside = false;
+  for(let i = 0, j = verts.length - 1; i < verts.length; j = i++){
+    const xi = verts[i].x, yi = verts[i].y;
+    const xj = verts[j].x, yj = verts[j].y;
+    const intersect = ((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi + 1e-10) + xi);
+    if(intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function drawObstacleEdges(origin, radius){
+  const edges = [];
+  
+  for(const obs of obstacles){
+    const v = obs.verts;
+    for(let i = 0; i < v.length; i++){
+      const a = v[i], b = v[(i+1) % v.length];
+      const mid = { x: (a.x + b.x)/2, y: (a.y + b.y)/2 };
+      const dist = Math.hypot(mid.x - origin.x, mid.y - origin.y);
+      if(dist > radius) continue;
+      
+      const edgeLen = Math.hypot(b.x - a.x, b.y - a.y);
+      edges.push({ a, b, mid, dist, edgeLen });
+    }
+  }
+  
+  // Draw lit edges
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  
+  for(const e of edges){
+    const brightness = 1 - (e.dist / radius);
+    const alpha = Math.max(0, brightness * 0.5);
+    const grad = ctx.createLinearGradient(e.a.x, e.a.y, e.b.x, e.b.y);
+    const centerDist = Math.hypot(e.mid.x - W/2, e.mid.y - H/2);
+    grad.addColorStop(0, `hsla(30, 90%, 60%, ${alpha})`);
+    grad.addColorStop(0.5, `hsla(30, 90%, 70%, ${alpha * 1.2})`);
+    grad.addColorStop(1, `hsla(30, 90%, 60%, ${alpha})`);
+    
+    ctx.strokeStyle = grad;
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(e.a.x, e.a.y);
+    ctx.lineTo(e.b.x, e.b.y);
+    ctx.stroke();
+  }
+  
+  ctx.restore();
+}
+
+let lastTime = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = (now - lastTime) / 1000;
+  lastTime = now;
+  
+  // Update light positions based on dt
+  animTime += dt * 0.5;
+  hueOffset = animTime * 0.05;
+  hueOffset2 = hueOffset + Math.PI;
+  
+  const driftRadius = Math.min(W, H) * 0.35;
+  lightPos.x = W/2 + Math.cos(animTime) * driftRadius;
+  lightPos.y = H/2 + Math.sin(animTime * 0.66) * driftRadius * 0.6;
+  
+  render();
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

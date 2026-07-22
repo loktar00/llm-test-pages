@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Falling Sand Simulation</title>
+<style>
+  * { margin: 0; padding: 0; overflow: hidden; }
+  canvas { display: block; image-rendering: pixelated; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script>
+"use strict";
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+let width = window.innerWidth;
+let height = window.innerHeight;
+canvas.width = width;
+canvas.height = height;
+
+window.addEventListener('resize', () => {
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = width;
+    canvas.height = height;
+});
+
+// Grid setup
+const CELL_SIZE = 4;
+const COLS = Math.ceil(width / CELL_SIZE);
+const ROWS = Math.ceil(height / CELL_SIZE);
+
+const grid = new Uint8Array(COLS * ROWS);
+
+// Material types
+const EMPTY = 0;
+const SAND = 1;
+const WATER = 2;
+const STONE = 3;
+const FIRE = 4;
+const WOOD = 5;
+const SMOKE = 6;
+
+// Colors
+const COLORS = {
+    [EMPTY]: [0, 0, 0, 0],
+    [SAND]: [194, 178, 123, 255],
+    [WATER]: [64, 122, 232, 200],
+    [STONE]: [120, 120, 120, 255],
+    [FIRE]: [240, 120, 30, 255],
+    [WOOD]: [139, 69, 19, 255],
+    [SMOKE]: [180, 180, 180, 120]
+};
+
+function idx(x, y) {
+    return y * COLS + x;
+}
+
+function inBounds(x, y) {
+    return x >= 0 && x < COLS && y >= 0 && y < ROWS;
+}
+
+function randInt(max) {
+    return Math.floor(Math.random() * max);
+}
+
+// Initialize stone ledges
+function initLedges() {
+    grid.fill(EMPTY);
+    
+    for (let y = ROWS * 0.75; y < ROWS; y++) {
+        for (let x = 0; x < COLS; x++) {
+            grid[idx(x, y)] = STONE;
+        }
+    }
+    
+    for (let i = 0; i < 8; i++) {
+        const startX = i * (COLS / 8) + randInt(20) - 10;
+        const height = 5 + randInt(15);
+        const width = 20 + randInt(40);
+        
+        for (let y = ROWS * 0.4; y < ROWS * 0.8; y++) {
+            for (let x = startX; x < startX + width; x++) {
+                if (inBounds(x, y)) {
+                    grid[idx(x, y)] = STONE;
+                }
+            }
+        }
+        
+        for (let x = startX - 5; x < startX + width + 5; x++) {
+            if (inBounds(x, ROWS * 0.4 - height)) {
+                for (let yy = 0; yy < 3; yy++) {
+                    if (inBounds(x, ROWS * 0.4 - height + yy)) {
+                        grid[idx(x, ROWS * 0.4 - height + yy)] = STONE;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Add some wooden platforms
+    for (let i = 0; i < 10; i++) {
+        const x = 30 + i * (COLS / 10);
+        const y = 10 + randInt(50);
+        if (inBounds(x, y) && inBounds(x + 30, y)) {
+            for (let dx = 0; dx < 30; dx++) {
+                if (inBounds(x + dx, y)) {
+                    grid[idx(x + dx, y)] = WOOD;
+                }
+            }
+        }
+    }
+}
+
+let emitterX = COLS * 0.2;
+let emitterDir = 1;
+let lastEmitTime = 0;
+let lastErosionTime = 0;
+let lastRegenTime = 0;
+let lastWoodSpawn = 0;
+
+function emitMaterial() {
+    const materials = [SAND, SAND, SAND, SAND, WATER, WATER, FIRE];
+    const mat = materials[randInt(materials.length)];
+    
+    if (inBounds(emitterX, 0)) {
+        grid[idx(emitterX, 0)] = mat;
+    }
+}
+
+function erodeLedges() {
+    for (let i = 0; i < 200; i++) {
+        const x = randInt(COLS);
+        const y = randInt(ROWS);
+        if (inBounds(x, y) && inBounds(x, y + 1)) {
+            if (grid[idx(x, y)] === STONE && grid[idx(x, y + 1)] !== STONE) {
+                if (randInt(100) < 3) {
+                    grid[idx(x, y)] = EMPTY;
+                }
+            }
+            if (grid[idx(x, y)] === WOOD && randInt(100) < 1) {
+                grid[idx(x, y)] = EMPTY;
+            }
+        }
+    }
+}
+
+function regenerateLedges() {
+    for (let i = 0; i < 100; i++) {
+        const x = randInt(COLS);
+        const y = Math.floor(ROWS * 0.7) + randInt(Math.floor(ROWS * 0.2));
+        if (inBounds(x, y) && grid[idx(x, y)] === EMPTY && grid[idx(x, y - 1)] === STONE) {
+            grid[idx(x, y)] = STONE;
+        }
+    }
+    
+    // Regenerate wood
+    for (let i = 0; i < 30; i++) {
+        const x = 30 + randInt(COLS - 60);
+        const y = 10 + randInt(Math.floor(ROWS * 0.4));
+        if (inBounds(x, y) && grid[idx(x, y)] === EMPTY) {
+            if (grid[idx(x, y + 1)] === STONE || grid[idx(x, y + 1)] === WOOD) {
+                grid[idx(x, y)] = WOOD;
+            }
+        }
+    }
+}
+
+function spawnWood() {
+    for (let i = 0; i < 20; i++) {
+        const x = 30 + randInt(COLS - 60);
+        const y = 10 + randInt(Math.floor(ROWS * 0.3));
+        if (inBounds(x, y) && grid[idx(x, y)] === EMPTY) {
+            if (grid[idx(x, y + 1)] === STONE || grid[idx(x, y + 1)] === WOOD) {
+                grid[idx(x, y)] = WOOD;
+            }
+        }
+    }
+}
+
+function updateSand(x, y) {
+    const belowIdx = idx(x, y + 1);
+    const below = grid[belowIdx];
+    
+    if (below === EMPTY || below === WATER) {
+        grid[idx(x, y)] = EMPTY;
+        if (below === WATER) {
+            if (inBounds(x, y + 1)) {
+                grid[belowIdx] = SAND;
+                // Displace water
+                const dirs = [-1, 1];
+                for (const d of dirs) {
+                    const nx = x + d;
+                    if (inBounds(nx, y + 1) && grid[idx(nx, y + 1)] === WATER) {
+                        grid[idx(nx, y + 1)] = SAND;
+                        grid[belowIdx] = WATER;
+                        break;
+                    }
+                }
+            }
+        } else {
+            grid[belowIdx] = SAND;
+        }
+        return true;
+    }
+    
+    // Check diagonals
+    const dirs = [randInt(2) === 0 ? -1 : 1, randInt(2) === 0 ? 1 : -1];
+    for (const dx of dirs) {
+        const nx = x + dx;
+        const ny = y + 1;
+        if (inBounds(nx, ny)) {
+            const nIdx = idx(nx, ny);
+            const neighbor = grid[nIdx];
+            if (neighbor === EMPTY) {
+                grid[idx(x, y)] = EMPTY;
+                grid[nIdx] = SAND;
+                return true;
+            }
+        }
+    }
+    
+    return false;
+}
+
+function updateWater(x, y) {
+    const belowIdx = idx(x, y + 1);
+    const below = grid[belowIdx];
+    
+    if (below === EMPTY) {
+        grid[idx(x, y)] = EMPTY;
+        grid[belowIdx] = WATER;
+        return true;
+    }
+    
+    if (below === FIRE) {
+        grid[idx(x, y)] = EMPTY;
+        grid[belowIdx] = WATER;
+        return true;
+    }
+    
+    // Flow sideways
+    const dirs = [randInt(2) === 0 ? -1 : 1, randInt(2) === 0 ? 1 : -1];
+    for (const dx of dirs) {
+        const nx = x + dx;
+        if (inBounds(nx, y)) {
+            if (grid[idx(nx, y)] === EMPTY) {
+                grid[idx(x, y)] = EMPTY;
+                grid[idx(nx, y)] = WATER;
+                return true;
+            }
+        }
+    }
+    
+    return false;
+}
+
+function updateFire(x, y) {
+    const belowIdx = idx(x, y + 1);
+    const below = grid[belowIdx];
+    
+    if (below === WATER || below === STONE) {
+        if (below === WATER) {
+            grid[belowIdx] = EMPTY;
+        }
+        grid[idx(x, y)] = EMPTY;
+        return true;
+    }
+    
+    if (below === WOOD) {
+        grid[belowIdx] = FIRE;
+        grid[idx(x, y)] = EMPTY;
+        // Spread fire
+        if (randInt(3) === 0) {
+            grid[idx(x, y)] = FIRE;
+        }
+        return true;
+    }
+    
+    // Burn upwards
+    const aboveY = y - 1;
+    if (inBounds(x, aboveY)) {
+        const above = grid[idx(x, aboveY)];
+        if (above === WOOD) {
+            grid[idx(x, aboveY)] = FIRE;
+        }
+        if (above === WATER) {
+            grid[idx(x, y)] = EMPTY;
+            grid[idx(x, aboveY)] = EMPTY;
+            return true;
+        }
+    }
+    
+    // Spread fire horizontally
+    for (const dx of [-1, 1]) {
+        const nx = x + dx;
+        if (inBounds(nx, y)) {
+            const neighbor = grid[idx(nx, y)];
+            if (neighbor === WOOD && randInt(3) === 0) {
+                grid[idx(nx, y)] = FIRE;
+            }
+        }
+    }
+    
+    // Random upward movement
+    if (inBounds(x, y - 1) && grid[idx(x, y - 1)] === EMPTY && randInt(3) === 0) {
+        grid[idx(x, y)] = EMPTY;
+        grid[idx(x, y - 1)] = FIRE;
+        return true;
+    }
+    
+    // Chance to go out
+    if (randInt(100) < 4) {
+        grid[idx(x, y)] = SMOKE;
+        return true;
+    }
+    
+    return false;
+}
+
+function updateSmoke(x, y) {
+    const aboveY = y - 1;
+    if (inBounds(x, aboveY) && grid[idx(x, aboveY)] === EMPTY) {
+        grid[idx(x, y)] = EMPTY;
+        grid[idx(x, aboveY)] = SMOKE;
+        return true;
+    }
+    
+    // Drift sideways
+    const dx = randInt(3) - 1;
+    if (dx !== 0) {
+        const nx = x + dx;
+        const ny = y - 1;
+        if (inBounds(nx, ny) && grid[idx(nx, ny)] === EMPTY) {
+            grid[idx(x, y)] = EMPTY;
+            grid[idx(nx, ny)] = SMOKE;
+            return true;
+        }
+    }
+    
+    // Fade out
+    if (randInt(100) < 8) {
+        grid[idx(x, y)] = EMPTY;
+        return true;
+    }
+    
+    return false;
+}
+
+let lastTime = 0;
+
+function update(timestamp) {
+    const deltaTime = timestamp - lastTime;
+    if (deltaTime < 16) {
+        requestAnimationFrame(update);
+        return;
+    }
+    lastTime = timestamp;
+    
+    // Emit materials
+    if (timestamp - lastEmitTime > 200) {
+        emitMaterial();
+        lastEmitTime = timestamp;
+    }
+    
+    // Move emitter
+    emitterX += emitterDir * (0.5 + randInt(2) * 0.3);
+    if (emitterX <= 5 || emitterX >= COLS - 5) {
+        emitterDir *= -1;
+    }
+    
+    // Erode ledges
+    if (timestamp - lastErosionTime > 500) {
+        erodeLedges();
+        lastErosionTime = timestamp;
+    }
+    
+    // Regenerate ledges
+    if (timestamp - lastRegenTime > 1000) {
+        regenerateLedges();
+        lastRegenTime = timestamp;
+    }
+    
+    // Spawn wood
+    if (timestamp - lastWoodSpawn > 800) {
+        spawnWood();
+        lastWoodSpawn = timestamp;
+    }
+    
+    // Update materials in random order
+    const indices = [];
+    for (let i = 0; i < grid.length; i++) {
+        indices.push(i);
+    }
+    // Fisher-Yates shuffle
+    for (let i = indices.length - 1; i > 0; i--) {
+        const j = randInt(i + 1);
+        [indices[i], indices[j]] = [indices[j], indices[i]];
+    }
+    
+    for (const i of indices) {
+        const y = Math.floor(i / COLS);
+        const x = i % COLS;
+        const cell = grid[i];
+        
+        if (cell === SAND) {
+            updateSand(x, y);
+        } else if (cell === WATER) {
+            updateWater(x, y);
+        } else if (cell === FIRE) {
+            updateFire(x, y);
+        } else if (cell === SMOKE) {
+            updateSmoke(x, y);
+        }
+    }
+    
+    // Render
+    render();
+    
+    requestAnimationFrame(update);
+}
+
+function render() {
+    const imageData = ctx.createImageData(COLS, ROWS);
+    const data = new Uint32Array(imageData.data.buffer);
+    
+    for (let i = 0; i < grid.length; i++) {
+        const cell = grid[i];
+        const color = COLORS[cell];
+        data[i] = (color[3] << 24) | (color[2] << 16) | (color[1] << 8) | color[0];
+    }
+    
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = COLS;
+    tempCanvas.height = ROWS;
+    const tempCtx = tempCanvas.getContext('2d');
+    tempCtx.putImageData(imageData, 0, 0);
+    
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(tempCanvas, 0, 0, width, height);
+}
+
+// Initialize
+initLedges();
+
+// Start simulation
+requestAnimationFrame(function frame(timestamp) {
+    update(timestamp);
+    requestAnimationFrame(frame);
+});
+</script>
+</body>
+</html>

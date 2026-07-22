@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meteor Storm</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+<canvas id="sky"></canvas>
+<script>
+    const canvas = document.getElementById('sky');
+    const ctx = canvas.getContext('2d');
+
+    let width, height;
+    let time = 0;
+    
+    // Wave parameters
+    let waveIntensity = 0;
+    let waveTimer = 0;
+    let waveDuration = 600; // Frames per wave cycle
+    let isBolideActive = false;
+    let bolide = null;
+    let skyFlash = 0;
+
+    // Stars
+    const stars = [];
+    const STAR_COUNT = 300;
+
+    function resize() {
+        width = canvas.width = window.innerWidth;
+        height = canvas.height = window.innerHeight;
+        generateStars();
+        generateRidge();
+    }
+
+    function generateStars() {
+        stars.length = 0;
+        for (let i = 0; i < STAR_COUNT; i++) {
+            stars.push({
+                x: Math.random() * width,
+                y: Math.random() * height,
+                size: Math.random() * 1.5,
+                alpha: Math.random(),
+                twinkleSpeed: 0.02 + Math.random() * 0.05
+            });
+        }
+    }
+
+    // Procedural Ridge
+    let ridgePath = new Path2D();
+    function generateRidge() {
+        ridgePath = new Path2D();
+        const segments = 100;
+        const segmentWidth = width / segments;
+        const baseY = height * 0.85;
+        
+        ridgePath.moveTo(0, height);
+        ridgePath.lineTo(0, baseY);
+
+        // Simple noise-like generation
+        let points = [];
+        for(let i=0; i<=segments; i++) {
+            let x = i * segmentWidth;
+            // Combination of sines for "random" looking terrain
+            let y = baseY 
+                  - Math.sin(i * 0.1) * 50 
+                  - Math.sin(i * 0.05 + 2) * 80 
+                  - Math.sin(i * 0.3) * 20;
+            points.push({x, y});
+        }
+
+        // Draw jagged silhouette
+        for(let p of points) {
+            ridgePath.lineTo(p.x, p.y);
+        }
+        ridgePath.lineTo(width, height);
+        ridgePath.closePath();
+    }
+
+    class Meteor {
+        constructor() {
+            this.reset();
+        }
+
+        reset() {
+            // Start from top or right, move towards bottom-left
+            const startX = Math.random() * width * 1.5 - width * 0.25;
+            const startY = -50;
+            
+            this.x = startX;
+            this.y = startY;
+            
+            // Angle roughly 45 degrees down-left
+            const angle = Math.PI / 4 + (Math.random() * 0.2 - 0.1);
+            const speed = 15 + Math.random() * 15;
+            
+            this.vx = -Math.cos(angle) * speed;
+            this.vy = Math.sin(angle) * speed;
+            
+            this.length = 80 + Math.random() * 100;
+            this.size = 2 + Math.random() * 2;
+            this.life = 1.0;
+            this.decay = 0.01 + Math.random() * 0.02;
+            this.active = true;
+            
+            // Color variation
+            const hue = Math.random() > 0.8 ? 40 : 200; // Occasional gold, mostly blue/white
+            this.color = `hsl(${hue}, 80%, 80%)`;
+        }
+
+        update() {
+            this.x += this.vx;
+            this.y += this.vy;
+            this.life -= this.decay;
+
+            if (this.life <= 0 || this.x < -100 || this.y > height + 100) {
+                this.active = false;
+            }
+        }
+
+        draw(ctx) {
+            if (!this.active) return;
+
+            ctx.save();
+            ctx.translate(this.x, this.y);
+            
+            // Rotate context to align with velocity
+            const angle = Math.atan2(this.vy, this.vx);
+            ctx.rotate(angle);
+
+            // Draw trail
+            // The trail extends backwards (negative x in rotated space)
+            const gradient = ctx.createLinearGradient(0, 0, -this.length, 0);
+            gradient.addColorStop(0, `rgba(255, 255, 255, ${this.life})`);
+            gradient.addColorStop(0.1, `rgba(200, 220, 255, ${this.life * 0.8})`);
+            gradient.addColorStop(1, `rgba(100, 150, 255, 0)`);
+
+            ctx.lineWidth = this.size * this.life;
+            ctx.lineCap = 'round';
+            ctx.strokeStyle = gradient;
+            
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(-this.length, 0);
+            ctx.stroke();
+
+            // Head
+            ctx.fillStyle = '#fff';
+            ctx.beginPath();
+            ctx.arc(0, 0, this.size, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.restore();
+        }
+    }
+
+    class Bolide {
+        constructor() {
+            this.x = Math.random() * width;
+            this.y = -50;
+            this.vx = (Math.random() - 0.5) * 10;
+            this.vy = 5 + Math.random() * 5;
+            this.life = 1.0;
+            this.decay = 0.005; // Slow fade
+            this.active = true;
+            this.size = 10;
+            this.smokeTrail = []; // We will draw this directly on canvas, but need coords for persistence logic if we wanted arrays. 
+            // BUT requirement says "no arrays of drawn lines" for persistence. 
+            // However, to make a "slow fading smoke train" that behaves differently than the fast meteors, 
+            // I will draw the smoke trail directly onto the canvas using the same fading technique, 
+            // but with a thicker, darker stroke that lingers.
+        }
+
+        update() {
+            this.x += this.vx;
+            this.y += this.vy;
+            this.life -= this.decay;
+
+            if (this.life <= 0 || this.y > height + 100) {
+                this.active = false;
+            }
+        }
+
+        draw(ctx) {
+            if (!this.active) return;
+
+            // The Bolide Head
+            ctx.save();
+            ctx.shadowBlur = 50;
+            ctx.shadowColor = 'white';
+            ctx.fillStyle = `rgba(255, 255, 255, ${this.life})`;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.size * this.life, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+
+            // The Smoke Train
+            // We draw a thick, semi-transparent line that fades very slowly because the global fade is slow
+            // We add some randomness to make it look like debris
+            ctx.save();
+            ctx.translate(this.x, this.y);
+            const angle = Math.atan2(this.vy, this.vx);
+            ctx.rotate(angle);
+            
+            // Smoke gradient
+            const smokeLen = 400;
+            const grad = ctx.createLinearGradient(0, 0, -smokeLen, 0);
+            grad.addColorStop(0, `rgba(200, 200, 200, ${this.life * 0.5})`);
+            grad.addColorStop(1, `rgba(50, 50, 50, 0)`);
+            
+            ctx.lineWidth = this.size * 4 * this.life;
+            ctx.strokeStyle = grad;
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(-smokeLen, 0);
+            ctx.stroke();
+            
+            ctx.restore();
+        }
+    }
+
+    // Active meteors pool (reused objects, not drawing arrays)
+    const meteors = [];
+    const MAX_METEORS = 50;
+
+    function spawnMeteor() {
+        if (meteors.length < MAX_METEORS) {
+            meteors.push(new Meteor());
+        }
+    }
+
+    function updateWave() {
+        waveTimer++;
+        
+        // Sine wave for intensity: 0 to 1
+        // Period is waveDuration
+        const cycle = (waveTimer % waveDuration) / waveDuration;
+        // Map 0..1 to 0..1..0
+        waveIntensity = Math.sin(cycle * Math.PI);
+
+        // Spawn logic based on intensity
+        // Higher intensity = higher chance to spawn
+        if (Math.random() < waveIntensity * 0.2) {
+            spawnMeteor();
+        }
+
+        // Bolide logic
+        // Only spawn if wave is peaking and no bolide exists
+        if (waveIntensity > 0.8 && !isBolideActive && Math.random() < 0.005) {
+            bolide = new Bolide();
+            isBolideActive = true;
+            skyFlash = 1.0; // Trigger flash
+        }
+    }
+
+    function draw() {
+        // 1. Fade effect (Trail Persistence)
+        // Instead of clearing, we draw a semi-transparent rect over everything.
+        // This creates the trails.
+        ctx.fillStyle = 'rgba(0, 0, 5, 0.15)'; // Dark blue/black, low opacity
+        ctx.fillRect(0, 0, width, height);
+
+        // 2. Sky Flash (Bolide effect)
+        if (skyFlash > 0) {
+            ctx.fillStyle = `rgba(255, 255, 255, ${skyFlash * 0.1})`;
+            ctx.fillRect(0, 0, width, height);
+            skyFlash *= 0.95; // Decay flash
+            if (skyFlash < 0.01) skyFlash = 0;
+        }
+
+        // 3. Stars (Twinkling)
+        ctx.fillStyle = '#FFF';
+        for (let s of stars) {
+            // Twinkle logic
+            s.alpha += s.twinkleSpeed;
+            const flicker = Math.sin(s.alpha) * 0.3 + 0.7;
+            ctx.globalAlpha = flicker * (0.5 + skyFlash * 0.5); // Stars get brighter during flash
+            ctx.beginPath();
+            ctx.arc(s.x, s.y, s.size, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.globalAlpha = 1.0;
+
+        // 4. Meteors
+        for (let i = meteors.length - 1; i >= 0; i--) {
+            let m = meteors[i];
+            m.update();
+            m.draw(ctx);
+            if (!m.active) {
+                meteors.splice(i, 1);
+            }
+        }
+
+        // 5. Bolide
+        if (isBolideActive && bolide) {
+            bolide.update();
+            bolide.draw(ctx);
+            if (!bolide.active) {
+                isBolideActive = false;
+                bolide = null;
+            }
+        }
+
+        // 6. Ridge (Drawn last to cover bottom trails)
+        // We redraw the ridge every frame. Since it's opaque, it doesn't need the fade effect 
+        // and prevents trails from "bleeding" below the horizon.
+        ctx.fillStyle = '#000000';
+        ctx.fill(ridgePath);
+        
+        // Add a subtle atmospheric glow behind the ridge
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        const glowGrad = ctx.createLinearGradient(0, height * 0.7, 0, height);
+        glowGrad.addColorStop(0, 'rgba(0,0,0,0)');
+        glowGrad.addColorStop(1, `rgba(20, 30, 50, ${skyFlash + 0.1})`); // Slight glow
+        ctx.fillStyle = glowGrad;
+        ctx.fill(ridgePath); // Actually, this fills inside the path.
+        // Better to just draw a rect over the bottom
+        ctx.fillStyle = glowGrad;
+        ctx.fillRect(0, height * 0.8, width, height * 0.2);
+        ctx.restore();
+        
+        // Re-draw ridge silhouette to be sharp
+        ctx.fillStyle = '#000000';
+        ctx.fill(ridgePath);
+    }
+
+    function loop() {
+        updateWave();
+        draw();
+        requestAnimationFrame(loop);
+    }
+
+    // Init
+    window.addEventListener('resize', resize);
+    resize();
+    loop();
+
+</script>
+</body>
+</html>

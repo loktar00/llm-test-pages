@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+html,body{margin:0;padding:0;background:#000;overflow:hidden}
+canvas{display:block;width:100vw;height:100vh}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas=document.getElementById('c');
+const ctx=canvas.getContext('2d');
+function resize(){canvas.width=innerWidth;canvas.height=innerHeight}
+resize();addEventListener('resize',resize);
+
+const nestX=canvas.width/2,nestY=canvas.height/2;
+const nestR=8;
+const gridSize=4;
+const cols=Math.ceil(canvas.width/gridSize);
+const rows=Math.ceil(canvas.height/gridSize);
+let pheromones=new Float32Array(cols*rows);
+let foodGrid=Array(cols*rows).fill(0);
+
+const foods=[];
+const ants=[];
+const NUM_ANTS=300;
+const EVAP=0.02;
+const DIFF_RATE=0.3;
+
+function idx(x,y){return y*cols+x}
+function spawnFood(){
+  const x=Math.random()*canvas.width,y=Math.random()*canvas.height;
+  const gx=Math.floor(x/gridSize),gy=Math.floor(y/gridSize);
+  const i=idx(gx,gy);
+  foodGrid[i]=1;
+  foods.push({x,y,amount:500,gx,gy,i});
+}
+
+for(let i=0;i<10;i++)spawnFood();
+
+class Ant{
+  constructor(){this.reset()}
+}
+Ant.prototype.reset=function(){
+  const a=Math.random()*Math.PI*2;
+  this.x=nestX+Math.cos(a)*nestR;
+  this.y=nestY+Math.sin(a)*nestR;
+  this.vx=Math.cos(a);this.vy=Math.sin(a);
+  this.carrying=0;
+  this.mode='forage';
+  this.age=Math.random()*100;
+};
+Ant.prototype.update=function(){
+  const gx=Math.floor(this.x/gridSize),gy=Math.floor(this.y/gridSize);
+  let turn=0,strength=0;
+  if(gx>=0&&gx<cols&&gy>=0&&gy<rows){
+    const i=idx(gx,gy);
+    strength=pheromones[i]*0.02;
+    const angle=Math.atan2(this.vy,this.vx);
+    turn=strength;
+  }
+  let dir=Math.atan2(this.vy,this.vx);
+  if(strength>0.001){
+    const nx=this.vx,ny=this.vy;
+    const perpX=-ny,perpY=nx;
+    const side=Math.sign(nx*this.vx+ny*this.vy);
+    const w=0.6;
+    dir+=turn*w;
+  }
+  dir+=(Math.random()-0.5)*0.3;
+  const speed=1.2;
+  this.vx=Math.cos(dir)*speed;
+  this.vy=Math.sin(dir)*speed;
+  this.x+=this.vx;
+  this.y+=this.vy;
+  // boundary
+  if(this.x<0){this.x=0;this.vx*=-1}
+  if(this.x>canvas.width){this.x=canvas.width;this.vx*=-1}
+  if(this.y<0){this.y=0;this.vy*=-1}
+  if(this.y>canvas.height){this.y=canvas.height;this.vy*=-1}
+  this.age++;
+  // lay pheromone
+  const lx=Math.floor(this.x/gridSize),ly=Math.floor(this.y/gridSize);
+  if(lx>=0&&lx<cols&&ly>=0&&ly<rows){
+    const li=idx(lx,ly);
+    pheromones[li]+=this.carrying?0.4:0.1;
+    if(pheromones[li]>255)pheromones[li]=255;
+  }
+  // food pickup
+  if(gx>=0&&gx<cols&&gy>=0&&gy<rows){
+    const fidx=idx(gx,gy);
+    if(foodGrid[fidx]>0 && !this.carrying){
+      foodGrid[fidx]-=0.02;
+      this.carrying=1;
+      if(foodGrid[fidx]<=0)foodGrid[fidx]=0;
+    }
+  }
+  // nest dropoff
+  const dx=this.x-nestX,dy=this.y-nestY;
+  if(Math.hypot(dx,dy)<nestR+4 && this.carrying){
+    this.carrying=0;
+    this.mode='forage';
+  }
+};
+
+for(let i=0;i<NUM_ANTS;i++)ants.push(new Ant());
+
+// diffused pheromone buffer
+let pheromones2=new Float32Array(cols*rows);
+
+function diffuse(){
+  pheromones2.set(pheromones);
+  for(let y=1;y<rows-1;y++){
+    for(let x=1;x<cols-1;x++){
+      let s=pheromones[idx(x,y)]*0.6;
+      s+=pheromones[idx(x-1,y)]*0.1;
+      s+=pheromones[idx(x+1,y)]*0.1;
+      s+=pheromones[idx(x,y-1)]*0.1;
+      s+=pheromones[idx(x,y+1)]*0.1;
+      pheromones2[idx(x,y)]=s;
+    }
+  }
+  for(let i=0;i<cols*rows;i++){
+    pheromones[i]=Math.max(0,pheromones2[i]-EVAP);
+  }
+}
+
+function updateFood(){
+  for(let i=0;i<foods.length;i++){
+    if(Math.random()<0.001){
+      const f=foods[i];
+      const j=idx(f.gx,f.gy);
+      if(foodGrid[j]<=0){
+        foodGrid[j]=1;
+        f.amount=500;
+      }
+    }
+  }
+}
+
+function draw(){
+  // background
+  ctx.fillStyle='#000';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  
+  // pheromones as soft overlay
+  const img=ctx.createImageData(canvas.width,canvas.height);
+  const data=img.data;
+  for(let y=0;y<rows;y++){
+    for(let x=0;x<cols;x++){
+      const v=pheromones[idx(x,y)];
+      if(v>1){
+        const px=Math.floor(x*gridSize),py=Math.floor(y*gridSize);
+        const r=Math.min(gridSize,Math.ceil(v*0.05));
+        const c=v<128?'rgba(255,165,0,'+(v/255)+')':'rgba(255,255,0,'+(v/255)+')';
+        const rad=r+1;
+        for(let dy=-rad;dy<=rad;dy++){
+          const yy=py+dy;
+          if(yy<0||yy>canvas.height)continue;
+          const sdx=Math.sqrt(Math.max(0,rad*rad-dy*dy));
+          for(let dx=Math.floor(-sdx);dx<=sdx;dx++){
+            const xx=px+dx;
+            if(xx<0||xx>canvas.width)continue;
+            const d=Math.hypot(dx,dy);
+            if(d>rad)continue;
+            const fall=(1-d/rad)*v/255*0.5;
+            const i=(yy*canvas.width+xx)*4;
+            data[i]+=fall*255;
+            data[i+1]+=fall*165;
+            data[i+2]+=fall*0;
+            data[i+3]+=fall*255;
+          }
+        }
+      }
+    }
+  }
+  ctx.putImageData(img,0,0);
+  
+  // food
+  ctx.fillStyle='#0f0';
+  for(let y=0;y<rows;y++){
+    for(let x=0;x<cols;x++){
+      if(foodGrid[idx(x,y)]>0){
+        ctx.beginPath();
+        ctx.arc(x*gridSize+gridSize/2,y*gridSize+gridSize/2,gridSize/1.5,0,Math.PI*2);
+        ctx.fill();
+      }
+    }
+  }
+  
+  // nest
+  const g=ctx.createRadialGradient(nestX,nestY,0,nestX,nestY,nestR+6);
+  g.addColorStop(0,'#222');
+  g.addColorStop(1,'#000');
+  ctx.fillStyle=g;
+  ctx.beginPath();
+  ctx.arc(nestX,nestY,nestR+2,0,Math.PI*2);
+  ctx.fill();
+  
+  // ants
+  for(const a of ants){
+    ctx.fillStyle=a.carrying?'#ff0':'#fff';
+    ctx.beginPath();
+    ctx.arc(a.x,a.y,2.5,0,Math.PI*2);
+    ctx.fill();
+  }
+}
+
+// main loop
+let frame=0;
+function loop(){
+  for(let i=0;i<3;i++){
+    for(const a of ants)a.update();
+  }
+  if(frame%5===0)diffuse();
+  if(frame%200===0)updateFood();
+  // respawn some food
+  if(frame%300===0){
+    for(let i=0;i<2;i++)spawnFood();
+  }
+  draw();
+  frame++;
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Rube Goldberg Loop</title>
+<style>
+    * { margin: 0; padding: 0; overflow: hidden; }
+    body, html { width: 100%; height: 100%; background: #111; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(() => {
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    let W = canvas.width = window.innerWidth;
+    let H = canvas.height = window.innerHeight;
+
+    window.addEventListener('resize', () => {
+        W = canvas.width = window.innerWidth;
+        H = canvas.height = window.innerHeight;
+    });
+
+    // === Physics constants ===
+    const GRAVITY = 0.5;
+    const FRICTION = 0.98;
+    const BOUNCE = 0.7;
+
+    // === Utility ===
+    function rand(min, max) { return Math.random() * (max - min) + min; }
+
+    // === Vector class ===
+    class Vec {
+        constructor(x=0, y=0) { this.x = x; this.y = y; }
+        add(o) { this.x += o.x; this.y += o.y; return this; }
+        copy() { return new Vec(this.x, this.y); }
+    }
+
+    // === Circle (ball) ===
+    class Ball {
+        constructor(x, y, r) {
+            this.pos = new Vec(x, y);
+            this.vel = new Vec(0, 0);
+            this.acc = new Vec(0, 0);
+            this.r = r;
+            this.angle = 0;
+            this.angularVel = 0;
+            this.stretch = 1;
+        }
+        applyForce(fx, fy) {
+            this.acc.x += fx;
+            this.acc.y += fy;
+        }
+        update() {
+            this.vel.add(this.acc);
+            this.pos.add(this.vel);
+            this.acc.x = 0; this.acc.y = 0;
+            this.angularVel += this.vel.x * 0.02;
+            this.angle += this.angularVel;
+            this.angularVel *= FRICTION;
+            this.stretch = 1 + Math.sin(this.angle * 4) * 0.05;
+        }
+        draw(ctx, offsetX) {
+            ctx.save();
+            ctx.translate(this.pos.x - offsetX, this.pos.y);
+            ctx.rotate(this.angle * 0.5);
+            ctx.scale(this.stretch, 1 / this.stretch);
+            ctx.fillStyle = '#f33';
+            ctx.beginPath();
+            ctx.arc(0, 0, this.r, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        }
+    }
+
+    // === Segment (ramp) ===
+    class Segment {
+        constructor(x1, y1, x2, y2) {
+            this.x1 = x1; this.y1 = y1;
+            this.x2 = x2; this.y2 = y2;
+            this.len = Math.hypot(x2 - x1, y2 - y1);
+            this.dx = (x2 - x1) / this.len;
+            this.dy = (y2 - y1) / this.len;
+        }
+        draw(ctx, offsetX) {
+            ctx.strokeStyle = '#aaa';
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.moveTo(this.x1 - offsetX, this.y1);
+            ctx.lineTo(this.x2 - offsetX, this.y2);
+            ctx.stroke();
+        }
+    }
+
+    // === Domino ===
+    class Domino {
+        constructor(x, y, w, h) {
+            this.x = x; this.y = y;
+            this.w = w; this.h = h;
+            this.angle = 0;
+            this.vel = 0;
+            this.hit = false;
+        }
+        update() {
+            if (this.hit) {
+                this.vel += 0.002;
+                this.angle += this.vel;
+                this.vel *= 0.98;
+                if (this.angle > Math.PI / 2.2) {
+                    this.angle = Math.PI / 2.2;
+                    this.vel = 0;
+                }
+            } else {
+                this.angle *= 0.95;
+                this.vel *= 0.95;
+                if (Math.abs(this.angle) < 0.01) this.angle = 0;
+            }
+        }
+        draw(ctx, offsetX) {
+            ctx.save();
+            ctx.translate(this.x - offsetX, this.y);
+            ctx.rotate(this.angle);
+            ctx.fillStyle = '#8B4513';
+            ctx.fillRect(-this.w / 2, -this.h, this.w, this.h);
+            ctx.restore();
+        }
+        hitBy(ball) {
+            const top = { x: this.x + Math.sin(this.angle) * this.h, y: this.y - Math.cos(this.angle) * this.h };
+            const dist = Math.hypot(ball.pos.x - top.x, ball.pos.y - top.y);
+            if (dist < ball.r + 5 && !this.hit) {
+                this.hit = true;
+                this.vel = 0.15;
+            }
+        }
+    }
+
+    // === Pulley Basket ===
+    class PulleyBasket {
+        constructor(x, y, w, h) {
+            this.x = x; this.y = y;
+            this.w = w; this.h = h;
+            this.height = 0;
+            this.vel = 0;
+            this.ballIn = null;
+        }
+        update(ball) {
+            // When ball enters, lift basket upward
+            if (!this.ballIn && ball.pos.x > this.x - this.w/2 && ball.pos.x < this.x + this.w/2 &&
+                ball.pos.y > this.y && ball.pos.y < this.y + 100) {
+                this.ballIn = true;
+                ball.pos.x = this.x;
+                ball.vel.x *= 0.5;
+            }
+            if (this.ballIn) {
+                this.vel += 0.02;
+                this.height += this.vel;
+                this.vel *= 0.98;
+                if (this.height > 200) {
+                    // Launch ball upward
+                    ball.pos.y = this.y - this.height;
+                    ball.vel.y = -10;
+                    ball.pos.x = this.x;
+                    this.ballIn = null;
+                    this.height = 0;
+                    this.vel = 0;
+                    return true;
+                }
+            }
+        }
+        draw(ctx, offsetX) {
+            ctx.save();
+            ctx.translate(0, -this.height);
+            ctx.fillStyle = '#555';
+            ctx.fillRect(this.x - this.w/2 - offsetX, this.y, this.w, this.h);
+            ctx.strokeStyle = '#aaa';
+            ctx.beginPath();
+            ctx.moveTo(this.x - offsetX, this.y - this.height);
+            ctx.lineTo(this.x - offsetX, 50);
+            ctx.stroke();
+            ctx.restore();
+        }
+    }
+
+    // === Spring Hammer ===
+    class SpringHammer {
+        constructor(x, y) {
+            this.x = x; this.y = y;
+            this.angle = 0;
+            this.targetAngle = -Math.PI / 3;
+            this.vel = 0;
+        }
+        trigger(ball) {
+            if (ball.pos.x > this.x - 30 && ball.pos.x < this.x + 30 &&
+                ball.pos.y < this.y + 50 && ball.pos.y > this.y - 50) {
+                this.targetAngle = Math.PI / 4;
+                setTimeout(() => {
+                    this.targetAngle = -Math.PI / 3;
+                }, 300);
+                return true;
+            }
+            return false;
+        }
+        update(ball) {
+            const diff = this.targetAngle - this.angle;
+            this.angle += diff * 0.2;
+            // Check hit
+            const tipX = this.x + Math.cos(this.angle) * 80;
+            const tipY = this.y + Math.sin(this.angle) * 80;
+            if (this.angle > 0.5 && Math.hypot(ball.pos.x - tipX, ball.pos.y - tipY) < ball.r + 10) {
+                ball.vel.x = 15;
+                ball.vel.y = -5;
+            }
+        }
+        draw(ctx, offsetX) {
+            const ex = this.x - offsetX;
+            const endX = ex + Math.cos(this.angle) * 80;
+            const endY = this.y + Math.sin(this.angle) * 80;
+            ctx.strokeStyle = '#aaa';
+            ctx.lineWidth = 6;
+            ctx.beginPath();
+            ctx.moveTo(ex, this.y);
+            ctx.lineTo(endX, endY);
+            ctx.stroke();
+
+            // Spring base
+            ctx.fillStyle = '#555';
+            ctx.fillRect(ex - 10, this.y - 10, 20, 20);
+        }
+    }
+
+    // === Funnel ===
+    class Funnel {
+        constructor(x, y, topW, botW, depth) {
+            this.x = x; this.y = y;
+            this.topW = topW; this.botW = botW; this.depth = depth;
+        }
+        apply(ball) {
+            if (ball.pos.x > this.x - this.topW/2 && ball.pos.x < this.x + this.topW/2 &&
+                ball.pos.y > this.y && ball.pos.y < this.y + this.depth) {
+                ball.vel.y += 0.3;
+                // Constrain horizontally toward center
+                const t = (ball.pos.y - this.y) / this.depth;
+                const targetW = this.topW + (this.botW - this.topW) * t;
+                if (ball.pos.x < this.x - targetW/2) {
+                    ball.pos.x = this.x - targetW/2;
+                    ball.vel.x *= -0.7;
+                } else if (ball.pos.x > this.x + targetW/2) {
+                    ball.pos.x = this.x + targetW/2;
+                    ball.vel.x *= -0.7;
+                }
+            }
+            // Exit bottom
+            if (ball.pos.x > this.x - this.botW/2 && ball.pos.x < this.x + this.botW/2 &&
+                ball.pos.y > this.y + this.depth - 10) {
+                ball.vel.y += 0.5;
+            }
+        }
+        draw(ctx, offsetX) {
+            ctx.fillStyle = '#444';
+            ctx.beginPath();
+            ctx.moveTo(this.x - this.topW/2 - offsetX, this.y);
+            ctx.lineTo(this.x - this.botW/2 - offsetX, this.y + this.depth);
+            ctx.lineTo(this.x + this.botW/2 - offsetX, this.y + this.depth);
+            ctx.lineTo(this.x + this.topW/2 - offsetX, this.y);
+            ctx.closePath();
+            ctx.fill();
+        }
+    }
+
+    // === Elevator Wheel ===
+    class ElevatorWheel {
+        constructor(x, y, radius, numSpokes) {
+            this.x = x; this.y = y;
+            this.radius = radius;
+            this.numSpokes = numSpokes;
+            this.angle = 0;
+        }
+        update() {
+            this.angle += 0.005;
+        }
+        draw(ctx, offsetX) {
+            const cx = this.x - offsetX;
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.arc(cx, this.y, this.radius, 0, Math.PI * 2);
+            ctx.stroke();
+
+            for (let i = 0; i < this.numSpokes; i++) {
+                const a = (i / this.numSpokes) * Math.PI * 2 + this.angle;
+                const bx = cx + Math.cos(a) * this.radius;
+                const by = this.y + Math.sin(a) * this.radius;
+                ctx.beginPath();
+                ctx.moveTo(cx, this.y);
+                ctx.lineTo(bx, by);
+                ctx.stroke();
+            }
+        }
+        shouldCatch(ball) {
+            // Catch ball when it reaches the left side of wheel
+            if (Math.hypot(ball.pos.x - this.x, ball.pos.y - this.y) < this.radius + ball.r + 5) {
+                const angleToBall = Math.atan2(ball.pos.y - this.y, ball.pos.x - this.x);
+                const relAngle = angleToBall - this.angle;
+                const normalized = ((relAngle + Math.PI) % (Math.PI * 2)) - Math.PI;
+                if (normalized > -0.3 && normalized < 0.3) {
+                    // Ball gets carried up
+                    const a = this.angle;
+                    ball.pos.x = this.x + Math.cos(a) * this.radius;
+                    ball.pos.y = this.y + Math.sin(a) * this.radius;
+                    ball.vel.x = 0;
+                    ball.vel.y = 0;
+                    return true;
+                }
+            }
+            return false;
+        }
+        carry(ball) {
+            const a = this.angle;
+            ball.pos.x = this.x + Math.cos(a) * this.radius;
+            ball.pos.y = this.y + Math.sin(a) * this.radius;
+            if (a > Math.PI - 0.2 && a < Math.PI + 0.2) {
+                // Release near top-left
+                ball.vel.x = -5;
+                ball.vel.y = -2;
+            }
+        }
+    }
+
+    // === Dust puff effect ===
+    class Dust {
+        constructor(x, y) {
+            this.x = x; this.y = y;
+            this.vx = rand(-1, 1);
+            this.vy = rand(-1, 0);
+            this.size = rand(2, 5);
+            this.life = 20;
+        }
+        update() {
+            this.x += this.vx;
+            this.y += this.vy;
+            this.life--;
+        }
+        draw(ctx, offsetX) {
+            ctx.fillStyle = `rgba(200, 200, 200, ${this.life/20})`;
+            ctx.beginPath();
+            ctx.arc(this.x - offsetX, this.y, this.size, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    // === Setup scene ===
+    const Y = H * 0.8;
+    const startX = -200;
+
+    const segments = [
+        new Segment(startX, Y, startX + 300, Y + 50),
+        new Segment(startX + 300, Y + 50, startX + 500, Y + 30),
+        new Segment(startX + 500, Y + 30, startX + 700, Y + 60),
+        new Segment(startX + 700, Y + 60, startX + 900, Y + 40),
+        new Segment(startX + 900, Y + 40, startX + 1100, Y + 70),
+        new Segment(startX + 1100, Y + 70, startX + 1300, Y + 50),
+        new Segment(startX + 1300, Y + 50, startX + 1500, Y + 80),
+    ];
+
+    const dominos = [
+        new Domino(startX + 400, Y + 30, 10, 40),
+        new Domino(startX + 420, Y + 35, 10, 40),
+        new Domino(startX + 440, Y + 40, 10, 40),
+        new Domino(startX + 460, Y + 45, 10, 40),
+        new Domino(startX + 480, Y + 50, 10, 40),
+    ];
+
+    const basket = new PulleyBasket(startX + 600, Y + 40, 40, 20);
+    const hammer = new SpringHammer(startX + 850, Y + 20);
+    const funnel = new Funnel(startX + 1000, Y + 60, 100, 30, 80);
+    const wheel = new ElevatorWheel(startX + 1400, Y + 60, 60, 6);
+
+    const ball = new Ball(startX, Y - 30, 12);
+    ball.vel.x = 2;
+
+    const dust = [];
+
+    let cameraX = 0;
+    const totalLength = startX + 1600;
+
+    function resetBall() {
+        ball.pos.x = startX;
+        ball.pos.y = Y - 30;
+        ball.vel.x = 2;
+        ball.vel.y = 0;
+    }
+
+    function spawnDust(x, y, count) {
+        for (let i = 0; i < count; i++) {
+            dust.push(new Dust(x, y));
+        }
+    }
+
+    function update() {
+        // Apply gravity
+        ball.applyForce(0, GRAVITY);
+
+        // Ball slides along segments
+        for (const seg of segments) {
+            const closestX = Math.max(seg.x1, Math.min(seg.x2, ball.pos.x));
+            const closestY = Math.max(seg.y1, Math.min(seg.y2, ball.pos.y));
+            const dx = ball.pos.x - closestX;
+            const dy = ball.pos.y - closestY;
+            const distSq = dx*dx + dy*dy;
+            if (distSq < ball.r * ball.r) {
+                ball.pos.x = closestX;
+                ball.pos.y = closestY;
+                // Project velocity along segment direction
+                const dot = ball.vel.x * seg.dx + ball.vel.y * seg.dy;
+                ball.vel.x = dot * seg.dx * 0.95;
+                ball.vel.y = dot * seg.dy * 0.95;
+            }
+        }
+
+        ball.update();
+
+        // Check for falling off end (reset or catch by wheel)
+        if (ball.pos.y > H) {
+            resetBall();
+        }
+
+        // Domino interaction
+        for (const d of dominos) {
+            d.update();
+            d.hitBy(ball);
+        }
+
+        // Cascade dominos
+        for (let i = 0; i < dominos.length - 1; i++) {
+            if (dominos[i].angle > Math.PI / 3) {
+                const dist = Math.hypot(dominos[i+1].x - dominos[i].x, dominos[i+1].y - dominos[i].y);
+                const threshold = 25;
+                if (dist < threshold) {
+                    dominos[i+1].hit = true;
+                    dominos[i+1].vel = 0.15;
+                }
+            }
+        }
+
+        // Trigger last domino to knock ball
+        if (dominos[dominos.length - 1].angle > Math.PI / 4) {
+            if (ball.pos.x < dominos[dominos.length - 1].x + 40) {
+                ball.vel.x += 3;
+            }
+        }
+
+        // Basket
+        const launched = basket.update(ball);
+        if (launched) {
+            spawnDust(ball.pos.x, ball.pos.y, 5);
+        }
+
+        // Hammer
+        if (hammer.trigger(ball)) {
+            spawnDust(hammer.x, hammer.y, 3);
+        }
+        hammer.update(ball);
+
+        // Funnel
+        funnel.apply(ball);
+
+        // Wheel
+        wheel.update();
+        if (!launched && wheel.shouldCatch(ball)) {
+            spawnDust(ball.pos.x, ball.pos.y, 4);
+        }
+        if (wheel.shouldCatch(ball)) {
+            wheel.carry(ball);
+        }
+
+        // Reset if past start again (loop condition)
+        if (ball.pos.x < startX - 50 && ball.vel.x < 0) {
+            resetBall();
+        }
+
+        // Camera follow
+        cameraX = ball.pos.x - W / 3;
+    }
+
+    function draw() {
+        ctx.fillStyle = '#111';
+        ctx.fillRect(0, 0, W, H);
+
+        // Draw ground line
+        ctx.strokeStyle = '#444';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(0, Y + 100);
+        ctx.lineTo(W, Y + 100);
+        ctx.stroke();
+
+        // Draw all objects with camera offset
+        for (const seg of segments) seg.draw(ctx, cameraX);
+        for (const d of dominos) d.draw(ctx, cameraX);
+        basket.draw(ctx, cameraX);
+        hammer.draw(ctx, cameraX);
+        funnel.draw(ctx, cameraX);
+        wheel.draw(ctx, cameraX);
+        ball.draw(ctx, cameraX);
+
+        // Update and draw dust
+        for (let i = dust.length - 1; i >= 0; i--) {
+            dust[i].update();
+            dust[i].draw(ctx, cameraX);
+            if (dust[i].life <= 0) dust.splice(i, 1);
+        }
+    }
+
+    function loop() {
+        update();
+        draw();
+        requestAnimationFrame(loop);
+    }
+
+    loop();
+})();
+</script>
+</body>
+</html>

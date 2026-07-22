@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  html,body{margin:0;padding:0;overflow:hidden;background:#000}
+  canvas{display:block;width:100vw;height:100vh}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W=canvas.width=window.innerWidth;
+let H=canvas.height=window.innerHeight;
+window.addEventListener('resize',()=>{W=canvas.width=innerWidth;H=canvas.height=innerHeight});
+
+let scenes=[genCity,genChecker,genLandscape];
+let idx=0;
+
+function genCity(){
+  const img=ctx.createImageData(W,H);
+  const d=img.data;
+  const skyH=H*0.6;
+  for(let y=0;y<H;y++){
+    for(let x=0;x<W;x++){
+      const i=(y*W+x)*4;
+      if(y<skyH){
+        d[i]=10+Math.sin(x*0.02+y*0.01)*20;
+        d[i+1]=20+Math.cos(x*0.015)*15;
+        d[i+2]=40+Math.sin(x*0.01+y*0.02)*30;
+      } else {
+        const bh=10+perlin(x*0.05,y*0.3)*30;
+        if(y>skyH+bh){
+          d[i]=80+Math.random()*20;
+          d[i+1]=80+Math.random()*20;
+          d[i+2]=90+Math.random()*20;
+        } else {
+          d[i]=Math.random()*40+100;
+          d[i+1]=Math.random()*40+100;
+          d[i+2]=Math.random()*40+120;
+        }
+      }
+      d[i+3]=255;
+    }
+  }
+  return img;
+}
+
+function genChecker(){
+  const img=ctx.createImageData(W,H);
+  const d=img.data;
+  const sz=40;
+  for(let y=0;y<H;y++){
+    for(let x=0;x<W;x++){
+      const i=(y*W+x)*4;
+      const c=((Math.floor(x/sz)+Math.floor(y/sz))%2)*120;
+      d[i]=c+Math.random()*30;
+      d[i+1]=c+Math.random()*30;
+      d[i+2]=c+Math.random()*30;
+      d[i+3]=255;
+    }
+  }
+  return img;
+}
+
+function genLandscape(){
+  const img=ctx.createImageData(W,H);
+  const d=img.data;
+  for(let y=0;y<H;y++){
+    for(let x=0;x<W;x++){
+      const i=(y*W+x)*4;
+      const base=perlin(x*0.02,y*0.05)*0.5+perlin(x*0.1,y*0.2)*0.3;
+      let r,g,b;
+      if(y<H*0.5+base*40){
+        r=120+base*30;g=160+base*30;b=200+base*40;
+      } else if(y<H*0.6+base*40){
+        r=180;g=160;b=120;
+      } else {
+        r=60+base*20;g=120+base*20;b=70+base*20;
+      }
+      d[i]=r+Math.random()*10;
+      d[i+1]=g+Math.random()*10;
+      d[i+2]=b+Math.random()*10;
+      d[i+3]=255;
+    }
+  }
+  return img;
+}
+
+let p=0;
+let perm=new Uint8Array(512);
+function perlin(x,y){
+  if(p.length===0){
+    for(let i=0;i<256;i++) p[i]=i;
+    for(let i=255;i>0;i--){const j=Math.random()*(i+1)|0;[p[i],p[j]]=[p[j],p[i]];}
+    for(let i=0;i<512;i++) perm[i]=p[i&255];
+  }
+  const X=Math.floor(x)&255,Y=Math.floor(y)&255;
+  const xf=x-Math.floor(x),yf=y-Math.floor(y);
+  const u=xf*xf*xf*(xf*(xf*6-15)+10);
+  const v=yf*yf*yf*(yf*(yf*6-15)+10);
+  const A=perm[X]+Y,B=perm[X+1]+Y;
+  const a=perm[A],b=perm[A+1],c=perm[B],d_=perm[B+1];
+  return lerp(lerp(lerp(grad(a,xf,yf),grad(c,xf-1,yf),u),
+                   lerp(grad(b,xf,yf-1),grad(d_,xf-1,yf-1),u),v),0,0);
+}
+function grad(h,x,y){const z=(h&15);return z<8?x:y*-x;}
+function lerp(a,b,t){return a+(b-a)*t;}
+
+// Pre-generate scene data arrays
+let currentScene=null, nextScene=null;
+let melting=false, meltOffsets=null, meltSpeed=null;
+let holdTimer=0;
+
+function start(){
+  nextScene=scenes[idx]();
+  idx=(idx+1)%scenes.length;
+  holdTimer=0;
+  melting=false;
+}
+
+function startMelt(){
+  currentScene=nextScene;
+  nextScene=scenes[idx]();
+  idx=(idx+1)%scenes.length;
+  meltOffsets=new Array(W);
+  meltSpeed=new Array(W);
+  for(let x=0;x<W;x++){
+    meltOffsets[x]=-Math.random()*H*0.3;
+    meltSpeed[x]=0.5+Math.random()*2;
+  }
+  melting=true;
+  holdTimer=0;
+}
+
+function drawMelt(){
+  const cols=new Uint32Array(W*H);
+  const cur=currentScene.data;
+  const nxt=nextScene.data;
+  for(let y=0;y<H;y++){
+    for(let x=0;x<W;x++){
+      const wob=Math.sin(y*0.02+x*0.1)*2;
+      const off=Math.floor(meltOffsets[x]+wob);
+      const srcY=y-off;
+      let i;
+      if(srcY>=0 && srcY<H){
+        i=(srcY*W+x)*4;
+        const r=cur[i],g=cur[i+1],b=cur[i+2];
+        cols[y*W+x]=(r<<16)|(g<<8)|b;
+      } else {
+        i=(y*W+x)*4;
+        const r=nxt[i],g=nxt[i+1],b=nxt[i+2];
+        cols[y*W+x]=(r<<16)|(g<<8)|b;
+      }
+    }
+  }
+  const imageData=ctx.createImageData(W,H);
+  const d=imageData.data;
+  for(let y=0;y<H;y++){
+    for(let x=0;x<W;x++){
+      const c=cols[y*W+x];
+      const i=(y*W+x)*4;
+      d[i]=(c>>16)&255;
+      d[i+1]=(c>>8)&255;
+      d[i+2]=c&255;
+      d[i+3]=255;
+    }
+  }
+  ctx.putImageData(imageData,0,0);
+}
+
+let lastT=0;
+function loop(t){
+  requestAnimationFrame(loop);
+  if(t-lastT<30) return;
+  lastT=t;
+
+  ctx.fillStyle='#000';
+  ctx.fillRect(0,0,W,H);
+
+  if(!nextScene){start();return;}
+  if(!melting){
+    holdTimer++;
+    ctx.putImageData(nextScene,0,0);
+    if(holdTimer>180){startMelt();} // ~3 sec hold at 60fps
+  } else {
+    for(let x=0;x<W;x++){
+      meltOffsets[x]+=meltSpeed[x];
+    }
+    let done=true;
+    for(let x=0;x<W;x++){
+      if(meltOffsets[x]<H*1.5) done=false;
+    }
+    drawMelt();
+    if(done){ melting=false; nextScene=null; start(); }
+  }
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

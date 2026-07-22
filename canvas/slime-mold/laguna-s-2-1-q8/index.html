@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Physarum Slime Mold</title>
+<style>
+  * { margin: 0; padding: 0; overflow: hidden; }
+  body { background: #000; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script>
+(() => {
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  
+  let width, height, dpr;
+  function resize() {
+    dpr = window.devicePixelRatio || 1;
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = width;
+    canvas.height = height;
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // Simulation parameters
+  const NUM_AGENTS = 40000;
+  const SENSOR_ANGLE = 0.3; // radians
+  const SENSOR_DISTANCE = 2.0;
+  const STEER_STRENGTH = 0.5;
+  const TURN_SPEED = 0.4;
+  const SPEED = 1.2;
+  const DECAY_RATE = 0.995;
+  const DIFFUSE_RATE = 0.9;
+  const DIFFUSE_PASSES = 3;
+  const DEPOSIT_AMOUNT = 0.2;
+  const FOOD_COUNT = 5;
+  const FOOD_MOVE_INTERVAL = 300; // frames
+
+  // Agent state arrays
+  const positionsX = new Float32Array(NUM_AGENTS);
+  const positionsY = new Float32Array(NUM_AGENTS);
+  const angles = new Float32Array(NUM_AGENTS);
+  const colors = new Uint8Array(NUM_AGENTS); // 0-255 for hue variation
+
+  // Initialize agents
+  const cx = width / 2;
+  const cy = height / 2;
+  const radius = Math.min(width, height) * 0.3;
+  for (let i = 0; i < NUM_AGENTS; i++) {
+    const angle = (i / NUM_AGENTS) * Math.PI * 2 + (Math.random() - 0.5) * 0.5;
+    const r = radius * Math.sqrt(Math.random());
+    positionsX[i] = cx + Math.cos(angle) * r;
+    positionsY[i] = cy + Math.sin(angle) * r;
+    angles[i] = angle + Math.PI;
+    colors[i] = Math.floor(Math.random() * 256);
+  }
+
+  // Trail map
+  let trailMap = new Float32Array(width * height);
+  let swapMap = new Float32Array(width * height);
+
+  // Food points
+  const foods = [];
+  for (let i = 0; i < FOOD_COUNT; i++) {
+    const angle = (i / FOOD_COUNT) * Math.PI * 2;
+    foods.push({
+      x: cx + Math.cos(angle) * radius * 0.7,
+      y: cy + Math.sin(angle) * radius * 0.7,
+      vx: (Math.random() - 0.5) * 0.3,
+      vy: (Math.random() - 0.5) * 0.3
+    });
+  }
+
+  let frameCount = 0;
+
+  function senseAndSteer(x, y, angle, sensorDist, sensorAngle) {
+    const sensX = x + Math.cos(angle + sensorAngle) * sensorDist;
+    const sensY = y + Math.sin(angle + sensorAngle) * sensorDist;
+    return sampleTrail(sensX, sensY);
+  }
+
+  function sampleTrail(x, y) {
+    const ix = Math.floor(x);
+    const iy = Math.floor(y);
+    if (ix < 0 || iy < 0 || ix >= width - 1 || iy >= height - 1) return 0;
+    const fx = x - ix;
+    const fy = y - iy;
+    const w00 = trailMap[iy * width + ix];
+    const w10 = trailMap[iy * width + (ix + 1)];
+    const w01 = trailMap[(iy + 1) * width + ix];
+    const w11 = trailMap[(iy + 1) * width + (ix + 1)];
+    return w00 * (1 - fx) * (1 - fy) + w10 * fx * (1 - fy) + w01 * (1 - fx) * fy + w11 * fx * fy;
+  }
+
+  function depositTrail(x, y, amount) {
+    const ix = Math.floor(x);
+    const iy = Math.floor(y);
+    if (ix < 0 || iy < 0 || ix >= width - 1 || iy >= height - 1) return;
+    const fx = x - ix;
+    const fy = y - iy;
+    const idx = iy * width + ix;
+    trailMap[idx] += amount * (1 - fx) * (1 - fy);
+    trailMap[idx + 1] += amount * fx * (1 - fy);
+    trailMap[idx + width] += amount * (1 - fx) * fy;
+    trailMap[idx + width + 1] += amount * fx * fy;
+  }
+
+  function diffuseAndDecay() {
+    // Decay
+    for (let i = 0; i < trailMap.length; i++) {
+      trailMap[i] *= DECAY_RATE;
+    }
+
+    // Diffuse
+    for (let pass = 0; pass < DIFFUSE_PASSES; pass++) {
+      // Swap buffers
+      const tmp = trailMap;
+      trailMap = swapMap;
+      swapMap = tmp;
+
+      for (let y = 1; y < height - 1; y++) {
+        for (let x = 1; x < width - 1; x++) {
+          const idx = y * width + x;
+          const v = swapMap[idx] * (1 - DIFFUSE_RATE);
+          const neighbors = swapMap[idx - 1] + swapMap[idx + 1] +
+                            swapMap[idx - width] + swapMap[idx + width];
+          trailMap[idx] = v + (neighbors * DIFFUSE_RATE * 0.25);
+        }
+      }
+    }
+  }
+
+  function render() {
+    // Create image data
+    const imageData = ctx.createImageData(width, height);
+    const data = imageData.data;
+
+    for (let i = 0; i < trailMap.length; i++) {
+      const val = Math.min(1, trailMap[i] * 0.02);
+      const intensity = val * 255;
+      
+      // Two-tone: low values = blue/cyan, high values = yellow/orange
+      let r, g, b;
+      if (val < 0.5) {
+        // Cool: cyan to blue
+        const t = val * 2;
+        r = Math.floor(0);
+        g = Math.floor(100 + t * 100);
+        b = Math.floor(200 + t * 55);
+      } else {
+        // Warm: yellow to orange
+        const t = (val - 0.5) * 2;
+        r = Math.floor(t * 255);
+        g = Math.floor(180 + t * 75);
+        b = Math.floor(20 - t * 20);
+      }
+
+      // Glow effect: boost intensity
+      const gi = Math.min(255, intensity * 1.5);
+      const baseIdx = i * 4;
+      data[baseIdx] = Math.min(255, data[baseIdx] + r * (gi / 255));
+      data[baseIdx + 1] = Math.min(255, data[baseIdx + 1] + g * (gi / 255));
+      data[baseIdx + 2] = Math.min(255, data[baseIdx + 2] + b * (gi / 255));
+      data[baseIdx + 3] = 255;
+    }
+
+    ctx.putImageData(imageData, 0, 0);
+  }
+
+  function updateFood() {
+    frameCount++;
+    if (frameCount % FOOD_MOVE_INTERVAL === 0) {
+      for (const food of foods) {
+        food.x = cx + (Math.random() - 0.5) * width * 0.6;
+        food.y = cy + (Math.random() - 0.5) * height * 0.6;
+        food.vx = (Math.random() - 0.5) * 0.3;
+        food.vy = (Math.random() - 0.5) * 0.3;
+      }
+    }
+    
+    // Slowly move foods
+    for (const food of foods) {
+      food.x += food.vx;
+      food.y += food.vy;
+      // Bounce off edges
+      if (food.x < 10 || food.x > width - 10) food.vx *= -1;
+      if (food.y < 10 || food.y > height - 10) food.vy *= -1;
+    }
+  }
+
+  function step() {
+    updateFood();
+
+    // Update agents
+    for (let i = 0; i < NUM_AGENTS; i++) {
+      let x = positionsX[i];
+      let y = positionsY[i];
+      let angle = angles[i];
+
+      // Sense
+      const front = sampleTrail(
+        x + Math.cos(angle) * SENSOR_DISTANCE,
+        y + Math.sin(angle) * SENSOR_DISTANCE
+      );
+      const left = sampleTrail(
+        x + Math.cos(angle + SENSOR_ANGLE) * SENSOR_DISTANCE,
+        y + Math.sin(angle + SENSOR_ANGLE) * SENSOR_DISTANCE
+      );
+      const right = sampleTrail(
+        x + Math.cos(angle - SENSOR_ANGLE) * SENSOR_DISTANCE,
+        y + Math.sin(angle - SENSOR_ANGLE) * SENSOR_DISTANCE
+      );
+
+      // Steer
+      if (left > front && left > right) {
+        angle += TURN_SPEED * 0.5;
+      } else if (right > front && right > left) {
+        angle -= TURN_SPEED * 0.5;
+      } else {
+        angle += (left - right) * STEER_STRENGTH * 0.01;
+      }
+
+      // Seek food if nearby
+      for (let f = 0; f < foods.length; f++) {
+        const dx = foods[f].x - x;
+        const dy = foods[f].y - y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 50) {
+          const desiredAngle = Math.atan2(dy, dx);
+          let diff = desiredAngle - angle;
+          while (diff > Math.PI) diff -= Math.PI * 2;
+          while (diff < -Math.PI) diff += Math.PI * 2;
+          angle += diff * 0.1;
+        }
+      }
+
+      // Move
+      x += Math.cos(angle) * SPEED;
+      y += Math.sin(angle) * SPEED;
+
+      // Wrap around
+      if (x < 0) x = width - 1;
+      if (x >= width) x = 0;
+      if (y < 0) y = height - 1;
+      if (y >= height) y = 0;
+
+      positionsX[i] = x;
+      positionsY[i] = y;
+      angles[i] = angle;
+
+      // Deposit trail
+      depositTrail(x, y, DEPOSIT_AMOUNT);
+    }
+
+    // Diffuse trail map
+    diffuseAndDecay();
+
+    // Render
+    render();
+
+    requestAnimationFrame(step);
+  }
+
+  // Start simulation
+  requestAnimationFrame(step);
+})();
+</script>
+</body>
+</html>

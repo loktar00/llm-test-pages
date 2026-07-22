@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Game of Life Factory</title>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background: #000;
+            height: 100%;
+            width: 100%;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+<canvas id="lifeCanvas"></canvas>
+<script>
+(() => {
+    const canvas = document.getElementById('lifeCanvas');
+    const ctx = canvas.getContext('2d');
+
+    let width = window.innerWidth;
+    let height = window.innerHeight;
+    let cols = Math.floor(width / 3);
+    let rows = Math.floor(height / 3);
+
+    canvas.width = width;
+    canvas.height = height;
+
+    let grid = new Uint8Array(cols * rows);
+    let ageGrid = new Float32Array(cols * rows);
+
+    const patterns = {
+        glider: [
+            [0, 1, 0],
+            [0, 0, 1],
+            [1, 1, 1]
+        ],
+        lwss: [
+            [0, 1, 0, 1, 0, 0],
+            [1, 0, 0, 0, 0, 0],
+            [1, 0, 0, 0, 1, 1],
+            [0, 1, 0, 0, 0, 1]
+        ],
+        pulsar: [
+            [0,0,1,1,1,0,0,0,0,0,0,1,1,1,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [1,0,0,0,0,1,0,1,0,0,0,0,0,0,0,1],
+            [1,0,0,0,0,1,0,1,0,0,0,0,0,0,0,1],
+            [1,0,0,0,0,1,0,1,0,0,0,0,0,0,0,1],
+            [0,0,1,1,1,0,0,0,0,0,0,1,1,1,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,1,1,1,0,0,0,0,0,0,1,1,1,0,0],
+            [1,0,0,0,0,1,0,1,0,0,0,0,0,0,0,1],
+            [1,0,0,0,0,1,0,1,0,0,0,0,0,0,0,1],
+            [1,0,0,0,0,1,0,1,0,0,0,0,0,0,0,1],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,1,1,1,0,0,0,0,0,0,1,1,1,0,0]
+        ],
+        rpentomino: [
+            [0,1,0],
+            [1,1,0],
+            [1,0,1]
+        ]
+    };
+
+    function placePattern(grid, pattern, startX, startY) {
+        for (let y = 0; y < pattern.length; y++) {
+            for (let x = 0; x < pattern[y].length; x++) {
+                if (pattern[y][x]) {
+                    let px = (startX + x) % cols;
+                    let py = (startY + y) % rows;
+                    if (px < 0) px += cols;
+                    if (py < 0) py += rows;
+                    grid[py * cols + px] = 1;
+                }
+            }
+        }
+    }
+
+    function seedFactory() {
+        grid.fill(0);
+        ageGrid.fill(0);
+
+        placePattern(grid, patterns.rpentomino, cols / 2 - 1, rows / 2 - 1);
+
+        placePattern(grid, patterns.glider, 5, 5);
+        placePattern(grid, patterns.glider, cols - 10, 5);
+        placePattern(grid, patterns.glider, 5, rows - 10);
+        placePattern(grid, patterns.glider, cols - 10, rows - 10);
+
+        if (cols > 80 && rows > 80) {
+            placePattern(grid, patterns.lwss, cols / 4, rows / 4);
+            placePattern(grid, patterns.lwss, 3 * cols / 4, 3 * rows / 4);
+        }
+
+        placePattern(grid, patterns.pulsar, 15, 15);
+        placePattern(grid, patterns.pulsar, cols - 31, rows - 31);
+        placePattern(grid, patterns.pulsar, cols - 31, 15);
+        placePattern(grid, patterns.pulsar, 15, rows - 31);
+
+        let numRandom = (cols * rows / 100);
+        for (let i = 0; i < numRandom; i++) {
+            let x = Math.floor(Math.random() * cols);
+            let y = Math.floor(Math.random() * rows);
+            grid[y * cols + x] = Math.random() > 0.3 ? 1 : 0;
+        }
+    }
+
+    let lastTimestamp = 0;
+    let generationCount = 0;
+    let lastSweepTime = 0;
+    const sweepDuration = 60; // frames
+
+    function countNeighbors(grid, x, y) {
+        let count = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+                if (dx === 0 && dy === 0) continue;
+                let nx = (x + dx + cols) % cols;
+                let ny = (y + dy + rows) % rows;
+                count += grid[ny * cols + nx];
+            }
+        }
+        return count;
+    }
+
+    function update() {
+        let newGrid = new Uint8Array(cols * rows);
+        let liveCells = 0;
+
+        for (let i = 0; i < cols * rows; i++) {
+            let x = i % cols;
+            let y = Math.floor(i / cols);
+            let neighbors = countNeighbors(grid, x, y);
+            let alive = grid[i];
+
+            if (alive && (neighbors === 2 || neighbors === 3)) {
+                newGrid[i] = 1;
+                liveCells++;
+            } else if (!alive && neighbors === 3) {
+                newGrid[i] = 1;
+                liveCells++;
+            } else {
+                newGrid[i] = 0;
+            }
+
+            if (alive) {
+                ageGrid[i] += 0.1 + neighbors * 0.02;
+            } else {
+                ageGrid[i] = 0;
+            }
+        }
+
+        grid = newGrid;
+
+        generationCount++;
+
+        // Check for low activity - less than 0.05% of cells alive
+        let threshold = (cols * rows) * 0.0005;
+        if (liveCells < threshold && generationCount > 100) {
+            lastSweepTime = 0;
+            doingSweep = true;
+        }
+
+        if (liveCells < threshold && generationCount > 50) {
+            seedFactory();
+            generationCount = 0;
+        }
+
+        return liveCells;
+    }
+
+    let doingSweep = false;
+    let sweepProgress = 0;
+
+    function render(liveCells) {
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, width, height);
+
+        if (doingSweep) {
+            // Draw sweep effect
+            sweepProgress = (sweepProgress + 1) % (cols + width);
+
+            let imageData = ctx.getImageData(0, 0, width, height);
+            let data = imageData.data;
+
+            // Create a vertical sweep line
+            let sweepX = (sweepProgress * 3) % width;
+
+            ctx.fillStyle = '#0ff';
+            ctx.fillRect(sweepX, 0, 3, height);
+
+            ctx.putImageData(imageData, 0, 0);
+
+            // Copy some cells behind the sweep for visual effect
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    let i = y * cols + x;
+                    if (grid[i]) {
+                        let px = x * 3;
+                        let py = y * 3;
+                        let age = ageGrid[i];
+
+                        // Fade based on sweep proximity
+                        let dist = Math.abs(px - sweepX);
+                        let fade = Math.max(0, 1 - dist / 100);
+
+                        if (fade > 0) {
+                            let r = Math.min(255, 255 * fade);
+                            let g = Math.min(255, 100 * fade);
+                            let b = Math.min(255, 50 * age * fade);
+
+                            ctx.fillStyle = `rgb(${r},${g},${b})`;
+                            ctx.fillRect(px, py, 3, 3);
+                        }
+                    }
+                }
+            }
+
+            if (sweepProgress > cols + width / 3) {
+                doingSweep = false;
+                sweepProgress = 0;
+                seedFactory();
+            }
+            return;
+        }
+
+        // Render all cells
+        for (let y = 0; y < rows; y++) {
+            for (let x = 0; x < cols; x++) {
+                let i = y * cols + x;
+                if (grid[i]) {
+                    let px = x * 3;
+                    let py = y * 3;
+                    let age = ageGrid[i];
+
+                    // Color ramp: new = bright white/blue, old = warm amber/red
+                    let t = Math.min(age / 15, 1);
+
+                    let r, g, b;
+                    if (t < 0.3) {
+                        // Cool blue-white
+                        r = 200 + 55 * t;
+                        g = 220 - 30 * t;
+                        b = 255;
+                    } else if (t < 0.7) {
+                        // Transition to yellow
+                        r = 255;
+                        g = 200 + 40 * ((t - 0.3) / 0.4);
+                        b = 100 - 60 * ((t - 0.3) / 0.4);
+                    } else {
+                        // Warm amber/red
+                        r = 255;
+                        g = 180 - 60 * ((t - 0.7) / 0.3);
+                        b = 20 - 20 * ((t - 0.7) / 0.3);
+                    }
+
+                    ctx.fillStyle = `rgb(${Math.floor(r)},${Math.floor(g)},${Math.floor(b)})`;
+                    ctx.fillRect(px, py, 3, 3);
+                }
+            }
+        }
+    }
+
+    function animate(timestamp) {
+        const elapsed = timestamp - lastTimestamp;
+        if (elapsed > 16) { // ~60fps
+            const liveCells = update();
+            render(liveCells);
+            lastTimestamp = timestamp;
+        }
+
+        requestAnimationFrame(animate);
+    }
+
+    // Handle resize
+    window.addEventListener('resize', () => {
+        width = window.innerWidth;
+        height = window.innerHeight;
+        cols = Math.floor(width / 3);
+        rows = Math.floor(height / 3);
+        canvas.width = width;
+        canvas.height = height;
+
+        grid = new Uint8Array(cols * rows);
+        ageGrid = new Float32Array(cols * rows);
+        seedFactory();
+        generationCount = 0;
+    });
+
+    // Initialize
+    seedFactory();
+    lastTimestamp = performance.now();
+    animate(lastTimestamp);
+})();
+</script>
+</body>
+</html>

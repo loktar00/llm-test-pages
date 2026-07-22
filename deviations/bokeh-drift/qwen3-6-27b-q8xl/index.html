@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bokeh Field</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #050505; /* Fallback */
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+<canvas id="bokehCanvas"></canvas>
+<script>
+    const canvas = document.getElementById('bokehCanvas');
+    const ctx = canvas.getContext('2d');
+
+    let width, height;
+    let particles = [];
+    const PARTICLE_COUNT = 80;
+    
+    // Configuration
+    const LAYER_COUNT = 3;
+    const FOCUS_CYCLE_DURATION = 10000; // 10 seconds
+    const APERTURE_SIDES = 7; // Heptagon shape typical of lenses
+    
+    // Palette: Warm night city (deep oranges, soft reds, golds) + occasional cool accents
+    const PALETTE = [
+        { r: 255, g: 140, b: 50 },  // Warm Orange
+        { r: 255, g: 200, b: 100 }, // Gold
+        { r: 200, g: 50, b: 50 },   // Soft Red
+        { r: 255, g: 180, b: 180 }, // Pinkish
+        { r: 100, g: 180, b: 255 }, // Cool Blue Accent
+        { r: 200, g: 255, b: 200 }, // Mint Accent
+    ];
+
+    class Particle {
+        constructor() {
+            this.reset(true);
+        }
+
+        reset(initial = false) {
+            // Determine layer (0 = far, 1 = mid, 2 = near)
+            this.layer = Math.floor(Math.random() * LAYER_COUNT);
+            
+            // Scale based on layer (Near is bigger)
+            const scaleBase = [0.5, 1.0, 1.8][this.layer];
+            this.radius = (Math.random() * 30 + 10) * scaleBase;
+            
+            // Speed based on layer (Near is faster)
+            const speedBase = [0.2, 0.6, 1.2][this.layer];
+            this.vx = (Math.random() - 0.5) * speedBase;
+            this.vy = (Math.random() - 0.5) * (speedBase * 0.3); // Less vertical movement
+
+            // Position
+            this.x = Math.random() * width;
+            this.y = Math.random() * height;
+
+            // Color
+            const color = PALETTE[Math.floor(Math.random() * PALETTE.length)];
+            this.color = color;
+            this.baseAlpha = Math.random() * 0.4 + 0.1;
+
+            // Focus properties
+            this.focusFactor = 0; // 0 = blurry, 1 = sharp
+        }
+
+        update(time, focusLayer) {
+            // Move
+            this.x += this.vx;
+            this.y += this.vy;
+
+            // Wrap around screen
+            if (this.x < -this.radius * 2) this.x = width + this.radius * 2;
+            if (this.x > width + this.radius * 2) this.x = -this.radius * 2;
+            if (this.y < -this.radius * 2) this.y = height + this.radius * 2;
+            if (this.y > height + this.radius * 2) this.y = -this.radius * 2;
+
+            // Calculate Focus Factor (Gaussian-like falloff)
+            // If particle layer matches current focus layer, factor approaches 1
+            // The closer the layer index, the sharper it gets
+            const dist = Math.abs(this.layer - focusLayer);
+            // Smooth falloff: 0 distance = 1.0, 1 distance = 0.3, 2 distance = 0.0
+            this.focusFactor = Math.max(0, 1 - (dist * 0.45));
+        }
+
+        draw(ctx) {
+            ctx.save();
+            ctx.translate(this.x, this.y);
+
+            // Dynamic Opacity: Sharper things are often brighter in bokeh
+            const currentAlpha = this.baseAlpha + (this.focusFactor * 0.4);
+
+            if (this.focusFactor > 0.5) {
+                // Draw Polygonal Aperture (Sharp)
+                const sides = APERTURE_SIDES;
+                const rotation = Date.now() / 1000; // Slow rotation for realism
+                const r = this.radius * (0.8 + this.focusFactor * 0.2); // Slight size shift
+
+                ctx.beginPath();
+                for (let i = 0; i < sides; i++) {
+                    const angle = (i * 2 * Math.PI / sides) + rotation;
+                    const px = Math.cos(angle) * r;
+                    const py = Math.sin(angle) * r;
+                    if (i === 0) ctx.moveTo(px, py);
+                    else ctx.lineTo(px, py);
+                }
+                ctx.closePath();
+
+                // Add a "glow" stroke for the sharp edge
+                ctx.strokeStyle = `rgba(${this.color.r}, ${this.color.g}, ${this.color.b}, ${currentAlpha})`;
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                // Fill with a slightly dimmer center
+                ctx.fillStyle = `rgba(${this.color.r}, ${this.color.g}, ${this.color.b}, ${currentAlpha * 0.6})`;
+                ctx.fill();
+
+            } else {
+                // Draw Soft Circle (Blurry)
+                // Larger and softer when out of focus
+                const blurRadius = this.radius * 1.2;
+                
+                // Create radial gradient for soft edge
+                const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, blurRadius);
+                grad.addColorStop(0, `rgba(${this.color.r}, ${this.color.g}, ${this.color.b}, ${currentAlpha})`);
+                grad.addColorStop(1, `rgba(${this.color.r}, ${this.color.g}, ${this.color.b}, 0)`);
+
+                ctx.fillStyle = grad;
+                ctx.beginPath();
+                ctx.arc(0, 0, blurRadius, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            ctx.restore();
+        }
+    }
+
+    function init() {
+        resize();
+        particles = [];
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            particles.push(new Particle());
+        }
+        // Sort by layer so background renders first (simple painter's algo)
+        particles.sort((a, b) => a.layer - b.layer);
+    }
+
+    function resize() {
+        width = window.innerWidth;
+        height = window.innerHeight;
+        canvas.width = width;
+        canvas.height = height;
+    }
+
+    function animate() {
+        // Clear with a dark, slightly warm background for "Night City" feel
+        ctx.fillStyle = '#08080c'; 
+        ctx.fillRect(0, 0, width, height);
+
+        // Add a subtle vignette
+        const grad = ctx.createRadialGradient(width/2, height/2, height/4, width/2, height/2, height);
+        grad.addColorStop(0, 'rgba(0,0,0,0)');
+        grad.addColorStop(1, 'rgba(0,0,0,0.6)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, width, height);
+
+        // Calculate Focus Target (Smoothly cycling 0 -> 2 -> 0)
+        const now = Date.now();
+        // Sine wave oscillating between -1 and 1, mapped to 0 and 2
+        const cycle = (Math.sin((now % FOCUS_CYCLE_DURATION) / FOCUS_CYCLE_DURATION * Math.PI * 2) + 1) / 2;
+        const focusLayer = cycle * (LAYER_COUNT - 1);
+
+        // Composite mode for light blending
+        ctx.globalCompositeOperation = 'screen';
+
+        particles.forEach(p => {
+            p.update(now, focusLayer);
+            p.draw(ctx);
+        });
+
+        // Reset composite
+        ctx.globalCompositeOperation = 'source-over';
+
+        requestAnimationFrame(animate);
+    }
+
+    window.addEventListener('resize', resize);
+    init();
+    animate();
+
+</script>
+</body>
+</html>

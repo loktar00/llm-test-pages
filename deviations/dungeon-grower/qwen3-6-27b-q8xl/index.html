@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Procedural Dungeon</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #050505;
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Configuration
+        const TILE_SIZE = 24;
+        const WALL = 1;
+        const FLOOR = 0;
+        const TORCH = 2;
+        
+        let cols, rows;
+        let grid = [];
+        let torches = [];
+        
+        // Animation State
+        let state = 'GENERATING'; // GENERATING, EXPLORING, FADE_OUT
+        let stateTimer = 0;
+        let fadeAlpha = 0;
+        
+        // Explorer
+        let explorer = { x: 0, y: 0, targetX: 0, targetY: 0, moveTimer: 0 };
+        let visited = []; // 2D array for pathfinding preference
+
+        // Resize handling
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            cols = Math.floor(canvas.width / TILE_SIZE);
+            rows = Math.floor(canvas.height / TILE_SIZE);
+            initDungeon();
+        }
+
+        // --- Dungeon Generation Logic ---
+
+        function initDungeon() {
+            grid = new Array(cols).fill(0).map(() => new Array(rows).fill(WALL));
+            visited = new Array(cols).fill(0).map(() => new Array(rows).fill(false));
+            torches = [];
+            state = 'GENERATING';
+            stateTimer = 0;
+            fadeAlpha = 0;
+            
+            // Random start point (center-ish)
+            let cx = Math.floor(cols / 2);
+            let cy = Math.floor(rows / 2);
+            if (cx % 2 === 0) cx++;
+            if (cy % 2 === 0) cy++;
+            
+            explorer.x = cx;
+            explorer.y = cy;
+            explorer.targetX = cx;
+            explorer.targetY = cy;
+            
+            carveRoom(cx, cy);
+            startDrunkardWalk(cx, cy);
+        }
+
+        function carveRoom(x, y) {
+            if (x < 1 || x >= cols - 1 || y < 1 || y >= rows - 1) return;
+            grid[x][y] = FLOOR;
+            // Small chance to place a torch on new floor
+            if (Math.random() < 0.08) {
+                grid[x][y] = TORCH;
+                torches.push({ x, y, flickerOffset: Math.random() * 100 });
+            }
+        }
+
+        // The "Visible Generation" Mechanic: Drunkard's Walk
+        let wanderX, wanderY;
+        function startDrunkardWalk(x, y) {
+            wanderX = x;
+            wanderY = y;
+        }
+
+        function updateGeneration() {
+            // Perform multiple steps per frame for speed, but not too fast
+            const stepsPerFrame = 5; 
+            
+            for (let i = 0; i < stepsPerFrame; i++) {
+                // Move random direction
+                const dirs = [[0,1], [0,-1], [1,0], [-1,0]];
+                const dir = dirs[Math.floor(Math.random() * dirs.length)];
+                const nx = wanderX + dir[0];
+                const ny = wanderY + dir[1];
+
+                if (nx > 0 && nx < cols - 1 && ny > 0 && ny < rows - 1) {
+                    wanderX = nx;
+                    wanderY = ny;
+                    carveRoom(wanderX, wanderY);
+                }
+            }
+
+            // Check if map is sufficiently filled (approx 15-20% fill rate is good for dungeons)
+            let floorCount = 0;
+            for(let x=0; x<cols; x++) {
+                for(let y=0; y<rows; y++) {
+                    if(grid[x][y] !== WALL) floorCount++;
+                }
+            }
+            const fillRatio = floorCount / (cols * rows);
+
+            if (fillRatio > 0.25 || stateTimer > 300) {
+                state = 'EXPLORING';
+                // Mark current floor as visited for the explorer
+                for(let x=0; x<cols; x++) {
+                    for(let y=0; y<rows; y++) {
+                        if(grid[x][y] !== WALL) visited[x][y] = false;
+                    }
+                }
+                // Set start point as visited
+                visited[explorer.x][explorer.y] = true;
+            }
+            stateTimer++;
+        }
+
+        // --- Explorer Logic ---
+
+        function getNeighbors(x, y) {
+            const n = [];
+            const dirs = [[0,1], [0,-1], [1,0], [-1,0]];
+            for (let d of dirs) {
+                const nx = x + d[0];
+                const ny = y + d[1];
+                if (nx >= 0 && nx < cols && ny >= 0 && ny < rows && grid[nx][ny] !== WALL) {
+                    n.push({x: nx, y: ny});
+                }
+            }
+            return n;
+        }
+
+        function updateExplorer() {
+            // Move towards target
+            if (explorer.x !== explorer.targetX || explorer.y !== explorer.targetY) {
+                explorer.moveTimer++;
+                if (explorer.moveTimer > 5) { // Speed of movement
+                    explorer.moveTimer = 0;
+                    // Simple step towards target
+                    if (explorer.x < explorer.targetX) explorer.x++;
+                    else if (explorer.x > explorer.targetX) explorer.x--;
+                    else if (explorer.y < explorer.targetY) explorer.y++;
+                    else if (explorer.y > explorer.targetY) explorer.y--;
+                    
+                    visited[explorer.x][explorer.y] = true;
+                }
+            } else {
+                // Find new target
+                // Preference: Unvisited neighbors (0), then Unvisited anywhere (1), then Random (2)
+                let neighbors = getNeighbors(explorer.x, explorer.y);
+                
+                // 1. Check immediate neighbors for unvisited
+                let unvisitedNeighbors = neighbors.filter(n => !visited[n.x][n.y]);
+                
+                if (unvisitedNeighbors.length > 0) {
+                    // Pick random unvisited neighbor
+                    const pick = unvisitedNeighbors[Math.floor(Math.random() * unvisitedNeighbors.length)];
+                    explorer.targetX = pick.x;
+                    explorer.targetY = pick.y;
+                } else {
+                    // 2. Look for any unvisited floor (BFS or random search)
+                    // Optimization: Just scan a random subset of the grid to find an unvisited floor
+                    let found = false;
+                    let attempts = 0;
+                    let target = null;
+                    
+                    while(!found && attempts < 50) {
+                        let rx = Math.floor(Math.random() * cols);
+                        let ry = Math.floor(Math.random() * rows);
+                        if (grid[rx][ry] !== WALL && !visited[rx][ry]) {
+                            target = {x: rx, y: ry};
+                            found = true;
+                        }
+                        attempts++;
+                    }
+
+                    if (found) {
+                        // We need a path. Since pathfinding is expensive in JS loop, 
+                        // let's just set the target and let the explorer "pathfind" by picking 
+                        // neighbors that reduce distance to target.
+                        explorer.targetX = target.x;
+                        explorer.targetY = target.y;
+                    } else {
+                        // 3. Wander randomly
+                        if (neighbors.length > 0) {
+                            const pick = neighbors[Math.floor(Math.random() * neighbors.length)];
+                            explorer.targetX = pick.x;
+                            explorer.targetY = pick.y;
+                        }
+                    }
+                }
+            }
+            
+            // Simple heuristic pathfinding: if we are not at target, try to pick a neighbor 
+            // that gets us closer to target in next frame (handled in movement logic implicitly by setting target)
+            // To make it look smart, we update the target to be the next step in a greedy path if the target is far
+            if (Math.abs(explorer.x - explorer.targetX) + Math.abs(explorer.y - explorer.targetY) > 1) {
+                 let n = getNeighbors(explorer.x, explorer.y);
+                 let best = null;
+                 let minDist = 9999;
+                 for(let node of n) {
+                     let d = Math.abs(node.x - explorer.targetX) + Math.abs(node.y - explorer.targetY);
+                     if (d < minDist) {
+                         minDist = d;
+                         best = node;
+                     }
+                 }
+                 if (best) {
+                     explorer.targetX = best.x;
+                     explorer.targetY = best.y;
+                 }
+            }
+        }
+
+        // --- Rendering ---
+
+        function draw() {
+            // Clear background
+            ctx.fillStyle = '#050505';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw Dungeon
+            for (let x = 0; x < cols; x++) {
+                for (let y = 0; y < rows; y++) {
+                    const type = grid[x][y];
+                    if (type === WALL) continue;
+
+                    const px = x * TILE_SIZE;
+                    const py = y * TILE_SIZE;
+
+                    // Floor
+                    ctx.fillStyle = '#1a1a1a'; // Dark stone
+                    ctx.fillRect(px, py, TILE_SIZE, TILE_SIZE);
+                    
+                    // Floor detail (noise)
+                    ctx.fillStyle = '#222';
+                    if ((x+y)%3===0) ctx.fillRect(px+2, py+2, 4, 4);
+                    if ((x*y)%5===0) ctx.fillRect(px+12, py+12, 2, 2);
+
+                    // Walls (draw borders for non-wall tiles to give depth)
+                    // Check neighbors, if wall, draw light line
+                    ctx.strokeStyle = '#000';
+                    ctx.lineWidth = 1;
+                    if (x>0 && grid[x-1][y] === WALL) ctx.strokeRect(px, py, TILE_SIZE, TILE_SIZE);
+                }
+            }
+
+            // Draw Torches (Light Logic)
+            // We use 'lighter' composite to simulate additive light
+            ctx.globalCompositeOperation = 'lighter';
+            
+            const time = Date.now() * 0.005;
+
+            torches.forEach(t => {
+                const px = t.x * TILE_SIZE + TILE_SIZE/2;
+                const py = t.y * TILE_SIZE + TILE_SIZE/2;
+                
+                // Flicker math
+                const flicker = Math.sin(time + t.flickerOffset) * 5 + Math.sin(time * 2.3 + t.flickerOffset) * 3;
+                const radius = TILE_SIZE * 2.5 + flicker;
+
+                const grad = ctx.createRadialGradient(px, py, 0, px, py, radius);
+                grad.addColorStop(0, 'rgba(255, 200, 100, 0.8)'); // Core
+                grad.addColorStop(0.4, 'rgba(255, 140, 50, 0.3)'); // Glow
+                grad.addColorStop(1, 'rgba(0, 0, 0, 0)'); // Fade
+
+                ctx.fillStyle = grad;
+                ctx.beginPath();
+                ctx.arc(px, py, radius, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // The actual torch flame sprite
+                ctx.fillStyle = '#ffcc00';
+                ctx.beginPath();
+                ctx.arc(px, py - 2, 2 + Math.random(), 0, Math.PI*2);
+                ctx.fill();
+            });
+
+            // Reset Composite
+            ctx.globalCompositeOperation = 'source-over';
+
+            // Draw Explorer
+            const ex = explorer.x * TILE_SIZE + TILE_SIZE/2;
+            const ey = explorer.y * TILE_SIZE + TILE_SIZE/2;
+            
+            // Explorer Glow
+            const eGrad = ctx.createRadialGradient(ex, ey, 0, ex, ey, TILE_SIZE);
+            eGrad.addColorStop(0, 'rgba(100, 255, 100, 0.6)');
+            eGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+            ctx.fillStyle = eGrad;
+            ctx.beginPath();
+            ctx.arc(ex, ey, TILE_SIZE, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Explorer Dot
+            ctx.fillStyle = '#aaffaa';
+            ctx.beginPath();
+            ctx.arc(ex, ey, 3, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Global Fade Out Effect
+            if (state === 'FADE_OUT') {
+                fadeAlpha += 0.01;
+                ctx.fillStyle = `rgba(5, 5, 5, ${fadeAlpha})`;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                
+                if (fadeAlpha >= 1) {
+                    initDungeon();
+                }
+            } else if (state === 'EXPLORING') {
+                // Slowly fade out after a long time
+                stateTimer++;
+                if (stateTimer > 600) { // 10 seconds approx
+                    state = 'FADE_OUT';
+                }
+            }
+        }
+
+        function loop() {
+            if (state === 'GENERATING') {
+                updateGeneration();
+            } else if (state === 'EXPLORING') {
+                updateExplorer();
+            }
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        window.addEventListener('resize', resize);
+        resize();
+        loop();
+
+    </script>
+</body>
+</html>

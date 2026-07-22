@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
+canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W = canvas.width = window.innerWidth;
+let H = canvas.height = window.innerHeight;
+
+const R = 200; // sphere radius
+const SEGMENTS_PER_REV = 360 * 6;
+let points = [];
+let totalPoints = 0;
+
+// Generate spherical Fibonacci points on the sphere
+for (let i = 0; i < SEGMENTS_PER_REV; i++) {
+    const y = 1 - (i / (SEGMENTS_PER_REV - 1)) * 2;
+    const r = Math.sqrt(1 - y * y);
+    const theta = Math.acos(y);
+    const phi = (Math.PI * (3 - Math.sqrt(5)) * i);
+    const x = Math.cos(phi) * r;
+    const z = Math.sin(phi) * r;
+    points.push([x * R, y * R, z * R]);
+}
+
+// Build a continuous "scribble" path by connecting neighbors along a random walk
+// that stays on the surface of the sphere.
+function generateScribbleSteps(count) {
+    const steps = [];
+    let u = 0.5, v = 0.5; // parametric coords on sphere (0..1)
+    let phi = u * Math.PI * 2;
+    let costheta = v * 2 - 1;
+    let sint = Math.sqrt(1 - costheta * costheta);
+    let x = Math.sin(phi) * sint * R;
+    let y = costheta * R;
+    let z = Math.cos(phi) * sint * R;
+
+    for (let i = 0; i < count; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const step = 0.12;
+        // Move slightly in random direction on tangent plane
+        const nx = Math.cos(angle), ny = Math.sin(angle);
+        // Normal at current point
+        const len = Math.sqrt(x*x+y*y+z*z);
+        const N = [x/len, y/len, z/len];
+        // Tangent vectors
+        const t1 = [Math.cos(phi + Math.PI/2), 0, -Math.sin(phi + Math.PI/2)];
+        const t2 = [0, 1, 0];
+        let T = [t1[0]*nx + t2[0]*ny, t1[1]*nx + t2[1]*ny, t1[2]*nx + t2[2]*ny];
+        x += T[0]*step; y += T[1]*step; z += T[2]*step;
+        const l = Math.sqrt(x*x+y*y+z*z);
+        x = x/l*R; y = y/l*R; z = z/l*R;
+        phi = Math.atan2(z, x);
+        steps.push([x, y, z]);
+    }
+    return steps;
+}
+
+// Store the animated scribble points
+let scribble = generateScribbleSteps(40000);
+totalPoints = scribble.length;
+
+// Rotation state
+let rotX = 0, rotY = 0;
+let targetRotX = 0, targetRotY = 0;
+let growing = true;
+let visibleCount = 0;
+
+function project(x, y, z) {
+    const dist = 600;
+    const f = dist / (dist + z);
+    return {
+        x: W/2 + x * f,
+        y: H/2 - y * f,
+        depth: f
+    };
+}
+
+function rotate(x, y, z, ax, ay) {
+    // Rotate around X
+    let cos = Math.cos(ax), sin = Math.sin(ax);
+    let y1 = y * cos - z * sin;
+    let z1 = y * sin + z * cos;
+    y = y1; z = z1;
+    // Around Y
+    cos = Math.cos(ay); sin = Math.sin(ay);
+    let x1 = x * cos + z * sin;
+    let z1b = -x * sin + z * cos;
+    x = x1; z = z1b;
+    return [x, y, z];
+}
+
+function lerp(a, b, t) { return a + (b-a)*t; }
+
+function animate() {
+    requestAnimationFrame(animate);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+
+    targetRotX += 0.003;
+    targetRotY += 0.002;
+    rotX = lerp(rotX, targetRotX, 0.05);
+    rotY = lerp(rotY, targetRotY, 0.05);
+
+    if (growing) {
+        visibleCount += 3;
+        if (visibleCount >= totalPoints) {
+            growing = false;
+        }
+    } else {
+        visibleCount -= 2;
+        if (visibleCount <= 0) {
+            growing = true;
+            // Regenerate scribble occasionally for variety
+            scribble = generateScribbleSteps(40000);
+        }
+    }
+
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    let prevScreen = null;
+    for (let i = 0; i < visibleCount && i < totalPoints - 1; i++) {
+        const p1 = scribble[i];
+        const p2 = scribble[i+1];
+        const [x1,y1,z1] = rotate(p1[0],p1[1],p1[2], rotX, rotY);
+        const [x2,y2,z2] = rotate(p2[0],p2[1],p2[2], rotX, rotY);
+
+        const s1 = project(x1, y1, z1);
+        const s2 = project(x2, y2, z2);
+
+        const d1 = z1; // for depth cueing
+        const d2 = z2;
+        const avgZ = (d1 + d2) / 2;
+        const depthFactor = (avgZ + R) / (2 * R); // 0..1
+        const thickness = 0.5 + depthFactor * 3.0;
+        const alpha = 0.3 + depthFactor * 0.7;
+        const brightness = 60 + depthFactor * 120;
+        const hue = 200 + depthFactor * 60;
+
+        ctx.strokeStyle = `hsla(${hue}, 80%, ${brightness}%, ${alpha})`;
+        ctx.lineWidth = thickness;
+
+        ctx.beginPath();
+        ctx.moveTo(s1.x, s1.y);
+        ctx.lineTo(s2.x, s2.y);
+        ctx.stroke();
+    }
+}
+
+window.addEventListener('resize', () => {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+});
+
+animate();
+</script>
+</body>
+</html>

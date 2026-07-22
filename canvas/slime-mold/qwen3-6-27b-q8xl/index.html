@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Physarum Slime Mold Simulation</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="simCanvas"></canvas>
+    <script>
+        /**
+         * Physarum Polycephalum Simulation
+         * 
+         * Uses a grid based diffusion model for the chemical trail and
+         * autonomous agents to deposit and sense the trail.
+         */
+
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d', { alpha: false });
+
+        // Simulation Parameters
+        const AGENT_COUNT = 12000;
+        const SENSOR_ANGLE = Math.PI / 4; // 45 degrees
+        const SENSOR_DIST = 10;
+        const TURN_SPEED = 0.2; 
+        const MOVE_SPEED = 1.5;
+        const DEPOSIT_AMOUNT = 50;
+        const DIFFUSION_RATE = 0.25;
+        const DECAY_RATE = 0.98;
+        const FOOD_COUNT = 6;
+
+        // Grid Resolution (Lower = faster, higher = more detail)
+        // We render to a smaller buffer and scale up via CSS/Canvas for performance
+        const GRID_SCALE = 4; 
+        
+        let width, height, cols, rows;
+        let trail, nextTrail; // Float32Arrays for chemical map
+        let agents;           // Agents object
+        let food;             // Food sources
+        let imageData;        // For direct pixel manipulation
+
+        function init() {
+            resize();
+            window.addEventListener('resize', resize);
+            requestAnimationFrame(loop);
+        }
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            
+            width = canvas.width;
+            height = canvas.height;
+            
+            cols = Math.ceil(width / GRID_SCALE);
+            rows = Math.ceil(height / GRID_SCALE);
+            
+            // Initialize chemical trails
+            // We need two buffers for the diffusion step (double buffering)
+            trail = new Float32Array(cols * rows);
+            nextTrail = new Float32Array(cols * rows);
+            
+            // Initialize ImageData for rendering
+            // We create a buffer for the scaled-down resolution
+            // Then draw it scaled up
+            // Actually, for "Glowing" effect, let's render directly to canvas but use putImageData is slow for scaling.
+            // Optimization: Render to an offscreen canvas at low res, draw to main canvas.
+            
+            const offCanvas = document.createElement('canvas');
+            offCanvas.width = cols;
+            offCanvas.height = rows;
+            const offCtx = offCanvas.getContext('2d');
+            imageData = offCtx.createImageData(cols, rows);
+            
+            // Initialize Agents
+            agents = [];
+            for (let i = 0; i < AGENT_COUNT; i++) {
+                agents.push({
+                    x: Math.random() * width,
+                    y: Math.random() * height,
+                    angle: Math.random() * Math.PI * 2
+                });
+            }
+
+            // Initialize Food
+            food = [];
+            for (let i = 0; i < FOOD_COUNT; i++) {
+                food.push({
+                    x: Math.random() * width,
+                    y: Math.random() * height,
+                    tx: Math.random() * width, // target x
+                    ty: Math.random() * height // target y
+                });
+            }
+        }
+
+        function updateFood() {
+            for (let f of food) {
+                // Move food slowly to target
+                const dx = f.tx - f.x;
+                const dy = f.ty - f.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                
+                if (dist < 10) {
+                    // Pick new target
+                    f.tx = Math.random() * width;
+                    f.ty = Math.random() * height;
+                } else {
+                    f.x += (dx / dist) * 0.5;
+                    f.y += (dy / dist) * 0.5;
+                }
+
+                // Deposit high amount of chemical at food location
+                const gx = Math.floor(f.x / GRID_SCALE);
+                const gy = Math.floor(f.y / GRID_SCALE);
+                
+                if (gx >= 0 && gx < cols && gy >= 0 && gy < rows) {
+                    // Deposit in a small radius
+                    for(let ox = -2; ox <= 2; ox++) {
+                        for(let oy = -2; oy <= 2; oy++) {
+                            const nx = gx + ox;
+                            const ny = gy + oy;
+                            if (nx >= 0 && nx < cols && ny >= 0 && ny < rows) {
+                                const idx = ny * cols + nx;
+                                trail[idx] = Math.min(trail[idx] + 200, 255);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        function updateAgents() {
+            for (let i = 0; i < AGENT_COUNT; i++) {
+                const a = agents[i];
+                
+                // 1. Sense
+                const cx = a.x / GRID_SCALE;
+                const cy = a.y / GRID_SCALE;
+                
+                // Helper to get concentration at angle
+                const sense = (angle) => {
+                    const sx = cx + Math.cos(angle) * (SENSOR_DIST / GRID_SCALE);
+                    const sy = cy + Math.sin(angle) * (SENSOR_DIST / GRID_SCALE);
+                    
+                    // Clamp to grid
+                    const gx = Math.floor(sx);
+                    const gy = Math.floor(sy);
+                    
+                    if (gx < 0 || gx >= cols || gy < 0 || gy >= rows) return 0;
+                    
+                    return trail[gy * cols + gx];
+                };
+
+                const front = sense(a.angle);
+                const left = sense(a.angle - SENSOR_ANGLE);
+                const right = sense(a.angle + SENSOR_ANGLE);
+
+                // 2. Steer
+                if (front > left && front > right) {
+                    // Continue straight
+                } else if (front < left && front < right) {
+                    // Random turn
+                    a.angle += (Math.random() - 0.5) * 2 * TURN_SPEED;
+                } else if (left > right) {
+                    a.angle -= TURN_SPEED;
+                } else if (right > left) {
+                    a.angle += TURN_SPEED;
+                } else {
+                    // Random jitter
+                    a.angle += (Math.random() - 0.5) * 0.1;
+                }
+
+                // 3. Move
+                a.x += Math.cos(a.angle) * MOVE_SPEED;
+                a.y += Math.sin(a.angle) * MOVE_SPEED;
+
+                // Wrap around screen
+                if (a.x < 0) a.x += width;
+                if (a.x >= width) a.x -= width;
+                if (a.y < 0) a.y += height;
+                if (a.y >= height) a.y -= height;
+
+                // 4. Deposit
+                const depGx = Math.floor(a.x / GRID_SCALE);
+                const depGy = Math.floor(a.y / GRID_SCALE);
+                
+                if (depGx >= 0 && depGx < cols && depGy >= 0 && depGy < rows) {
+                    const idx = depGy * cols + depGx;
+                    trail[idx] = Math.min(trail[idx] + DEPOSIT_AMOUNT, 255);
+                }
+            }
+        }
+
+        function diffuseAndDecay() {
+            // Simple averaging with neighbors
+            // To optimize, we iterate strictly inside bounds
+            for (let y = 1; y < rows - 1; y++) {
+                for (let x = 1; x < cols - 1; x++) {
+                    const idx = y * cols + x;
+                    
+                    // Average of self and 4 neighbors
+                    // Optimization: Unroll loop
+                    const sum = 
+                        trail[idx] * 4 + // weight self higher to prevent blurring too fast
+                        trail[idx - 1] + // left
+                        trail[idx + 1] +  // right
+                        trail[idx - cols] + // up
+                        trail[idx + cols];  // down
+                    
+                    let val = sum / 8; // 4 (self) + 4 (neighbors) = 8
+                    
+                    // Decay
+                    val *= DECAY_RATE;
+                    
+                    nextTrail[idx] = val;
+                }
+            }
+            
+            // Swap buffers
+            // We can't just swap references if we want to keep 'trail' as the source for next frame
+            // So we copy nextTrail to trail, or swap and copy.
+            // Fastest is usually to swap references and copy the old 'trail' (now nextTrail) 
+            // but since we wrote into nextTrail, we can just swap.
+            // However, the boundary cells (0 and cols-1 etc) weren't updated in nextTrail.
+            // Let's just copy nextTrail to trail for simplicity and safety, or use a temp var.
+            
+            const temp = trail;
+            trail = nextTrail;
+            nextTrail = temp;
+        }
+
+        function render() {
+            const data = imageData.data;
+            
+            // Palette: Black background, Cyan/Magenta glow
+            // We map trail intensity (0-255) to colors
+            
+            for (let i = 0; i < trail.length; i++) {
+                const val = trail[i];
+                const idx = i * 4;
+                
+                if (val > 1) {
+                    // Two-tone palette logic
+                    // Low values: Dark Blue/Cyan
+                    // High values: Bright Magenta/White
+                    
+                    // Normalize 0-1
+                    const n = val / 255;
+                    
+                    // Color mapping
+                    // Cyan: 0, 255, 255
+                    // Magenta: 255, 0, 255
+                    
+                    // Simple gradient
+                    const r = Math.floor(n * 255); 
+                    const g = Math.floor(n * n * 255); // Quadratic for contrast
+                    const b = 255;
+                    
+                    data[idx] = r;
+                    data[idx + 1] = g;
+                    data[idx + 2] = b;
+                    data[idx + 3] = 255; // Alpha
+                } else {
+                    // Black background
+                    data[idx] = 0;
+                    data[idx + 1] = 0;
+                    data[idx + 2] = 0;
+                    data[idx + 3] = 255;
+                }
+            }
+            
+            // Put image data onto offscreen canvas
+            // We need to access the offCanvas context. 
+            // Since we created it in init/resize, we need to keep a reference or recreate logic.
+            // Let's fix the resize logic to store the offCanvas globally.
+            
+            offCtx.putImageData(imageData, 0, 0);
+            
+            // Draw scaled up to main canvas
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(offCanvas, 0, 0, width, height);
+        }
+
+        // Global reference for offscreen canvas
+        let offCanvas, offCtx;
+
+        // Override resize to capture offCanvas
+        const originalResize = resize;
+        resize = function() {
+            originalResize();
+            // Re-link offCanvas logic inside resize was messy, let's fix it here
+            // Actually, let's just move the offCanvas creation out of the local scope of resize
+            // by fixing the code structure below.
+        };
+
+        // Corrected Init/Resize Structure
+        function setup() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            width = canvas.width;
+            height = canvas.height;
+            cols = Math.ceil(width / GRID_SCALE);
+            rows = Math.ceil(height / GRID_SCALE);
+            
+            trail = new Float32Array(cols * rows);
+            nextTrail = new Float32Array(cols * rows);
+            
+            offCanvas = document.createElement('canvas');
+            offCanvas.width = cols;
+            offCanvas.height = rows;
+            offCtx = offCanvas.getContext('2d');
+            imageData = offCtx.createImageData(cols, rows);
+            
+            agents = [];
+            for (let i = 0; i < AGENT_COUNT; i++) {
+                agents.push({
+                    x: Math.random() * width,
+                    y: Math.random() * height,
+                    angle: Math.random() * Math.PI * 2
+                });
+            }
+
+            food = [];
+            for (let i = 0; i < FOOD_COUNT; i++) {
+                food.push({
+                    x: Math.random() * width,
+                    y: Math.random() * height,
+                    tx: Math.random() * width,
+                    ty: Math.random() * height
+                });
+            }
+        }
+
+        function loop() {
+            updateFood();
+            updateAgents();
+            diffuseAndDecay();
+            render();
+            requestAnimationFrame(loop);
+        }
+
+        // Start
+        setup();
+        window.addEventListener('resize', setup);
+        requestAnimationFrame(loop);
+
+    </script>
+</body>
+</html>

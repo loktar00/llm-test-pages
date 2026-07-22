@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width=device-width, initial-scale=1.0">
+    <title>Wave Interference Tank</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #000;
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="tank"></canvas>
+    <script>
+        /**
+         * WAVE INTERFERENCE TANK
+         * ----------------------
+         * Solves the 2D damped wave equation on a grid.
+         * Uses two buffers for ping-pong simulation to avoid aliasing.
+         * Renders using a custom 16-bit color palette for depth.
+         */
+
+        const canvas = document.getElementById('tank');
+        const ctx = canvas.getContext('2d', { alpha: false });
+
+        // Simulation Configuration
+        const SCALE = 4; // Render 1 grid pixel as 4x4 screen pixels
+        let width, height;
+        let cols, rows;
+        let buffer1, buffer2; // Float32 arrays for wave state
+        let pixels; // Uint8ClampedArray for rendering
+        let imageData;
+
+        // Physics Constants
+        const WAVE_SPEED = 0.25; // C^2 factor (stability check: 4*C^2 <= 1)
+        const DAMPING = 0.985; // Energy loss per frame
+        const SOURCE_STRENGTH = 6.0;
+        const REFLECTION = 0.95; // Wall bounce retention
+
+        // Sources Array
+        const sources = [];
+        const NUM_SOURCES = 4;
+
+        // Barrier Geometry (Slits)
+        const barrierY = 0.4; // Y position relative to height
+        const barrierThickness = 3; // Grid cells thick
+        const slit1Width = 8;
+        const slit2Width = 8;
+        const gapSize = 15; // Space between slits
+
+        /**
+         * Initialization
+         */
+        function init() {
+            resize();
+            initBuffers();
+            initSources();
+            window.addEventListener('resize', resize);
+            requestAnimationFrame(loop);
+        }
+
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+
+            // Snap to grid scale
+            cols = Math.floor(width / SCALE);
+            rows = Math.floor(height / SCALE);
+
+            // Reallocate buffers
+            const size = cols * rows;
+            buffer1 = new Float32Array(size);
+            buffer2 = new Float32Array(size);
+            
+            imageData = ctx.createImageData(cols, rows);
+            pixels = imageData.data;
+
+            // Clear canvas to deep blue background
+            // We will use the rendering loop to fill, 
+            // but here we init the buffers to 0
+            buffer1.fill(0);
+            buffer2.fill(0);
+        }
+
+        function initBuffers() {
+            // Buffers are created in resize
+        }
+
+        function initSources() {
+            sources.length = 0;
+            for (let i = 0; i < NUM_SOURCES; i++) {
+                sources.push({
+                    x: Math.random() * cols,
+                    y: Math.random() * rows,
+                    vx: (Math.random() - 0.5) * 0.5,
+                    vy: (Math.random() - 0.5) * 0.5,
+                    freq: 0.02 + Math.random() * 0.04, // Slow oscillation
+                    phase: Math.random() * Math.PI * 2,
+                    colorHue: (i * 90) % 360
+                });
+            }
+        }
+
+        /**
+         * Physics Engine
+         */
+        function update() {
+            let temp;
+
+            // 1. Update Sources (Movement & Frequency Change)
+            for (let s of sources) {
+                s.x += s.vx;
+                s.y += s.vy;
+                s.phase += s.freq;
+
+                // Bounce off walls
+                if (s.x < 10 || s.x > cols - 10) s.vx *= -1;
+                if (s.y < 10 || s.y > rows - 10) s.vy *= -1;
+
+                // Keep in bounds
+                s.x = Math.max(10, Math.min(cols - 10, s.x));
+                s.y = Math.max(10, Math.min(rows - 10, s.y));
+            }
+
+            // 2. Wave Propagation (Finite Difference)
+            // We iterate row by row for cache locality
+            const rowW = cols;
+            const barrierTop = Math.floor(rows * barrierY);
+            const barrierBottom = barrierTop + barrierThickness;
+            
+            // Slit centers
+            const totalSlitSpace = slit1Width * 2 + gapSize;
+            const start1 = Math.floor(cols / 2) - Math.floor(totalSlitSpace / 2);
+            const end1 = start1 + slit1Width;
+            const start2 = end1 + gapSize;
+            const end2 = start2 + slit1Width;
+
+            for (let y = 1; y < rows - 1; y++) {
+                // Precompute barrier logic for this row
+                const isBarrierRow = (y >= barrierTop && y < barrierBottom);
+                
+                for (let x = 1; x < cols - 1; x++) {
+                    const i = y * rowW + x;
+
+                    // Check if this cell is inside a barrier (wall)
+                    let isWall = false;
+                    
+                    if (isBarrierRow) {
+                        // Check slits
+                        if ((x >= start1 && x < end1) || (x >= start2 && x < end2)) {
+                            isWall = false; // Slit is empty
+                        } else {
+                            isWall = true; // Solid barrier
+                        }
+                    }
+
+                    if (isWall) {
+                        buffer2[i] = 0; // Walls are rigid/static (absorbing)
+                        continue;
+                    }
+
+                    // Standard Wave Equation:
+                    // u_new = 2*u - u_old + C^2 * (laplacian)
+                    // Laplacian = u_left + u_right + u_top + u_bottom - 4*u_center
+                    
+                    const uCenter = buffer1[i];
+                    const uLeft = buffer1[i - 1];
+                    const uRight = buffer1[i + 1];
+                    const uTop = buffer1[i - rowW];
+                    const uBottom = buffer1[i + rowW];
+
+                    // Boundary Reflection (Walls)
+                    const reflectL = (x === 1) ? buffer1[i + 1] : uLeft;
+                    const reflectR = (x === cols - 2) ? buffer1[i - 1] : uRight;
+                    const reflectT = (y === 1) ? buffer1[i + rowW] : uTop;
+                    const reflectB = (y === rows - 2) ? buffer1[i - rowW] : uBottom;
+
+                    const laplacian = reflectL + reflectR + reflectT + reflectB - 4 * uCenter;
+                    
+                    // Apply Physics
+                    buffer2[i] = (2 * uCenter - buffer2[i] + WAVE_SPEED * laplacian) * DAMPING;
+                }
+            }
+
+            // 3. Inject Sources
+            for (let s of sources) {
+                // Draw a circle of influence
+                const r = 3;
+                const rSq = r * r;
+                const cx = Math.floor(s.x);
+                const cy = Math.floor(s.y);
+                
+                const amp = Math.sin(s.phase) * SOURCE_STRENGTH;
+
+                for (let dy = -r; dy <= r; dy++) {
+                    for (let dx = -r; dx <= r; dx++) {
+                        if (dx*dx + dy*dy <= rSq) {
+                            const idx = (cy + dy) * cols + (cx + dx);
+                            if (idx >= 0 && idx < buffer1.length) {
+                                // Add amplitude to current buffer state
+                                // We modify buffer1 directly because it will be read in the next step
+                                buffer1[idx] += amp * 0.5; 
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. Swap Buffers
+            temp = buffer1;
+            buffer1 = buffer2;
+            buffer2 = temp;
+        }
+
+        /**
+         * Rendering Engine
+         * Uses a custom palette to map wave height to Blue -> White -> Dark Blue
+         */
+        function render() {
+            // Precompute Palette for performance (32000 entries)
+            // We map -2.0 to +2.0 to color indices
+            const paletteSize = 4000;
+            const palette = new Uint32Array(paletteSize);
+
+            for (let i = 0; i < paletteSize; i++) {
+                const v = (i / paletteSize) * 2 - 1; // -1 to 1
+                let r, g, b;
+
+                if (v > 0) {
+                    // Crests: White to Light Blue
+                    const t = v;
+                    r = 255;
+                    g = 255;
+                    b = 255 - (255 * t * 0.6); 
+                } else {
+                    // Troughs: Deep Blue to Black
+                    const t = -v;
+                    r = 0;
+                    g = 20 - (20 * t);
+                    b = 100 - (60 * t);
+                }
+                
+                // Specular Sparkle logic
+                if (v > 0.8) {
+                    // Add sparkle intensity
+                    r = 255;
+                    g = 255;
+                    b = 255;
+                }
+
+                // Pack into 0xAABBGGRR (Little Endian)
+                palette[i] = (255 << 24) | (b << 16) | (g << 8) | r;
+            }
+
+            const halfPalette = paletteSize / 2;
+
+            // Render pixels
+            for (let i = 0; i < buffer1.length; i++) {
+                let val = buffer1[i];
+                
+                // Normalize and shift to palette index
+                // Clamp roughly
+                if (val > 2.0) val = 2.0;
+                if (val < -2.0) val = -2.0;
+
+                const index = Math.floor((val + 1.0) * halfPalette);
+                
+                // Write directly to 32-bit view if supported, or fallback
+                // pixels[i] is 4 bytes. We write 1 integer (4 bytes)
+                pixels[i * 4] = palette[index] & 0xFF;         // R
+                pixels[i * 4 + 1] = (palette[index] >> 8) & 0xFF; // G
+                pixels[i * 4 + 2] = (palette[index] >> 16) & 0xFF; // B
+                pixels[i * 4 + 3] = 255; // Alpha
+            }
+
+            // Draw to offscreen buffer
+            ctx.putImageData(imageData, 0, 0);
+            
+            // Scale up to full screen
+            // Use nearest neighbor for crisp pixel look, or smoothing for fluid look
+            // Using smoothing makes it look like "water" better
+            ctx.imageSmoothing = true; 
+            ctx.drawImage(canvas, 0, 0, cols, rows, 0, 0, width, height);
+        }
+
+        function loop() {
+            update();
+            render();
+            requestAnimationFrame(loop);
+        }
+
+        // Start
+        init();
+
+    </script>
+</body>
+</html>

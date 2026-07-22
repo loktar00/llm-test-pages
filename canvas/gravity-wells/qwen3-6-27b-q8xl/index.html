@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gravity Painting</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #000;
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        
+        // Configuration
+        const CONFIG = {
+            particleCount: 0, // Current count
+            maxParticles: 4000,
+            emissionRate: 15, // Particles per frame
+            baseGravity: 800,
+            fadeRate: 0.015, // Lower = longer trails
+            wellCountMin: 3,
+            wellCountMax: 5,
+            wellSpeed: 0.3
+        };
+
+        // State
+        let particles = [];
+        let wells = [];
+        let hue = 0;
+        let time = 0;
+
+        // Resize handling
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            // Fill black initially
+            ctx.fillStyle = 'black';
+            ctx.fillRect(0, 0, width, height);
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // --- Classes ---
+
+        class GravityWell {
+            constructor() {
+                this.x = Math.random() * width;
+                this.y = Math.random() * height;
+                this.vx = (Math.random() - 0.5) * CONFIG.wellSpeed;
+                this.vy = (Math.random() - 0.5) * CONFIG.wellSpeed;
+                this.mass = 100 + Math.random() * 200; // Strength of gravity
+                this.radius = 50; // Visual radius (invisible mostly, but for debug/split logic)
+                this.life = 1000 + Math.random() * 2000; // Frames before potential split/merge
+                this.targetMerge = null;
+            }
+
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+
+                // Bounce off walls gently
+                if (this.x < 0 || this.x > width) this.vx *= -1;
+                if (this.y < 0 || this.y > height) this.vy *= -1;
+
+                // Random wandering drift
+                this.vx += (Math.random() - 0.5) * 0.05;
+                this.vy += (Math.random() - 0.5) * 0.05;
+
+                // Limit speed
+                const speed = Math.sqrt(this.vx*this.vx + this.vy*this.vy);
+                if (speed > CONFIG.wellSpeed * 3) {
+                    this.vx = (this.vx / speed) * CONFIG.wellSpeed * 3;
+                    this.vy = (this.vy / speed) * CONFIG.wellSpeed * 3;
+                }
+
+                this.life--;
+            }
+        }
+
+        class Particle {
+            constructor() {
+                // Spawn at edges
+                const edge = Math.floor(Math.random() * 4);
+                if (edge === 0) { // Top
+                    this.x = Math.random() * width;
+                    this.y = 0;
+                } else if (edge === 1) { // Right
+                    this.x = width;
+                    this.y = Math.random() * height;
+                } else if (edge === 2) { // Bottom
+                    this.x = Math.random() * width;
+                    this.y = height;
+                } else { // Left
+                    this.x = 0;
+                    this.y = Math.random() * height;
+                }
+
+                // Initial velocity: shoot towards center-ish with some noise
+                const angle = Math.atan2(height/2 - this.y, width/2 - this.x) + (Math.random() - 0.5) * 1.5;
+                const speed = 2 + Math.random() * 3;
+                this.vx = Math.cos(angle) * speed;
+                this.vy = Math.sin(angle) * speed;
+                
+                this.life = 1.0;
+                this.decay = 0.001 + Math.random() * 0.002;
+            }
+
+            update(wells) {
+                let fx = 0;
+                let fy = 0;
+
+                for (let well of wells) {
+                    const dx = well.x - this.x;
+                    const dy = well.y - this.y;
+                    const distSq = dx*dx + dy*dy;
+                    const dist = Math.sqrt(distSq);
+                    
+                    // Soften gravity at center to prevent infinity
+                    const force = CONFIG.baseGravity * well.mass / (distSq + 500);
+                    
+                    fx += (dx / dist) * force;
+                    fy += (dy / dist) * force;
+                }
+
+                this.vx += fx * 0.016; // dt approx
+                this.vy += fy * 0.016;
+
+                // Speed limit to prevent tunneling or exploding
+                const vSq = this.vx*this.vx + this.vy*this.vy;
+                if (vSq > 10000) { // Max speed ~100
+                    const v = Math.sqrt(vSq);
+                    this.vx = (this.vx / v) * 100;
+                    this.vy = (this.vy / v) * 100;
+                }
+
+                this.x += this.vx;
+                this.y += this.vy;
+                this.life -= this.decay;
+            }
+
+            draw(ctx) {
+                // Color based on global hue + speed
+                const speed = Math.abs(this.vx) + Math.abs(this.vy);
+                const h = (hue + speed * 2) % 360;
+                ctx.fillStyle = `hsla(${h}, 80%, 60%, ${this.life})`;
+                ctx.fillRect(this.x, this.y, 1.5, 1.5);
+            }
+        }
+
+        // --- Logic ---
+
+        function initWells() {
+            wells = [];
+            for(let i=0; i<4; i++) {
+                wells.push(new GravityWell());
+            }
+        }
+
+        function manageWells() {
+            // 1. Update positions
+            wells.forEach(w => w.update());
+
+            // 2. Handle Splits (Random chance to add a well if below max)
+            if (wells.length < CONFIG.wellCountMax && Math.random() < 0.005) {
+                // Clone an existing well slightly offset
+                const parent = wells[Math.floor(Math.random() * wells.length)];
+                const child = new GravityWell();
+                child.x = parent.x + (Math.random() - 0.5) * 100;
+                child.y = parent.y + (Math.random() - 0.5) * 100;
+                child.vx = parent.vx + (Math.random() - 0.5);
+                child.vy = parent.vy + (Math.random() - 0.5);
+                child.mass = parent.mass * 0.7;
+                wells.push(child);
+            }
+
+            // 3. Handle Merges (If two are close, combine them)
+            for (let i = 0; i < wells.length; i++) {
+                for (let j = i + 1; j < wells.length; j++) {
+                    const w1 = wells[i];
+                    const w2 = wells[j];
+                    const dx = w1.x - w2.x;
+                    const dy = w1.y - w2.y;
+                    const dist = Math.sqrt(dx*dx + dy*dy);
+
+                    if (dist < 100) {
+                        // Merge w2 into w1
+                        w1.mass += w2.mass;
+                        w1.vx = (w1.vx + w2.vx) / 2;
+                        w1.vy = (w1.vy + w2.vy) / 2;
+                        wells.splice(j, 1);
+                        j--; 
+                    }
+                }
+            }
+
+            // 4. Ensure minimum count
+            if (wells.length < CONFIG.wellCountMin) {
+                wells.push(new GravityWell());
+            }
+        }
+
+        function emitParticles() {
+            // Emit a batch
+            for (let i = 0; i < CONFIG.emissionRate; i++) {
+                if (particles.length < CONFIG.maxParticles) {
+                    particles.push(new Particle());
+                }
+            }
+        }
+
+        function render() {
+            // Fade effect
+            // We draw a semi-transparent black rectangle over the whole screen
+            ctx.globalCompositeOperation = 'source-over';
+            ctx.fillStyle = `rgba(0, 0, 0, ${CONFIG.fadeRate})`;
+            ctx.fillRect(0, 0, width, height);
+
+            // Switch to additive blending for the "glowing" effect
+            ctx.globalCompositeOperation = 'lighter';
+
+            // Update and Draw Particles
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.update(wells);
+                p.draw(ctx);
+
+                // Remove dead particles or particles that flew too far off screen
+                if (p.life <= 0 || 
+                    p.x < -100 || p.x > width + 100 || 
+                    p.y < -100 || p.y > height + 100) {
+                    particles.splice(i, 1);
+                }
+            }
+
+            // Optional: Visualize wells very faintly (debug aesthetic)
+            // ctx.globalCompositeOperation = 'source-over';
+            // ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+            // wells.forEach(w => {
+            //    ctx.beginPath();
+            //    ctx.arc(w.x, w.y, 5, 0, Math.PI*2);
+            //    ctx.stroke();
+            // });
+        }
+
+        function loop() {
+            time++;
+            
+            // Cycle color
+            hue = (hue + 0.5) % 360;
+
+            manageWells();
+            emitParticles();
+            render();
+
+            requestAnimationFrame(loop);
+        }
+
+        // Start
+        initWells();
+        loop();
+
+    </script>
+</body>
+</html>

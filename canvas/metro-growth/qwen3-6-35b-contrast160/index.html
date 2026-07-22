@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width=device-width, initial-scale=1.0">
+    <title>Transit Growth</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #121212;
+            font-family: sans-serif;
+        }
+        canvas {
+            display: block;
+        }
+        #ui {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            color: #555;
+            font-size: 12px;
+            pointer-events: none;
+            text-align: right;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="c"></canvas>
+    <div id="ui">METRO MAP GENERATION</div>
+    <script>
+        const canvas = document.getElementById('c');
+        const ctx = canvas.getContext('2d');
+        let width, height;
+
+        // Configuration
+        const CONFIG = {
+            colors: ['#FF4040', '#3EAAFF', '#FFD000', '#00C556', '#B620E0', '#FF8717', '#FFFFFF', '#212121', '#515151'],
+            gridSize: 40,
+            lineLength: 15, // avg number of segments
+            trainSpeed: 2,
+            fadeTime: 2000,
+            maxLines: 10,
+            bg: '#121212'
+        };
+
+        let nodes = [];
+        let lines = [];
+        let trains = [];
+        let frame = 0;
+        let isFading = false;
+        let fadeAlpha = 0;
+
+        // Resize handling
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // --- Node Class ---
+        class Node {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.id = nodes.length;
+                this.connections = []; // Array of { lineIndex, segmentIndex }
+                this.isInterchange = false;
+            }
+
+            addConnection(lineIndex, segmentIndex) {
+                this.connections.push({ lineIndex, segmentIndex });
+            }
+        }
+
+        // --- Line Class ---
+        class Line {
+            constructor(color) {
+                this.color = color;
+                this.path = []; // Array of Nodes
+                this.segments = []; // Array of {start, end} objects
+                this.progress = 0; // 0 to 1
+                this.isComplete = false;
+                this.drawnSegments = 0;
+                this.totalSegments = 0;
+            }
+
+            addNode(node) {
+                if (this.path.length > 0) {
+                    const prev = this.path[this.path.length - 1];
+                    this.segments.push({ start: prev, end: node });
+                }
+                this.path.push(node);
+                node.addConnection(this.path.length - 1, this.segments.length);
+            }
+
+            getLength() {
+                let len = 0;
+                this.segments.forEach(s => {
+                    len += Math.abs(s.end.x - s.start.x) + Math.abs(s.end.y - s.start.y);
+                });
+                return len;
+            }
+
+            update(dt) {
+                if (this.isComplete) return;
+
+                this.progress += dt;
+                if (this.progress >= this.totalSegments) {
+                    this.progress = this.totalSegments;
+                    this.isComplete = true;
+                    spawnTrains(this);
+                }
+            }
+
+            draw(ctx) {
+                if (this.segments.length === 0) return;
+
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.lineWidth = 4;
+                ctx.strokeStyle = this.color;
+
+                ctx.beginPath();
+                ctx.moveTo(this.path[0].x, this.path[0].y);
+
+                // Draw full path for the aesthetic
+                // We draw the "growth" part
+                const fullLen = this.getLength();
+                if (fullLen === 0) return;
+
+                const drawLen = Math.min(this.progress, this.totalSegments) * (fullLen / this.totalSegments);
+                
+                let currentLen = 0;
+                
+                for (let i = 0; i < this.segments.length; i++) {
+                    const s = this.segments[i];
+                    const segLen = Math.abs(s.end.x - s.start.x) + Math.abs(s.end.y - s.start.y);
+                    
+                    if (currentLen + segLen <= drawLen) {
+                        ctx.lineTo(s.end.x, s.end.y);
+                        currentLen += segLen;
+                    } else {
+                        // Draw partial segment
+                        const remain = drawLen - currentLen;
+                        const ratio = remain / segLen;
+                        const px = s.start.x + (s.end.x - s.start.x) * ratio;
+                        const py = s.start.y + (s.end.y - s.start.y) * ratio;
+                        ctx.lineTo(px, py);
+                        break;
+                    }
+                }
+                ctx.stroke();
+
+                // Draw stations (ticks) if complete or near complete
+                if (this.progress > 0.5) {
+                    ctx.fillStyle = this.color;
+                    this.path.forEach((n, i) => {
+                        if (i > 0) { // Don't draw start node repeatedly
+                            ctx.fillRect(n.x - 2, n.y - 2, 4, 4);
+                        }
+                    });
+                }
+
+                // Draw Interchanges
+                if (this.isComplete || this.progress > 0.5) {
+                    ctx.fillStyle = CONFIG.bg; // Cutout
+                    ctx.strokeStyle = this.color;
+                    ctx.lineWidth = 3;
+                    
+                    this.path.forEach(n => {
+                        if (n.isInterchange) {
+                            ctx.beginPath();
+                            ctx.arc(n.x, n.y, 6, 0, Math.PI * 2);
+                            ctx.fill();
+                            ctx.stroke();
+                        }
+                    });
+                }
+            }
+        }
+
+        // --- Train Class ---
+        class Train {
+            constructor(line) {
+                this.line = line;
+                this.direction = Math.random() > 0.5 ? 1 : -1;
+                this.currentSegIndex = this.direction === 1 ? 0 : line.segments.length - 1;
+                this.progress = 0; // 0 to 1 within segment
+                this.speed = CONFIG.trainSpeed / (line.getLength() / line.segments.length); // Normalize speed
+                if (line.segments.length === 0) this.done = true;
+                else this.done = false;
+            }
+
+            update(dt) {
+                if (this.done) return;
+                
+                const seg = this.line.segments[this.currentSegIndex];
+                if (!seg) {
+                    this.done = true;
+                    return;
+                }
+
+                this.progress += this.speed * dt;
+                
+                if (this.progress >= 1) {
+                    this.progress = 0;
+                    this.currentSegIndex += this.direction;
+                    
+                    if (this.currentSegIndex >= this.line.segments.length || this.currentSegIndex < 0) {
+                        // Reached end, reverse or loop? Let's reverse
+                        this.direction *= -1;
+                        this.currentSegIndex += this.direction;
+                        if (this.currentSegIndex < 0 || this.currentSegIndex >= this.line.segments.length) {
+                            this.done = true; // Stuck if just single segment
+                        }
+                    }
+                }
+            }
+
+            draw(ctx) {
+                if (this.done) return;
+                const seg = this.line.segments[this.currentSegIndex];
+                if (!seg) return;
+
+                const x = seg.start.x + (seg.end.x - seg.start.x) * this.progress;
+                const y = seg.start.y + (seg.end.y - seg.start.y) * this.progress;
+
+                ctx.fillStyle = '#FFF';
+                ctx.beginPath();
+                ctx.arc(x, y, 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        // --- Logic ---
+
+        function initCity() {
+            nodes = [];
+            lines = [];
+            trains = [];
+            frame = 0;
+            isFading = false;
+            fadeAlpha = 0;
+
+            // Generate Grid
+            const cols = Math.ceil(width / CONFIG.gridSize);
+            const rows = Math.ceil(height / CONFIG.gridSize);
+            
+            // Create empty grid
+            for(let y=0; y<rows; y++) {
+                for(let x=0; x<cols; x++) {
+                    nodes.push(new Node(x * CONFIG.gridSize, y * CONFIG.gridSize));
+                }
+            }
+
+            // Ensure center exists
+            const center = nodes[Math.floor(nodes.length/2)];
+            
+            // Create Lines
+            let linesCreated = 0;
+            let attempts = 0;
+            
+            while (linesCreated < CONFIG.maxLines && attempts < 1000) {
+                attempts++;
+                const color = CONFIG.colors[linesCreated % CONFIG.colors.length];
+                const line = new Line(color);
+                
+                // Start from a random existing node, preferably center or interchanges
+                let startNode;
+                if (lines.length === 0) {
+                    startNode = center;
+                } else {
+                    // Bias towards existing lines for interchanges
+                    const existingNodes = nodes.filter(n => n.connections.length > 0);
+                    if (existingNodes.length > 0) {
+                        // 40% chance to start from existing to create interchanges
+                        if (Math.random() < 0.4) {
+                            startNode = existingNodes[Math.floor(Math.random() * existingNodes.length)];
+                        } else {
+                            startNode = existingNodes[Math.floor(Math.random() * existingNodes.length)];
+                        }
+                    } else {
+                        startNode = center;
+                    }
+                }
+
+                // Walk
+                let curr = startNode;
+                let prev = null;
+                line.addNode(curr);
+
+                // Mark interchanges immediately if it starts on another line
+                if (curr.connections.length > 0) curr.isInterchange = true;
+
+                for (let i = 0; i < CONFIG.lineLength; i++) {
+                    const neighbors = getOrthogonalNeighbors(curr, prev);
+                    if (neighbors.length === 0) break;
+                    
+                    // Simple avoidance: Prefer empty spots, but allow overlap at interchanges
+                    // Sort neighbors: empty first, occupied second
+                    neighbors.sort((a, b) => {
+                        const aBusy = a.connections.length > 0;
+                        const bBusy = b.connections.length > 0;
+                        if (aBusy && !bBusy) return 1;
+                        if (!aBusy && bBusy) return -1;
+                        return Math.random() - 0.5;
+                    });
+
+                    const next = neighbors[0];
+                    line.addNode(next);
+                    
+                    // Check interchanges
+                    if (next.connections.length > 0) {
+                        next.isInterchange = true;
+                    }
+
+                    prev = curr;
+                    curr = next;
+                }
+
+                if (line.path.length > 1) {
+                    line.totalSegments = line.getLength();
+                    lines.push(line);
+                    linesCreated++;
+                }
+            }
+        }
+
+        function getOrthogonalNeighbors(node, prev) {
+            const neighbors = [];
+            const dirs = [
+                {x: CONFIG.gridSize, y: 0},
+                {x: -CONFIG.gridSize, y: 0},
+                {x: 0, y: CONFIG.gridSize},
+                {x: 0, y: -CONFIG.gridSize}
+            ];
+
+            dirs.forEach(d => {
+                const nx = node.x + d.x;
+                const ny = node.y + d.y;
+                // Find node in array
+                const n = nodes.find(nd => nd.x === nx && nd.y === ny);
+                if (n && n !== prev) {
+                    // Simple boundary check
+                    if (n.x > 0 && n.x < width - CONFIG.gridSize && n.y > 0 && n.y < height - CONFIG.gridSize) {
+                        neighbors.push(n);
+                    }
+                }
+            });
+            return neighbors;
+        }
+
+        function spawnTrains(line) {
+            if (line.segments.length > 0) {
+                trains.push(new Train(line));
+                // Sometimes spawn a reverse train
+                if (Math.random() > 0.5) {
+                    const t2 = new Train(line);
+                    t2.direction *= -1;
+                    t2.currentSegIndex = line.segments.length - 1;
+                    trains.push(t2);
+                }
+            }
+        }
+
+        function update() {
+            if (isFading) {
+                fadeAlpha += 0.02;
+                if (fadeAlpha >= 1) {
+                    initCity();
+                }
+                return;
+            }
+
+            // Check if all lines complete and trains gone
+            const allLinesDone = lines.every(l => l.isComplete);
+            if (allLinesDone && trains.length === 0) {
+                isFading = true;
+            }
+
+            lines.forEach(l => l.update(0.05));
+            trains.forEach(t => t.update(1));
+            
+            // Remove finished trains
+            trains = trains.filter(t => !t.done);
+        }
+
+        function draw() {
+            // Background
+            ctx.fillStyle = CONFIG.bg;
+            ctx.fillRect(0, 0, width, height);
+
+            // Grid lines (faint)
+            ctx.strokeStyle = '#222';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            for (let x = 0; x < width; x += CONFIG.gridSize) {
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, height);
+            }
+            for (let y = 0; y < height; y += CONFIG.gridSize) {
+                ctx.moveTo(0, y);
+                ctx.lineTo(width, y);
+            }
+            ctx.stroke();
+
+            // Lines
+            lines.forEach(l => l.draw(ctx));
+
+            // Trains
+            trains.forEach(t => t.draw(ctx));
+
+            // Fade
+            if (isFading) {
+                ctx.fillStyle = `rgba(18, 18, 18, ${fadeAlpha})`;
+                ctx.fillRect(0, 0, width, height);
+            }
+        }
+
+        function loop() {
+            update();
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        // Start
+        initCity();
+        loop();
+
+    </script>
+</body>
+</html>

@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width-width=device-width, initial-scale=1.0">
+<title>Hexagonal Fire</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+let W, H;
+const HEX_SIZE = 14;
+const HEX_R = HEX_SIZE;
+const HEX_H = Math.sqrt(3) * HEX_R;
+const COLS = Math.ceil(2000 / HEX_H) + 2;
+const ROWS = Math.ceil(1200 / (1.5 * HEX_SIZE)) + 8;
+
+const grid = new Float32Array(COLS * ROWS);
+const gridTemp = new Float32Array(COLS * ROWS);
+const gridMax = new Float32Array(COLS * ROWS);
+const gridWind = new Float32Array(COLS * ROWS);
+
+const hexCanvas = document.createElement('canvas');
+const hexCtx = hexCanvas.getContext('2d');
+hexCanvas.width = HEX_SIZE * 2 + 4;
+hexCanvas.height = HEX_H + 4;
+
+function hexPoints(cx, cy, r) {
+    const pts = [];
+    for (let i = 0; i < 6; i++) {
+        const angle = Math.PI / 3 * i - Math.PI / 6;
+        pts.push([cx + r * Math.cos(angle), cy + r * Math.sin(angle)]);
+    }
+    return pts;
+}
+
+function drawHexShape(ctx, r) {
+    const cx = r + 2, cy = r + 2;
+    const pts = hexPoints(cx, cy, r);
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < 6; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.closePath();
+}
+
+function updateHexCache() {
+    for (let t = 0; t <= 1; t += 0.003) {
+        const temp = t;
+        let r, g, b;
+        if (temp < 0.2) {
+            r = 10 + temp * 50; g = 0; b = 0;
+        } else if (temp < 0.4) {
+            const s = (temp - 0.2) / 0.2;
+            r = 20 + s * 200; g = s * 60; b = 0;
+        } else if (temp < 0.6) {
+            const s = (temp - 0.4) / 0.2;
+            r = 220; g = 60 + s * 140; b = s * 40;
+        } else if (temp < 0.8) {
+            const s = (temp - 0.6) / 0.2;
+            r = 255; g = 200 + s * 55; b = 40 + s * 180;
+        } else {
+            const s = (temp - 0.8) / 0.2;
+            r = 255; g = 255; b = 220 + s * 35;
+        }
+        const rr = Math.min(255, Math.max(0, r)) | 0;
+        const gg = Math.min(255, Math.max(0, g)) | 0;
+        const bb = Math.min(255, Math.max(0, b)) | 0;
+        const idx = Math.floor(t / 0.003);
+        hexCtx.fillStyle = `rgb(${rr},${gg},${bb})`;
+        hexCtx.strokeStyle = `rgba(${Math.min(255,rr+60)},${Math.min(255,gg+60)},${Math.min(255,bb+60)},0.3)`;
+        hexCtx.lineWidth = 0.5;
+        drawHexShape(hexCtx, HEX_SIZE);
+        hexCtx.fill();
+        hexCtx.stroke();
+    }
+}
+updateHexCache();
+
+// Sparks
+class Spark {
+    constructor(x, y) {
+        this.x = x;
+        this.y = y;
+        this.vx = (Math.random() - 0.5) * 2;
+        this.vy = -Math.random() * 3 - 1.5;
+        this.life = 1;
+        this.decay = 0.008 + Math.random() * 0.015;
+        this.size = 1 + Math.random() * 2;
+    }
+    update(wind) {
+        this.vx += wind * 0.05 + (Math.random() - 0.5) * 0.3;
+        this.vy += -0.03;
+        this.x += this.vx;
+        this.y += this.vy;
+        this.life -= this.decay;
+    }
+}
+
+let sparks = [];
+let time = 0;
+let windAngle = 0;
+let windStrength = 0;
+let targetWindAngle = 0;
+let targetWindStrength = 0;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+function getIdx(c, r) {
+    if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return -1;
+    return r * COLS + c;
+}
+
+function getHexCenter(col, row) {
+    const x = col * HEX_H + (row & 1 ? HEX_H * 0.5 : 0);
+    const y = row * 1.5 * HEX_SIZE;
+    return [x, y];
+}
+
+function initGrid() {
+    grid.fill(0);
+    gridTemp.fill(0);
+    gridMax.fill(0);
+    gridWind.fill(0);
+
+    const baseRow = ROWS - 1;
+    for (let c = 0; c < COLS; c++) {
+        const idx = getIdx(c, baseRow);
+        if (idx >= 0) {
+            grid[idx] = 1.0;
+            gridTemp[idx] = 1.0;
+            gridMax[idx] = 1.0;
+        }
+    }
+
+    for (let c = 0; c < COLS; c++) {
+        const idx = getIdx(c, baseRow - 1);
+        if (idx >= 0) {
+            grid[idx] = 0.95;
+            gridTemp[idx] = 0.95;
+            gridMax[idx] = 0.95;
+        }
+    }
+
+    for (let c = 0; c < COLS; c++) {
+        const idx = getIdx(c, baseRow - 2);
+        if (idx >= 0) {
+            grid[idx] = 0.85 + Math.random() * 0.15;
+            gridTemp[idx] = grid[idx];
+            gridMax[idx] = grid[idx];
+        }
+    }
+}
+
+function updateGrid() {
+    time += 0.016;
+    windAngle += (targetWindAngle - windAngle) * 0.005;
+    windStrength += (targetWindStrength - windStrength) * 0.005;
+
+    if (Math.random() < 0.003) {
+        targetWindAngle = (Math.random() - 0.5) * 3;
+        targetWindStrength = 0.5 + Math.random() * 2;
+    }
+
+    const wind = Math.sin(windAngle + time * 0.5) * windStrength;
+    const flicker = Math.sin(time * 8) * 0.02 + Math.sin(time * 13.7) * 0.015;
+
+    const baseRow = ROWS - 1;
+    const feedRate = 0.98 + flicker * 0.5;
+
+    for (let r = baseRow; r >= 0; r--) {
+        for (let c = 0; c < COLS; c++) {
+            const idx = getIdx(c, r);
+            if (idx < 0) continue;
+
+            const neighbors = [];
+            const isOdd = r & 1;
+            const offsets = isOdd
+                ? [[-1,-1],[0,-1],[-1,0],[1,0],[-1,1],[0,1]]
+                : [[0,-1],[1,-1],[-1,0],[1,0],[0,1],[1,1]];
+
+            for (let i = 0; i < 6; i++) {
+                const nc = c + offsets[i][0];
+                const nr = r + offsets[i][1];
+                const nIdx = getIdx(nc, nr);
+                if (nIdx >= 0) neighbors.push([nIdx, offsets[i]]);
+            }
+
+            let heatSum = 0;
+            let heatCount = 0;
+            let windSum = 0;
+
+            for (let i = 0; i < neighbors.length; i++) {
+                const [nIdx, off] = neighbors[i];
+                heatSum += grid[nIdx];
+                heatCount++;
+                if (off[1] === -1) windSum += wind;
+            }
+
+            const avgHeat = heatCount > 0 ? heatSum / heatCount : 0;
+            const avgWind = heatCount > 0 ? windSum / heatCount : 0;
+
+            let newTemp = grid[idx] * 0.96;
+            newTemp += avgHeat * 0.04;
+
+            if (r === baseRow) {
+                grid[idx] = Math.min(1, feedRate + Math.random() * 0.05);
+                gridTemp[idx] = grid[idx];
+                gridMax[idx] = 1.0;
+                continue;
+            }
+
+            grid[idx] = Math.min(1, Math.max(0, newTemp));
+            gridTemp[idx] = grid[idx];
+            gridMax[idx] = Math.max(gridMax[idx], grid[idx]);
+
+            gridWind[idx] = avgWind;
+
+            if (grid[idx] > 0.6 && Math.random() < 0.002) {
+                const [hx, hy] = getHexCenter(c, r);
+                sparks.push(new Spark(hx, hy));
+            }
+        }
+    }
+
+    for (let i = sparks.length - 1; i >= 0; i--) {
+        sparks[i].update(wind);
+        if (sparks[i].life <= 0) sparks.splice(i, 1);
+    }
+}
+
+function render() {
+    ctx.fillStyle = '#050000';
+    ctx.fillRect(0, 0, W, H);
+
+    const offsetX = (W - COLS * HEX_H) * 0.5;
+    const offsetY = 30;
+
+    // Draw hex grid
+    for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+            const idx = getIdx(c, r);
+            if (idx < 0) continue;
+            const temp = grid[idx];
+            if (temp < 0.01) continue;
+
+            const [hx, hy] = getHexCenter(c, r);
+            const sx = hx + offsetX;
+            const sy = hy + offsetY;
+
+            if (sx < -HEX_SIZE * 2 || sx > W + HEX_SIZE * 2 || sy < -HEX_SIZE * 2 || sy > H + HEX_SIZE * 2) continue;
+
+            const t = Math.min(1, temp);
+            const cacheIdx = Math.min(Math.floor(t / 0.003), 332);
+            const flickerOffset = Math.sin(time * 10 + c * 0.5 + r * 0.3) * 0.03;
+            const drawIdx = Math.max(0, Math.min(332, cacheIdx + Math.floor(flickerOffset / 0.003)));
+
+            ctx.drawImage(hexCanvas, drawIdx * (HEX_SIZE + 2), 0, HEX_SIZE * 2 + 4, HEX_H + 4, sx - HEX_SIZE - 2, sy - HEX_H * 0.5 - 2, HEX_SIZE * 2 + 4, HEX_H + 4);
+
+            if (temp > 0.3) {
+                const glowAlpha = (temp - 0.3) * 0.15;
+                const grad = ctx.createRadialGradient(sx, sy, 0, sx, sy, HEX_SIZE * 1.5);
+                grad.addColorStop(0, `rgba(255,100,0,${glowAlpha})`);
+                grad.addColorStop(1, 'rgba(255,50,0,0)');
+                ctx.fillStyle = grad;
+                ctx.fillRect(sx - HEX_SIZE * 2, sy - HEX_SIZE * 2, HEX_SIZE * 4, HEX_SIZE * 4);
+            }
+        }
+    }
+
+    // Draw sparks
+    for (let i = 0; i < sparks.length; i++) {
+        const s = sparks[i];
+        const sx = s.x + offsetX;
+        const sy = s.y + offsetY;
+        const alpha = s.life;
+        const size = s.size * s.life;
+        const temp = s.life;
+
+        let sr, sg, sb;
+        if (temp > 0.7) { sr = 255; sg = 255; sb = 200; }
+        else if (temp > 0.4) { sr = 255; sg = 200; sb = 50; }
+        else { sr = 255; sg = 100; sb = 20; }
+
+        ctx.beginPath();
+        ctx.arc(sx, sy, size, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${sr},${sg},${sb},${alpha})`;
+        ctx.fill();
+
+        if (size > 1) {
+            const grad = ctx.createRadialGradient(sx, sy, 0, sx, sy, size * 3);
+            grad.addColorStop(0, `rgba(${sr},${sg},${sb},${alpha * 0.5})`);
+            grad.addColorStop(1, `rgba(${sr},${sg},${sb},0)`);
+            ctx.fillStyle = grad;
+            ctx.fillRect(sx - size * 3, sy - size * 3, size * 6, size * 6);
+        }
+    }
+}
+
+function loop() {
+    updateGrid();
+    render();
+    requestAnimationFrame(loop);
+}
+
+initGrid();
+loop();
+</script>
+</body>
+</html>

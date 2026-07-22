@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width=device-width, initial-scale=1.0">
+    <title>Lightning Storm</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #050505;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="stormCanvas"></canvas>
+    <script>
+        const canvas = document.getElementById('stormCanvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let stars = [];
+        let clouds = [];
+        let rain = [];
+        let lightningBolts = [];
+        let flashIntensity = 0;
+        let flashColor = { r: 255, g: 255, b: 255 };
+        let lastTime = 0;
+        let stormWaves = [];
+        let stormWaveTimer = 0;
+        let currentStormWave = { frequency: 0, duration: 0, time: 0, active: false };
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            initStars();
+            initClouds();
+            initRain();
+        }
+
+        function initStars() {
+            stars = [];
+            for (let i = 0; i < 200; i++) {
+                stars.push({
+                    x: Math.random() * width,
+                    y: Math.random() * height * 0.6,
+                    size: Math.random() * 1.5,
+                    alpha: Math.random() * 0.8 + 0.2
+                });
+            }
+        }
+
+        function initClouds() {
+            clouds = [];
+            const cloudLayers = 3;
+            for (let i = 0; i < cloudLayers; i++) {
+                const count = 4 + i * 2;
+                for (let j = 0; j < count; j++) {
+                    clouds.push({
+                        x: Math.random() * width * 1.5 - width * 0.25,
+                        y: height * 0.1 + i * height * 0.15 + Math.random() * 50,
+                        width: 200 + Math.random() * 300,
+                        height: 40 + Math.random() * 60,
+                        speed: 0.2 + Math.random() * 0.3,
+                        opacity: 0.3 + Math.random() * 0.4,
+                        layer: i,
+                        segments: generateCloudShape(10 + Math.random() * 10)
+                    });
+                }
+            }
+            // Sort by layer for proper rendering
+            clouds.sort((a, b) => a.layer - b.layer);
+        }
+
+        function generateCloudShape(numSegments) {
+            const segments = [];
+            for (let i = 0; i < numSegments; i++) {
+                segments.push({
+                    offsetX: (i / numSegments) * 2 - 1,
+                    offsetY: Math.random() * 0.5 - 0.25,
+                    size: 0.3 + Math.random() * 0.4
+                });
+            }
+            return segments;
+        }
+
+        function initRain() {
+            rain = [];
+            for (let i = 0; i < 300; i++) {
+                rain.push({
+                    x: Math.random() * width,
+                    y: Math.random() * height,
+                    length: 10 + Math.random() * 20,
+                    speed: 15 + Math.random() * 10,
+                    opacity: 0.1 + Math.random() * 0.3
+                });
+            }
+        }
+
+        function generateLightningBolt(x, y, endX, endY, depth, maxDepth) {
+            if (depth >= maxDepth) {
+                return [{ x: x, y: y }];
+            }
+
+            const midX = (x + endX) / 2;
+            const midY = (y + endY) / 2;
+            const displacement = (Math.random() - 0.5) * 100 * Math.pow(0.5, depth);
+
+            const newMidX = midX + displacement;
+            const newMidY = midY + displacement * 0.5;
+
+            const leftBolt = generateLightningBolt(x, y, newMidX, newMidY, depth + 1, maxDepth);
+            const rightBolt = generateLightningBolt(newMidX, newMidY, endX, endY, depth + 1, maxDepth);
+
+            // Branching
+            if (Math.random() < 0.3 && depth < maxDepth - 1) {
+                const branchEndX = endX + (Math.random() - 0.5) * 200;
+                const branchEndY = endY + Math.random() * 100;
+                const branchBolt = generateLightningBolt(newMidX, newMidY, branchEndX, branchEndY, depth + 1, maxDepth);
+                return [...leftBolt, { x: newMidX, y: newMidY }, ...rightBolt, ...branchBolt];
+            }
+
+            return [...leftBolt, { x: newMidX, y: newMidY }, ...rightBolt];
+        }
+
+        function createLightningBolt() {
+            const startX = Math.random() * width;
+            const startY = height * 0.2 + Math.random() * height * 0.3;
+            const endX = startX + (Math.random() - 0.5) * 200;
+            const endY = height * 0.6 + Math.random() * height * 0.4;
+
+            const bolt = {
+                points: generateLightningBolt(startX, startY, endX, endY, 0, 4),
+                life: 1.0,
+                decay: 0.02 + Math.random() * 0.03,
+                branches: []
+            };
+
+            // Add secondary branches
+            if (Math.random() < 0.5) {
+                const branchStart = bolt.points[Math.floor(Math.random() * bolt.points.length)];
+                const branchEndX = branchStart.x + (Math.random() - 0.5) * 300;
+                const branchEndY = branchStart.y + Math.random() * 200;
+                bolt.branches = generateLightningBolt(branchStart.x, branchStart.y, branchEndX, branchEndY, 0, 3);
+            }
+
+            lightningBolts.push(bolt);
+            flashIntensity = 0.8 + Math.random() * 0.2;
+            flashColor = {
+                r: 200 + Math.random() * 55,
+                g: 200 + Math.random() * 55,
+                b: 255
+            };
+        }
+
+        function updateStormWaves(deltaTime) {
+            stormWaveTimer += deltaTime;
+
+            if (!currentStormWave.active) {
+                if (stormWaveTimer > 2 + Math.random() * 3) {
+                    currentStormWave = {
+                        frequency: 0.5 + Math.random() * 2,
+                        duration: 5 + Math.random() * 10,
+                        time: 0,
+                        active: true
+                    };
+                    stormWaveTimer = 0;
+                }
+            } else {
+                currentStormWave.time += deltaTime;
+                if (currentStormWave.time > currentStormWave.duration) {
+                    currentStormWave.active = false;
+                }
+            }
+
+            // Generate lightning based on wave
+            if (currentStormWave.active) {
+                const interval = 1 / currentStormWave.frequency;
+                if (Math.random() < deltaTime / interval) {
+                    createLightningBolt();
+                }
+            } else {
+                // Occasional lightning outside waves
+                if (Math.random() < deltaTime * 0.05) {
+                    createLightningBolt();
+                }
+            }
+        }
+
+        function updateClouds(deltaTime) {
+            clouds.forEach(cloud => {
+                cloud.x += cloud.speed * deltaTime * 10;
+                if (cloud.x > width + cloud.width) {
+                    cloud.x = -cloud.width;
+                }
+            });
+        }
+
+        function updateRain(deltaTime) {
+            rain.forEach(drop => {
+                drop.y += drop.speed * deltaTime * 60;
+                drop.x -= 2 * deltaTime * 60; // Wind effect
+
+                if (drop.y > height) {
+                    drop.y = -drop.length;
+                    drop.x = Math.random() * width;
+                }
+                if (drop.x < -drop.length) {
+                    drop.x = width + drop.length;
+                }
+            });
+        }
+
+        function updateLightningBolts(deltaTime) {
+            lightningBolts = lightningBolts.filter(bolt => {
+                bolt.life -= bolt.decay;
+                return bolt.life > 0;
+            });
+
+            if (flashIntensity > 0) {
+                flashIntensity -= deltaTime * 2;
+                if (flashIntensity < 0) flashIntensity = 0;
+            }
+        }
+
+        function drawBackground() {
+            // Sky gradient
+            const gradient = ctx.createLinearGradient(0, 0, 0, height);
+            const flash = flashIntensity;
+            
+            if (flash > 0) {
+                gradient.addColorStop(0, `rgb(${30 + flash * 100}, ${30 + flash * 100}, ${50 + flash * 100})`);
+                gradient.addColorStop(0.6, `rgb(${20 + flash * 80}, ${20 + flash * 80}, ${30 + flash * 80})`);
+                gradient.addColorStop(1, `rgb(${10 + flash * 40}, ${15 + flash * 40}, ${10 + flash * 40})`);
+            } else {
+                gradient.addColorStop(0, '#1a1a2e');
+                gradient.addColorStop(0.6, '#16213e');
+                gradient.addColorStop(1, '#0f3460');
+            }
+
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, width, height);
+
+            // Stars
+            stars.forEach(star => {
+                const twinkle = Math.sin(Date.now() * 0.001 + star.x) * 0.3 + 0.7;
+                ctx.fillStyle = `rgba(255, 255, 255, ${star.alpha * twinkle})`;
+                ctx.beginPath();
+                ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        function drawClouds() {
+            clouds.forEach(cloud => {
+                const flash = flashIntensity;
+                ctx.save();
+                
+                // Draw cloud shape
+                ctx.fillStyle = `rgba(${20 + flash * 150}, ${20 + flash * 150}, ${30 + flash * 150}, ${cloud.opacity})`;
+                
+                cloud.segments.forEach(segment => {
+                    const cx = cloud.x + segment.offsetX * cloud.width;
+                    const cy = cloud.y + segment.offsetY * cloud.height;
+                    const size = segment.size * cloud.height;
+                    
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, size, 0, Math.PI * 2);
+                    ctx.fill();
+                });
+
+                // Sheet lightning inside clouds
+                if (flash > 0.3) {
+                    ctx.fillStyle = `rgba(200, 200, 255, ${flash * 0.3})`;
+                    ctx.fillRect(cloud.x, cloud.y - 20, cloud.width, cloud.height + 40);
+                }
+
+                ctx.restore();
+            });
+        }
+
+        function drawGround() {
+            const flash = flashIntensity;
+            
+            // Rolling hills
+            ctx.fillStyle = flash > 0 
+                ? `rgb(${15 + flash * 80}, ${20 + flash * 80}, ${15 + flash * 80})` 
+                : '#0a1f0a';
+            
+            ctx.beginPath();
+            ctx.moveTo(0, height * 0.7);
+            
+            for (let x = 0; x <= width; x += 10) {
+                const hillY = height * 0.7 + Math.sin(x * 0.01) * 30 + Math.sin(x * 0.03) * 15;
+                ctx.lineTo(x, hillY);
+            }
+            
+            ctx.lineTo(width, height);
+            ctx.lineTo(0, height);
+            ctx.closePath();
+            ctx.fill();
+
+            // Second hill layer
+            ctx.fillStyle = flash > 0 
+                ? `rgb(${10 + flash * 60}, ${15 + flash * 60}, ${10 + flash * 60})` 
+                : '#051005';
+            
+            ctx.beginPath();
+            ctx.moveTo(0, height * 0.8);
+            
+            for (let x = 0; x <= width; x += 10) {
+                const hillY = height * 0.8 + Math.sin(x * 0.02 + 1) * 20 + Math.sin(x * 0.05) * 10;
+                ctx.lineTo(x, hillY);
+            }
+            
+            ctx.lineTo(width, height);
+            ctx.lineTo(0, height);
+            ctx.closePath();
+            ctx.fill();
+        }
+
+        function drawFarmhouse() {
+            const flash = flashIntensity;
+            const houseX = width * 0.3;
+            const houseY = height * 0.75;
+            
+            // House body
+            ctx.fillStyle = flash > 0 
+                ? `rgb(${30 + flash * 100}, ${25 + flash * 80}, ${20 + flash * 60})` 
+                : '#2a1f1a';
+            ctx.fillRect(houseX, houseY, 60, 40);
+            
+            // Roof
+            ctx.fillStyle = flash > 0 
+                ? `rgb(${40 + flash * 120}, ${30 + flash * 90}, ${25 + flash * 70})` 
+                : '#3a2a22';
+            ctx.beginPath();
+            ctx.moveTo(houseX - 10, houseY);
+            ctx.lineTo(houseX + 30, houseY - 30);
+            ctx.lineTo(houseX + 70, houseY);
+            ctx.closePath();
+            ctx.fill();
+            
+            // Window (lit)
+            const windowGlow = 0.7 + Math.sin(Date.now() * 0.003) * 0.2;
+            ctx.fillStyle = flash > 0 
+                ? `rgba(255, 200, 100, ${windowGlow + flash * 0.5})` 
+                : `rgba(255, 200, 100, ${windowGlow})`;
+            ctx.fillRect(houseX + 20, houseY + 10, 20, 20);
+            
+            // Window frame
+            ctx.strokeStyle = flash > 0 
+                ? `rgb(${50 + flash * 100}, ${40 + flash * 80}, ${30 + flash * 60})` 
+                : '#4a3a32';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(houseX + 20, houseY + 10, 20, 20);
+            ctx.beginPath();
+            ctx.moveTo(houseX + 30, houseY + 10);
+            ctx.lineTo(houseX + 30, houseY + 30);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(houseX + 20, houseY + 20);
+            ctx.lineTo(houseX + 40, houseY + 20);
+            ctx.stroke();
+            
+            // Door
+            ctx.fillStyle = flash > 0 
+                ? `rgb(${35 + flash * 90}, ${28 + flash * 70}, ${22 + flash * 50})` 
+                : '#3a2a22';
+            ctx.fillRect(houseX + 5, houseY + 20, 15, 20);
+        }
+
+        function drawLightningBolts() {
+            lightningBolts.forEach(bolt => {
+                const alpha = bolt.life;
+                
+                // Main bolt
+                if (bolt.points.length > 1) {
+                    ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
+                    ctx.lineWidth = 2;
+                    ctx.shadowColor = `rgba(200, 200, 255, ${alpha})`;
+                    ctx.shadowBlur = 20;
+                    
+                    ctx.beginPath();
+                    ctx.moveTo(bolt.points[0].x, bolt.points[0].y);
+                    for (let i = 1; i < bolt.points.length; i++) {
+                        ctx.lineTo(bolt.points[i].x, bolt.points[i].y);
+                    }
+                    ctx.stroke();
+                    
+                    // Inner bright core
+                    ctx.strokeStyle = `rgba(255, 255, 255, ${alpha * 0.8})`;
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.moveTo(bolt.points[0].x, bolt.points[0].y);
+                    for (let i = 1; i < bolt.points.length; i++) {
+                        ctx.lineTo(bolt.points[i].x, bolt.points[i].y);
+                    }
+                    ctx.stroke();
+                }
+                
+                // Branches
+                if (bolt.branches && bolt.branches.length > 1) {
+                    ctx.strokeStyle = `rgba(255, 255, 255, ${alpha * 0.6})`;
+                    ctx.lineWidth = 1;
+                    ctx.shadowBlur = 15;
+                    
+                    ctx.beginPath();
+                    ctx.moveTo(bolt.branches[0].x, bolt.branches[0].y);
+                    for (let i = 1; i < bolt.branches.length; i++) {
+                        ctx.lineTo(bolt.branches[i].x, bolt.branches[i].y);
+                    }
+                    ctx.stroke();
+                }
+                
+                ctx.shadowBlur = 0;
+            });
+        }
+
+        function drawRain() {
+            const flash = flashIntensity;
+            
+            rain.forEach(drop => {
+                const opacity = drop.opacity * (0.5 + flash * 0.5);
+                ctx.strokeStyle = `rgba(150, 180, 255, ${opacity})`;
+                ctx.lineWidth = 1;
+                
+                ctx.beginPath();
+                ctx.moveTo(drop.x, drop.y);
+                ctx.lineTo(drop.x + 2, drop.y + drop.length);
+                ctx.stroke();
+            });
+        }
+
+        function drawFlash() {
+            if (flashIntensity > 0) {
+                ctx.fillStyle = `rgba(${flashColor.r}, ${flashColor.g}, ${flashColor.b}, ${flashIntensity * 0.3})`;
+                ctx.fillRect(0, 0, width, height);
+            }
+        }
+
+        function animate(timestamp) {
+            const deltaTime = Math.min((timestamp - lastTime) / 1000, 0.1); // Cap delta time
+            lastTime = timestamp;
+
+            // Clear canvas
+            ctx.clearRect(0, 0, width, height);
+
+            // Update
+            updateStormWaves(deltaTime);
+            updateClouds(deltaTime);
+            updateRain(deltaTime);
+            updateLightningBolts(deltaTime);
+
+            // Draw
+            drawBackground();
+            drawClouds();
+            drawGround();
+            drawFarmhouse();
+            drawLightningBolts();
+            drawRain();
+            drawFlash();
+
+            requestAnimationFrame(animate);
+        }
+
+        // Initialize
+        window.addEventListener('resize', resize);
+        resize();
+        requestAnimationFrame(animate);
+    </script>
+</body>
+</html>

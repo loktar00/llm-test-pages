@@ -1,0 +1,794 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Asteroid Miners</title>
+<style>
+  body, html { margin: 0; padding: 0; overflow: hidden; background: #050505; width: 100%; height: 100%; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<script>
+/**
+ * ASTEROID MINERS
+ * A fully autonomous space mining simulation.
+ */
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// --- Configuration ---
+const CONFIG = {
+  stationRadius: 60,
+  stationColor: '#4a90e2',
+  shipCount: 5,
+  shipSpeed: 2.5,
+  miningDamage: 0.5,
+  asteroidMaxHealth: 100,
+  pirateSpawnRate: 0.002,
+  oreValue: 10,
+  escortRange: 600,
+  escortFireRate: 20
+};
+
+// --- Globals ---
+let width, height;
+let camera = { x: 0, y: 0, targetX: 0, targetY: 0 };
+let gameTime = 0;
+let entities = {
+  stars: [],
+  station: null,
+  ships: [],
+  asteroids: [],
+  ore: [],
+  pirates: [],
+  escorts: [],
+  particles: [],
+  lasers: []
+};
+
+// --- Math Helpers ---
+const Vec2 = {
+  add: (v1, v2) => ({ x: v1.x + v2.x, y: v1.y + v2.y }),
+  sub: (v1, v2) => ({ x: v1.x - v2.x, y: v1.y - v2.y }),
+  mult: (v, s) => ({ x: v.x * s, y: v.y * s }),
+  mag: (v) => Math.sqrt(v.x * v.x + v.y * v.y),
+  norm: (v) => {
+    const m = Math.sqrt(v.x * v.x + v.y * v.y);
+    return m === 0 ? { x: 0, y: 0 } : { x: v.x / m, y: v.y / m };
+  },
+  dist: (v1, v2) => Math.sqrt((v1.x - v2.x) ** 2 + (v1.y - v2.y) ** 2),
+  angle: (v1, v2) => Math.atan2(v2.y - v1.y, v2.x - v1.x)
+};
+
+// --- Classes ---
+
+class Particle {
+  constructor(x, y, color, speed, life) {
+    this.x = x;
+    this.y = y;
+    this.color = color;
+    const angle = Math.random() * Math.PI * 2;
+    this.vx = Math.cos(angle) * speed * Math.random();
+    this.vy = Math.sin(angle) * speed * Math.random();
+    this.life = life;
+    this.maxLife = life;
+    this.size = Math.random() * 2 + 1;
+  }
+
+  update() {
+    this.x += this.vx;
+    this.y += this.vy;
+    this.life--;
+    return this.life > 0;
+  }
+
+  draw(ctx) {
+    ctx.globalAlpha = this.life / this.maxLife;
+    ctx.fillStyle = this.color;
+    ctx.fillRect(this.x, this.y, this.size, this.size);
+    ctx.globalAlpha = 1;
+  }
+}
+
+class Laser {
+  constructor(x, y, target, color, speed = 15) {
+    this.x = x;
+    this.y = y;
+    this.target = target;
+    this.color = color;
+    this.speed = speed;
+    this.active = true;
+    this.damage = 10;
+  }
+
+  update() {
+    if (!this.target || !this.target.active) {
+      this.active = false;
+      return;
+    }
+    const dir = Vec2.norm(Vec2.sub(this.target, {x: this.x, y: this.y}));
+    this.x += dir.x * this.speed;
+    this.y += dir.y * this.speed;
+
+    if (Vec2.dist({x: this.x, y: this.y}, this.target) < 10) {
+      this.target.takeDamage(this.damage);
+      this.active = false;
+      // Impact particles
+      for(let i=0; i<3; i++) {
+        entities.particles.push(new Particle(this.x, this.y, this.color, 2, 10));
+      }
+    }
+  }
+
+  draw(ctx) {
+    ctx.beginPath();
+    ctx.strokeStyle = this.color;
+    ctx.lineWidth = 2;
+    ctx.moveTo(this.x, this.y);
+    ctx.lineTo(this.x - (Vec2.norm(Vec2.sub(this.target, {x: this.x, y: this.y})).x * 10), 
+               this.y - (Vec2.norm(Vec2.sub(this.target, {x: this.x, y: this.y})).y * 10));
+    ctx.stroke();
+  }
+}
+
+class Asteroid {
+  constructor(x, y, radius) {
+    this.x = x;
+    this.y = y;
+    this.radius = radius;
+    this.vx = (Math.random() - 0.5) * 0.2;
+    this.vy = (Math.random() - 0.5) * 0.2;
+    this.health = CONFIG.asteroidMaxHealth * (radius / 20);
+    this.maxHealth = this.health;
+    this.rotation = Math.random() * Math.PI * 2;
+    this.rotSpeed = (Math.random() - 0.5) * 0.02;
+    this.active = true;
+    
+    // Generate jagged shape
+    this.points = [];
+    const segments = 8 + Math.floor(Math.random() * 5);
+    for (let i = 0; i < segments; i++) {
+      const angle = (i / segments) * Math.PI * 2;
+      const r = this.radius * (0.8 + Math.random() * 0.4);
+      this.points.push({ x: Math.cos(angle) * r, y: Math.sin(angle) * r });
+    }
+  }
+
+  update() {
+    this.x += this.vx;
+    this.y += this.vy;
+    this.rotation += this.rotSpeed;
+    
+    // Keep in bounds roughly
+    if (this.x < -2000) this.vx += 0.01;
+    if (this.x > 2000) this.vx -= 0.01;
+    if (this.y < -2000) this.vy += 0.01;
+    if (this.y > 2000) this.vy -= 0.01;
+  }
+
+  takeDamage(amount) {
+    this.health -= amount;
+    if (this.health <= 0) {
+      this.explode();
+    }
+  }
+
+  explode() {
+    this.active = false;
+    // Spawn debris particles
+    for(let i=0; i<8; i++) {
+      entities.particles.push(new Particle(this.x, this.y, '#888', 3, 30));
+    }
+    
+    // Spawn Ore
+    if (Math.random() > 0.3) {
+      entities.ore.push({
+        x: this.x, y: this.y, 
+        vx: this.vx, vy: this.vy,
+        value: Math.floor(this.radius * 2),
+        active: true
+      });
+    }
+
+    // Split into smaller asteroids
+    if (this.radius > 15) {
+      const count = 2 + Math.floor(Math.random() * 2);
+      for(let i=0; i<count; i++) {
+        entities.asteroids.push(new Asteroid(this.x, this.y, this.radius * 0.6));
+      }
+    }
+  }
+
+  draw(ctx) {
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.rotation);
+    ctx.fillStyle = '#555';
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    this.points.forEach((p, i) => {
+      if (i === 0) ctx.moveTo(p.x, p.y);
+      else ctx.lineTo(p.x, p.y);
+    });
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    
+    // Health bar
+    if (this.health < this.maxHealth) {
+      ctx.rotate(-this.rotation); // Reset rotation for UI
+      ctx.fillStyle = 'red';
+      ctx.fillRect(-10, -this.radius - 10, 20 * (this.health/this.maxHealth), 3);
+    }
+    ctx.restore();
+  }
+}
+
+class Ship {
+  constructor(x, y, type) {
+    this.x = x;
+    this.y = y;
+    this.type = type; // 'hauler' or 'escort'
+    this.vx = 0;
+    this.vy = 0;
+    this.angle = 0;
+    this.cargo = 0;
+    this.maxCargo = 100;
+    this.active = true;
+    this.target = null;
+    this.state = 'IDLE'; // IDLE, MOVE_TO_ASTEROID, MINE, MOVE_TO_STATION, DOCK
+    this.beamActive = false;
+    this.tractorActive = false;
+    this.fireTimer = 0;
+    this.radius = type === 'hauler' ? 12 : 8;
+  }
+
+  update() {
+    const station = entities.station;
+    
+    if (this.type === 'escort') {
+      this.updateEscort(station);
+    } else {
+      this.updateHauler(station);
+    }
+
+    // Physics
+    this.x += this.vx;
+    this.y += this.vy;
+    
+    // Friction
+    this.vx *= 0.95;
+    this.vy *= 0.95;
+
+    // Rotation smoothing
+    const currentAngle = Math.atan2(this.vy, this.vx);
+    let diff = currentAngle - this.angle;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    this.angle += diff * 0.1;
+  }
+
+  updateHauler(station) {
+    // State Machine
+    if (this.state === 'IDLE') {
+      if (this.cargo >= this.maxCargo) {
+        this.state = 'MOVE_TO_STATION';
+        this.target = station;
+      } else {
+        // Find nearest asteroid
+        let nearest = null;
+        let minDist = Infinity;
+        entities.asteroids.forEach(a => {
+          const d = Vec2.dist(this, a);
+          if (d < minDist) { minDist = d; nearest = a; }
+        });
+        if (nearest) {
+          this.state = 'MOVE_TO_ASTEROID';
+          this.target = nearest;
+        }
+      }
+    } 
+    else if (this.state === 'MOVE_TO_ASTEROID') {
+      if (!this.target || !this.target.active) {
+        this.state = 'IDLE';
+        return;
+      }
+      const d = Vec2.dist(this, this.target);
+      if (d < 40) {
+        this.state = 'MINE';
+      } else {
+        this.steerTo(this.target);
+      }
+    } 
+    else if (this.state === 'MINE') {
+      if (!this.target || !this.target.active) {
+        this.state = 'IDLE';
+        this.beamActive = false;
+        return;
+      }
+      
+      // Check for ore to tractor
+      let nearestOre = null;
+      let minODist = Infinity;
+      entities.ore.forEach(o => {
+        const d = Vec2.dist(this, o);
+        if (d < 60 && d < minODist) { minODist = d; nearestOre = o; }
+      });
+
+      if (nearestOre) {
+        this.tractorActive = true;
+        // Move ore towards ship
+        const dir = Vec2.norm(Vec2.sub(this, nearestOre));
+        nearestOre.x += dir.x * 2;
+        nearestOre.y += dir.y * 2;
+        
+        if (Vec2.dist(this, nearestOre) < 15) {
+          this.cargo += nearestOre.value;
+          nearestOre.active = false;
+          this.tractorActive = false;
+        }
+      } else {
+        this.tractorActive = false;
+        // Mine asteroid
+        if (Vec2.dist(this, this.target) < 40) {
+          this.beamActive = true;
+          this.target.takeDamage(CONFIG.miningDamage);
+          // Visuals
+          entities.particles.push(new Particle(
+            this.target.x + (Math.random()-0.5)*20, 
+            this.target.y + (Math.random()-0.5)*20, 
+            '#ffaa00', 1, 10
+          ));
+        } else {
+          this.beamActive = false;
+          this.state = 'MOVE_TO_ASTEROID';
+        }
+      }
+    } 
+    else if (this.state === 'MOVE_TO_STATION') {
+      const d = Vec2.dist(this, station);
+      if (d < CONFIG.stationRadius + 20) {
+        this.state = 'DOCK';
+      } else {
+        this.steerTo(station);
+      }
+    } 
+    else if (this.state === 'DOCK') {
+      this.vx *= 0.9;
+      this.vy *= 0.9;
+      if (this.cargo > 0) {
+        this.cargo -= 1;
+        entities.station.credits += 1;
+        // Sparkles at station
+        entities.particles.push(new Particle(this.x, this.y, '#0f0', 1, 20));
+      } else {
+        this.state = 'IDLE';
+      }
+    }
+  }
+
+  updateEscort(station) {
+    // Look for pirates
+    let nearestPirate = null;
+    let minDist = Infinity;
+    
+    entities.pirates.forEach(p => {
+      const d = Vec2.dist(this, p);
+      if (d < CONFIG.escortRange && d < minDist) {
+        minDist = d;
+        nearestPirate = p;
+      }
+    });
+
+    if (nearestPirate) {
+      this.target = nearestPirate;
+      const d = Vec2.dist(this, this.target);
+      
+      // Orbit/Intercept
+      if (d > 150) {
+        this.steerTo(this.target, 4); // Faster
+      } else {
+        // Strafe
+        const angle = Vec2.angle(this, this.target) + Math.PI/2;
+        this.vx += Math.cos(angle) * 0.1;
+        this.vy += Math.sin(angle) * 0.1;
+      }
+
+      // Fire
+      this.fireTimer++;
+      if (this.fireTimer > CONFIG.escortFireRate) {
+        entities.lasers.push(new Laser(this.x, this.y, this.target, '#00ffff', 10));
+        this.fireTimer = 0;
+      }
+    } else {
+      // Patrol around station
+      const angle = (gameTime * 0.01) + (this.x * 0.1); // Unique offset
+      const patrolX = station.x + Math.cos(angle) * 100;
+      const patrolY = station.y + Math.sin(angle) * 100;
+      this.steerTo({x: patrolX, y: patrolY}, 2);
+    }
+  }
+
+  steerTo(target, speedMult = 1) {
+    const dir = Vec2.norm(Vec2.sub(target, this));
+    const speed = CONFIG.shipSpeed * speedMult;
+    this.vx += dir.x * 0.1;
+    this.vy += dir.y * 0.1;
+    
+    // Cap speed
+    const currentSpeed = Vec2.mag({x: this.vx, y: this.vy});
+    if (currentSpeed > speed) {
+      const norm = Vec2.norm({x: this.vx, y: this.vy});
+      this.vx = norm.x * speed;
+      this.vy = norm.y * speed;
+    }
+  }
+
+  takeDamage(amount) {
+    // Ships don't die in this sim, just flash
+    this.flashTimer = 5;
+  }
+
+  draw(ctx) {
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.angle);
+
+    // Draw Beam
+    if (this.beamActive) {
+      ctx.beginPath();
+      ctx.strokeStyle = 'rgba(255, 100, 0, 0.5)';
+      ctx.lineWidth = 4;
+      ctx.moveTo(10, 0);
+      ctx.lineTo(40, 0); // Towards asteroid
+      ctx.stroke();
+    }
+    if (this.tractorActive) {
+      ctx.beginPath();
+      ctx.strokeStyle = 'rgba(0, 255, 255, 0.5)';
+      ctx.lineWidth = 2;
+      ctx.moveTo(10, 0);
+      ctx.lineTo(60, 0);
+      ctx.stroke();
+    }
+
+    // Draw Ship Body
+    ctx.fillStyle = this.type === 'hauler' ? '#ddd' : '#00ffff';
+    if (this.flashTimer > 0) {
+      ctx.fillStyle = '#fff';
+      this.flashTimer--;
+    }
+    
+    ctx.beginPath();
+    if (this.type === 'hauler') {
+      ctx.moveTo(12, 0);
+      ctx.lineTo(-8, 8);
+      ctx.lineTo(-5, 0);
+      ctx.lineTo(-8, -8);
+    } else {
+      // Escort drone shape
+      ctx.moveTo(10, 0);
+      ctx.lineTo(-5, 5);
+      ctx.lineTo(-5, -5);
+    }
+    ctx.closePath();
+    ctx.fill();
+
+    // Engine glow
+    ctx.fillStyle = '#f00';
+    ctx.beginPath();
+    ctx.arc(-8, 0, 3, 0, Math.PI*2);
+    ctx.fill();
+
+    ctx.restore();
+  }
+}
+
+class Pirate {
+  constructor(x, y) {
+    this.x = x;
+    this.y = y;
+    this.vx = 0;
+    this.vy = 0;
+    this.angle = 0;
+    this.health = 50;
+    this.active = true;
+    this.target = null;
+  }
+
+  update() {
+    // Target nearest hauler or station
+    let nearest = null;
+    let minDist = Infinity;
+    
+    // Prioritize haulers with cargo
+    entities.ships.forEach(s => {
+      if (s.type === 'hauler' && s.cargo > 0) {
+        const d = Vec2.dist(this, s);
+        if (d < minDist) { minDist = d; nearest = s; }
+      }
+    });
+    
+    // Fallback to station
+    if (!nearest) nearest = entities.station;
+
+    this.target = nearest;
+    this.steerTo(nearest);
+
+    this.x += this.vx;
+    this.y += this.vy;
+    
+    const currentAngle = Math.atan2(this.vy, this.vx);
+    let diff = currentAngle - this.angle;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    this.angle += diff * 0.1;
+  }
+
+  steerTo(target) {
+    const dir = Vec2.norm(Vec2.sub(target, this));
+    this.vx += dir.x * 0.05;
+    this.vy += dir.y * 0.05;
+    const speed = Vec2.mag({x: this.vx, y: this.vy});
+    if (speed > 2) {
+      const norm = Vec2.norm({x: this.vx, y: this.vy});
+      this.vx = norm.x * 2;
+      this.vy = norm.y * 2;
+    }
+  }
+
+  takeDamage(amount) {
+    this.health -= amount;
+    if (this.health <= 0) {
+      this.active = false;
+      // Explosion
+      for(let i=0; i<10; i++) {
+        entities.particles.push(new Particle(this.x, this.y, '#f00', 4, 30));
+      }
+    }
+  }
+
+  draw(ctx) {
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.angle);
+    
+    ctx.fillStyle = '#a00';
+    ctx.beginPath();
+    ctx.moveTo(12, 0);
+    ctx.lineTo(-6, 10);
+    ctx.lineTo(-4, 0);
+    ctx.lineTo(-6, -10);
+    ctx.closePath();
+    ctx.fill();
+    
+    ctx.restore();
+  }
+}
+
+class Station {
+  constructor(x, y) {
+    this.x = x;
+    this.y = y;
+    this.rotation = 0;
+    this.credits = 0;
+  }
+
+  update() {
+    this.rotation += 0.005;
+  }
+
+  draw(ctx) {
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    
+    // Docking ring
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0, 0, CONFIG.stationRadius + 10, 0, Math.PI*2);
+    ctx.stroke();
+
+    ctx.rotate(this.rotation);
+    
+    // Main body
+    ctx.fillStyle = '#222';
+    ctx.beginPath();
+    ctx.arc(0, 0, CONFIG.stationRadius, 0, Math.PI*2);
+    ctx.fill();
+    
+    // Spokes
+    ctx.strokeStyle = CONFIG.stationColor;
+    ctx.lineWidth = 4;
+    for(let i=0; i<4; i++) {
+      ctx.rotate(Math.PI/2);
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(CONFIG.stationRadius, 0);
+      ctx.stroke();
+    }
+
+    // Center hub
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(0, 0, 10, 0, Math.PI*2);
+    ctx.fill();
+
+    ctx.restore();
+
+    // UI
+    ctx.fillStyle = '#fff';
+    ctx.font = '12px monospace';
+    ctx.fillText(`CREDITS: ${Math.floor(this.credits)}`, this.x - 30, this.y - CONFIG.stationRadius - 20);
+  }
+}
+
+// --- Initialization ---
+
+function init() {
+  resize();
+  window.addEventListener('resize', resize);
+
+  // Create Station
+  entities.station = new Station(0, 0);
+
+  // Create Ships
+  for (let i = 0; i < CONFIG.shipCount; i++) {
+    entities.ships.push(new Ship(50 + i * 20, 0, 'hauler'));
+  }
+
+  // Create Escorts
+  entities.escorts.push(new Ship(-50, 0, 'escort'));
+  entities.escorts.push(new Ship(-70, 0, 'escort'));
+
+  // Create Stars
+  for (let i = 0; i < 200; i++) {
+    entities.stars.push({
+      x: (Math.random() - 0.5) * 4000,
+      y: (Math.random() - 0.5) * 4000,
+      size: Math.random() * 2
+    });
+  }
+
+  // Create Initial Asteroids
+  spawnAsteroidBelt();
+
+  requestAnimationFrame(loop);
+}
+
+function spawnAsteroidBelt() {
+  for (let i = 0; i < 30; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const dist = 400 + Math.random() * 600;
+    entities.asteroids.push(new Asteroid(
+      Math.cos(angle) * dist,
+      Math.sin(angle) * dist,
+      20 + Math.random() * 30
+    ));
+  }
+}
+
+function resize() {
+  width = window.innerWidth;
+  height = window.innerHeight;
+  canvas.width = width;
+  canvas.height = height;
+}
+
+// --- Main Loop ---
+
+function loop() {
+  gameTime++;
+
+  // Update Camera
+  // Pan slowly towards the center of action (average of ships and asteroids)
+  let avgX = 0, avgY = 0, count = 0;
+  entities.ships.forEach(s => { avgX += s.x; avgY += s.y; count++; });
+  entities.asteroids.forEach(a => { avgX += a.x; avgY += a.y; count++; });
+  if (count > 0) {
+    camera.targetX = avgX / count;
+    camera.targetY = avgY / count;
+  }
+  
+  // Smooth camera
+  camera.x += (camera.targetX - camera.x) * 0.02;
+  camera.y += (camera.targetY - camera.y) * 0.02;
+
+  // Spawn Pirates
+  if (Math.random() < CONFIG.pirateSpawnRate && entities.pirates.length < 3) {
+    // Spawn off screen
+    const angle = Math.random() * Math.PI * 2;
+    const dist = 1000;
+    entities.pirates.push(new Pirate(camera.x + Math.cos(angle)*dist, camera.y + Math.sin(angle)*dist));
+  }
+
+  // Respawn Asteroids
+  if (entities.asteroids.length < 10) {
+    const angle = Math.random() * Math.PI * 2;
+    const dist = 600 + Math.random() * 400;
+    entities.asteroids.push(new Asteroid(
+      entities.station.x + Math.cos(angle) * dist,
+      entities.station.y + Math.sin(angle) * dist,
+      20 + Math.random() * 30
+    ));
+  }
+
+  // Update Entities
+  entities.station.update();
+  entities.ships.forEach(s => s.update());
+  entities.escorts.forEach(s => s.update());
+  entities.pirates.forEach(p => p.update());
+  entities.asteroids.forEach(a => a.update());
+  entities.ore.forEach(o => {
+    o.x += o.vx;
+    o.y += o.vy;
+    o.vx *= 0.99;
+    o.vy *= 0.99;
+  });
+  
+  entities.particles = entities.particles.filter(p => p.update());
+  entities.lasers = entities.lasers.filter(l => { l.update(); return l.active; });
+  
+  // Cleanup
+  entities.asteroids = entities.asteroids.filter(a => a.active);
+  entities.ore = entities.ore.filter(o => o.active);
+  entities.pirates = entities.pirates.filter(p => p.active);
+
+  // --- Draw ---
+  ctx.fillStyle = '#050505';
+  ctx.fillRect(0, 0, width, height);
+
+  ctx.save();
+  // Center camera
+  ctx.translate(width / 2 - camera.x, height / 2 - camera.y);
+
+  // Draw Stars (Parallax)
+  ctx.fillStyle = '#fff';
+  entities.stars.forEach(star => {
+    // Simple parallax
+    const px = star.x - camera.x * 0.1;
+    const py = star.y - camera.y * 0.1;
+    // Wrap stars around screen for infinite feel
+    const wx = ((px % width) + width) % width - width/2 + camera.x;
+    const wy = ((py % height) + height) % height - height/2 + camera.y;
+    
+    ctx.fillRect(wx, wy, star.size, star.size);
+  });
+
+  entities.station.draw(ctx);
+  entities.asteroids.forEach(a => a.draw(ctx));
+  entities.ore.forEach(o => {
+    ctx.fillStyle = '#ffd700';
+    ctx.beginPath();
+    ctx.arc(o.x, o.y, 3, 0, Math.PI*2);
+    ctx.fill();
+  });
+  entities.ships.forEach(s => s.draw(ctx));
+  entities.escorts.forEach(s => s.draw(ctx));
+  entities.pirates.forEach(p => p.draw(ctx));
+  entities.lasers.forEach(l => l.draw(ctx));
+  entities.particles.forEach(p => p.draw(ctx));
+
+  ctx.restore();
+
+  // HUD
+  ctx.fillStyle = 'rgba(0, 255, 0, 0.7)';
+  ctx.font = '14px monospace';
+  ctx.fillText(`ASTEROIDS: ${entities.asteroids.length}`, 20, 30);
+  ctx.fillText(`PIRATES: ${entities.pirates.length}`, 20, 50);
+  ctx.fillText(`MINERS: ${entities.ships.length}`, 20, 70);
+
+  requestAnimationFrame(loop);
+}
+
+// Start
+init();
+
+</script>
+</body>
+</html>

@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Clockwork Machine</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050505; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <canvas id="c"></canvas>
+    <script>
+        const canvas = document.getElementById('c');
+        const ctx = canvas.getContext('2d');
+        let width, height;
+
+        // --- Configuration & Palette ---
+        const PALETTE = {
+            bg: '#0a0806',
+            iron: ['#2a2a2a', '#444444', '#1a1a1a'],
+            brass: ['#b5a642', '#8a7a2b', '#d4af37', '#5c5015'],
+            copper: ['#b87333', '#a65e2b'],
+            highlight: '#fff8dc',
+            steam: 'rgba(200, 200, 200, 0.1)'
+        };
+
+        // --- Math Helpers ---
+        const PI = Math.PI;
+        const TAU = 2 * PI;
+        const DEG = PI / 180;
+        const lerp = (a, b, t) => a + (b - a) * t;
+        const rand = (min, max) => Math.random() * (max - min) + min;
+
+        // --- Classes ---
+
+        class Gear {
+            constructor(x, y, r, teeth, color, type = 'brass') {
+                this.x = x;
+                this.y = y;
+                this.r = r;
+                this.teeth = teeth;
+                this.angle = 0;
+                this.type = type;
+                this.color = color;
+                this.phase = Math.random() * TAU;
+                this.isBroken = false;
+                this.vx = 0;
+                this.vy = 0;
+                this.vAngle = 0;
+            }
+
+            draw(ctx, speed) {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.angle);
+
+                const toothH = this.r * 0.15;
+                const toothW = (TAU / this.teeth) * 0.4;
+                
+                // Draw Teeth
+                ctx.beginPath();
+                for (let i = 0; i < this.teeth; i++) {
+                    const theta = (TAU / this.teeth) * i;
+                    ctx.rotate(theta);
+                    ctx.lineTo(this.r * Math.cos(-toothW/2), this.r * Math.sin(-toothW/2));
+                    ctx.lineTo((this.r + toothH) * Math.cos(-toothW/2), (this.r + toothH) * Math.sin(-toothW/2));
+                    ctx.lineTo((this.r + toothH) * Math.cos(toothW/2), (this.r + toothH) * Math.sin(toothW/2));
+                    ctx.lineTo(this.r * Math.cos(toothW/2), this.r * Math.sin(toothW/2));
+                    ctx.rotate((TAU / this.teeth) - theta);
+                }
+                ctx.fillStyle = this.color;
+                ctx.fill();
+                
+                // Draw Body
+                ctx.beginPath();
+                ctx.arc(0, 0, this.r - toothH * 0.5, 0, TAU);
+                ctx.fillStyle = this.type === 'brass' ? '#2a2510' : '#1a1a1a';
+                ctx.fill();
+
+                // Draw Spokes/Details
+                ctx.beginPath();
+                ctx.arc(0, 0, this.r * 0.8, 0, TAU);
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = this.color;
+                ctx.stroke();
+
+                // Inner holes
+                const spokeCount = Math.min(this.teeth, 6);
+                for(let i=0; i<spokeCount; i++) {
+                    ctx.rotate(TAU/spokeCount);
+                    ctx.beginPath();
+                    ctx.arc(0, this.r * 0.45, this.r * 0.15, 0, TAU);
+                    ctx.fillStyle = '#000';
+                    ctx.fill();
+                    ctx.strokeStyle = this.color;
+                    ctx.stroke();
+                }
+
+                ctx.restore();
+            }
+
+            update(dt, speed) {
+                if (this.isBroken) {
+                    // Physics for broken gears
+                    this.x += this.vx;
+                    this.y += this.vy;
+                    this.angle += this.vAngle;
+                    this.vy += 0.5; // Gravity
+                    this.vx *= 0.98; // Friction
+                    this.vy *= 0.98;
+
+                    // Bounce off walls
+                    if (this.x < this.r || this.x > width - this.r) {
+                        this.x = Math.max(this.r, Math.min(width - this.r, this.x));
+                        this.vx *= -0.8;
+                    }
+                    if (this.y < this.r || this.y > height - this.r) {
+                        this.y = Math.max(this.r, Math.min(height - this.r, this.y));
+                        this.vy *= -0.8;
+                    }
+                } else {
+                    this.angle += speed * (this.type === 'brass' ? 1 : -1);
+                }
+            }
+        }
+
+        class Piston {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.len = 100;
+                this.angle = 0;
+            }
+
+            draw(ctx, time) {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                
+                // Oscillating angle
+                const swing = Math.sin(time * 2) * 0.2;
+                ctx.rotate(swing);
+
+                // Cylinder
+                ctx.fillStyle = '#333';
+                ctx.fillRect(-20, -20, 40, 100);
+                
+                // Rod
+                const rodExt = Math.sin(time * 5) * 30;
+                ctx.fillStyle = '#888';
+                ctx.fillRect(-5, 0, 10, this.len + rodExt);
+                
+                // Piston Head
+                ctx.fillStyle = '#b5a642';
+                ctx.fillRect(-10, this.len + rodExt - 10, 20, 20);
+
+                ctx.restore();
+            }
+        }
+
+        class Automaton {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.active = false;
+                this.timer = 0;
+                this.interval = 45; // seconds
+                this.flapSpeed = 0;
+                this.chirpTime = 0;
+            }
+
+            update(dt) {
+                if (!this.active) {
+                    this.timer += dt;
+                    if (this.timer >= this.interval) {
+                        this.active = true;
+                        this.timer = 0;
+                    }
+                } else {
+                    // Active animation loop
+                    this.flapSpeed += 15 * dt;
+                    this.chirpTime += dt;
+                    if (this.chirpTime > 2) { // Chirp for 2 seconds
+                        this.active = false;
+                        this.chirpTime = 0;
+                        this.flapSpeed = 0;
+                    }
+                }
+            }
+
+            draw(ctx) {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+
+                // Base housing
+                ctx.fillStyle = '#222';
+                ctx.fillRect(-30, 0, 60, 60);
+                ctx.fillStyle = '#444';
+                ctx.fillRect(-25, 5, 50, 50);
+
+                if (this.active) {
+                    // Pop up
+                    const lift = Math.sin(this.flapSpeed) * 20;
+                    
+                    // Bird Body
+                    ctx.fillStyle = '#b5a642';
+                    ctx.beginPath();
+                    ctx.arc(0, -20 + lift, 20, 0, TAU);
+                    ctx.fill();
+
+                    // Head
+                    ctx.beginPath();
+                    ctx.arc(0, -40 + lift, 15, 0, TAU);
+                    ctx.fill();
+
+                    // Beak
+                    ctx.fillStyle = '#b87333';
+                    ctx.beginPath();
+                    ctx.moveTo(10, -40 + lift);
+                    ctx.lineTo(25, -35 + lift);
+                    ctx.lineTo(10, -30 + lift);
+                    ctx.fill();
+
+                    // Wings (Flapping)
+                    ctx.fillStyle = '#d4af37';
+                    ctx.save();
+                    ctx.translate(-15, -20 + lift);
+                    ctx.rotate(Math.sin(this.flapSpeed * 2) * 0.5);
+                    ctx.beginPath();
+                    ctx.ellipse(0, 0, 10, 25, 0.5, 0, TAU);
+                    ctx.fill();
+                    ctx.restore();
+
+                    ctx.save();
+                    ctx.translate(15, -20 + lift);
+                    ctx.rotate(-Math.sin(this.flapSpeed * 2) * 0.5);
+                    ctx.beginPath();
+                    ctx.ellipse(0, 0, 10, 25, -0.5, 0, TAU);
+                    ctx.fill();
+                    ctx.restore();
+
+                    // Chirp text (Silent)
+                    if (Math.random() > 0.8) {
+                        ctx.fillStyle = '#fff';
+                        ctx.font = "12px monospace";
+                        ctx.fillText("♪", 20, -50 + lift + Math.random()*10);
+                    }
+
+                } else {
+                    // Reset position
+                    ctx.fillStyle = '#d4af37';
+                    ctx.beginPath();
+                    ctx.arc(0, -10, 15, 0, TAU); // Head peeking out slightly
+                    ctx.fill();
+                }
+
+                ctx.restore();
+            }
+        }
+
+        class Escapement {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.angle = 0;
+            }
+
+            update(dt) {
+                this.angle += 10 * dt;
+            }
+
+            draw(ctx) {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                
+                // Fork
+                ctx.strokeStyle = '#b5a642';
+                ctx.lineWidth = 4;
+                ctx.beginPath();
+                ctx.moveTo(-20, 20);
+                ctx.lineTo(0, 0);
+                ctx.lineTo(20, 20);
+                ctx.stroke();
+
+                // Pallet (The swinging part)
+                ctx.rotate(Math.sin(this.angle) * 0.5);
+                ctx.fillStyle = '#888';
+                ctx.fillRect(-2, -20, 4, 20);
+                
+                ctx.restore();
+            }
+        }
+
+        class RepairArm {
+            constructor(x, y, targetGear) {
+                this.x = x;
+                this.y = y;
+                this.target = targetGear;
+                this.extending = false;
+                this.progress = 0;
+                this.state = 'IDLE'; // IDLE, EXTENDING, RETRACTING
+            }
+
+            update(dt) {
+                if (this.target.isBroken && this.state === 'IDLE') {
+                    this.state = 'EXTENDING';
+                }
+
+                if (this.state === 'EXTENDING') {
+                    this.progress += dt * 2;
+                    if (this.progress >= 1) {
+                        this.progress = 1;
+                        this.state = 'FIXING';
+                        this.fixTimer = 1.0;
+                    }
+                } else if (this.state === 'FIXING') {
+                    this.fixTimer -= dt;
+                    if (this.fixTimer <= 0) {
+                        this.target.isBroken = false;
+                        this.target.vx = 0;
+                        this.target.vy = 0;
+                        this.target.vAngle = 0;
+                        this.state = 'RETRACTING';
+                    }
+                } else if (this.state === 'RETRACTING') {
+                    this.progress -= dt * 2;
+                    if (this.progress <= 0) {
+                        this.progress = 0;
+                        this.state = 'IDLE';
+                    }
+                }
+            }
+
+            draw(ctx) {
+                if (this.state === 'IDLE') return;
+
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                
+                const length = 100 * this.progress;
+                
+                // Arm segments
+                ctx.strokeStyle = '#555';
+                ctx.lineWidth = 8;
+                ctx.lineCap = 'round';
+                
+                ctx.beginPath();
+                ctx.moveTo(0, 0);
+                ctx.lineTo(0, length);
+                ctx.stroke();
+
+                // Claw
+                ctx.fillStyle = '#b5a642';
+                ctx.beginPath();
+                ctx.arc(0, length, 5, 0, TAU);
+                ctx.fill();
+
+                // Visual fix spark
+                if (this.state === 'FIXING') {
+                    ctx.fillStyle = `rgba(255, 255, 200, ${Math.random()})`;
+                    ctx.beginPath();
+                    ctx.arc(0, length, 10, 0, TAU);
+                    ctx.fill();
+                }
+
+                ctx.restore();
+            }
+        }
+
+        // --- Scene Setup ---
+        let gears = [];
+        let pistons = [];
+        let automaton;
+        let escapement;
+        let repairArms = [];
+        let time = 0;
+        let lastTime = 0;
+
+        function init() {
+            resize();
+            window.addEventListener('resize', resize);
+
+            // Create Gears
+            // Main drive gear
+            gears.push(new Gear(200, 300, 60, 12, '#b5a642'));
+            
+            // Compound gears
+            gears.push(new Gear(350, 300, 40, 8, '#d4af37')); // Meshes with 12
+            gears.push(new Gear(350, 220, 80, 16, '#b5a642')); // On same shaft as above
+            
+            gears.push(new Gear(550, 220, 50, 10, '#b5a642')); // Meshes with 16
+            gears.push(new Gear(650, 350, 70, 14, '#8a7a2b')); // Meshes with 10
+
+            // Upper section
+            gears.push(new Gear(100, 150, 50, 10, '#b5a642')); 
+            gears.push(new Gear(250, 100, 30, 6, '#d4af37')); // Meshes with 10
+            
+            // Piston Driver
+            gears.push(new Gear(700, 100, 40, 8, '#b5a642')); // Meshes with 14
+
+            // Automaton Driver
+            gears.push(new Gear(100, 400, 30, 6, '#8a7a2b'));
+
+            // Pistons
+            pistons.push(new Piston(700, 100)); // Driven by gear
+            pistons.push(new Piston(100, 400)); // Driven by gear
+
+            // Automaton
+            automaton = new Automaton(100, 400);
+
+            // Escapement
+            escapement = new Escapement(200, 300);
+
+            // Repair Arms
+            repairArms.push(new RepairArm(width - 50, 50, gears[0]));
+            repairArms.push(new RepairArm(width - 50, 100, gears[4]));
+
+            // Random loose gear
+            const looseGear = new Gear(0, 0, 20, 6, '#b5a642');
+            looseGear.isBroken = true;
+            looseGear.x = width / 2;
+            looseGear.y = 0;
+            looseGear.vx = rand(-5, 5);
+            looseGear.vy = 0;
+            gears.push(looseGear);
+        }
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+        }
+
+        function checkCollisions() {
+            // Gear vs Gear meshing logic (visual only for this demo, but we ensure distances are correct)
+            // Physics collisions for broken gears
+            for (let i = 0; i < gears.length; i++) {
+                if (!gears[i].isBroken) continue;
+
+                for (let j = 0; j < gears.length; j++) {
+                    if (i === j || !gears[j].isBroken) continue;
+                    
+                    const dx = gears[j].x - gears[i].x;
+                    const dy = gears[j].y - gears[i].y;
+                    const dist = Math.sqrt(dx*dx + dy*dy);
+                    const minDist = gears[i].r + gears[j].r;
+
+                    if (dist < minDist) {
+                        const angle = Math.atan2(dy, dx);
+                        const force = 0.5;
+                        const overlap = minDist - dist;
+                        
+                        gears[i].vx -= Math.cos(angle) * force;
+                        gears[i].vy -= Math.sin(angle) * force;
+                        gears[j].vx += Math.cos(angle) * force;
+                        gears[j].vy += Math.sin(angle) * force;
+                        
+                        // Separate
+                        gears[i].x -= Math.cos(angle) * overlap/2;
+                        gears[i].y -= Math.sin(angle) * overlap/2;
+                        gears[j].x += Math.cos(angle) * overlap/2;
+                        gears[j].y += Math.sin(angle) * overlap/2;
+                    }
+                }
+            }
+        }
+
+        function drawChain(ctx, x1, y1, r1, x2, y2, r2) {
+            const dx = x2 - x1;
+            const dy = y2 - y1;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            const angle = Math.atan2(dy, dx);
+
+            ctx.save();
+            ctx.translate(x1, y1);
+            ctx.rotate(angle);
+
+            // Draw chain links
+            ctx.strokeStyle = '#555';
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            
+            // Top wire
+            ctx.moveTo(0, -r1);
+            ctx.lineTo(dist, -r2);
+            ctx.stroke();
+            
+            // Bottom wire
+            ctx.beginPath();
+            ctx.moveTo(0, r1);
+            ctx.lineTo(dist, r2);
+            ctx.stroke();
+
+            ctx.restore();
+        }
+
+        function drawBackground(ctx) {
+            ctx.fillStyle = PALETTE.bg;
+            ctx.fillRect(0, 0, width, height);
+            
+            // Grid
+            ctx.strokeStyle = '#1a1510';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            for(let x=0; x<width; x+=100) { ctx.moveTo(x,0); ctx.lineTo(x,height); }
+            for(let y=0; y<height; y+=100) { ctx.moveTo(0,y); ctx.lineTo(width,y); }
+            ctx.stroke();
+        }
+
+        function loop(timestamp) {
+            const dt = (timestamp - lastTime) / 1000;
+            lastTime = timestamp;
+            time += dt;
+
+            ctx.clearRect(0, 0, width, height);
+            drawBackground(ctx);
+
+            // Update logic
+            checkCollisions();
+            escapement.update(dt);
+            automaton.update(dt);
+            repairArms.forEach(arm => arm.update(dt));
+
+            // Randomly break a gear occasionally
+            if (Math.random() < 0.0005) {
+                gears.forEach(g => {
+                    if (!g.isBroken) {
+                        g.isBroken = true;
+                        g.vx = rand(-10, 10);
+                        g.vy = rand(-10, -5);
+                    }
+                });
+            }
+
+            // Draw Chains (Static connections)
+            drawChain(ctx, 350, 300, 40, 350, 220, 80); // Compound
+            drawChain(ctx, 200, 300, 60, 100, 400, 30); // Automaton drive
+
+            // Draw Gears
+            // We pass a global speed multiplier for visual effect
+            gears.forEach(g => g.draw(ctx, 1));
+
+            // Draw Pistons
+            pistons.forEach(p => p.draw(ctx, time));
+
+            // Draw Escapement
+            escapement.draw(ctx);
+
+            // Draw Automaton
+            automaton.draw(ctx);
+
+            // Draw Repair Arms
+            repairArms.forEach(arm => arm.draw(ctx));
+
+            // Overlay Vignette
+            const grad = ctx.createRadialGradient(width/2, height/2, height/3, width/2, height/2, height);
+            grad.addColorStop(0, 'rgba(0,0,0,0)');
+            grad.addColorStop(1, 'rgba(0,0,0,0.8)');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, width, height);
+
+            requestAnimationFrame(loop);
+        }
+
+        init();
+        requestAnimationFrame(loop);
+
+    </script>
+</body>
+</html>

@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Falling Sand</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #0d0d10;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        canvas {
+            image-rendering: pixelated;
+            width: 100vw;
+            height: 100vh;
+            object-fit: contain;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="c"></canvas>
+    <script>
+        // --- Configuration ---
+        const WIDTH = 200;
+        const HEIGHT = 120;
+        const SCALE = 4; // Visual scale (handled by CSS)
+        
+        // Element Types
+        const EMPTY = 0;
+        const WALL = 1;
+        const SAND = 2;
+        const WATER = 3;
+        const WOOD = 4;
+        const FIRE = 5;
+        const SMOKE = 6;
+        const STEAM = 7;
+
+        // Colors (HSLA)
+        const COLORS = {
+            [EMPTY]: [0, 0, 0, 0],
+            [WALL]:  [20, 10, 40, 255],
+            [SAND]:  [40, 80, 90, 255],
+            [WATER]: [210, 80, 50, 200],
+            [WOOD]:  [25, 60, 40, 255],
+            [FIRE]:  [0, 100, 50, 255],
+            [SMOKE]: [0, 0, 0, 100],
+            [STEAM]: [200, 10, 80, 100]
+        };
+
+        // --- Globals ---
+        const canvas = document.getElementById('c');
+        const ctx = canvas.getContext('2d', { alpha: false });
+        canvas.width = WIDTH;
+        canvas.height = HEIGHT;
+
+        let grid = new Uint8Array(WIDTH * HEIGHT);
+        let nextGrid = new Uint8Array(WIDTH * HEIGHT); // For double buffering if needed, but we do in-place for sand/water
+        let frame = 0;
+
+        // --- Helpers ---
+        const idx = (x, y) => x + y * WIDTH;
+        const inBounds = (x, y) => x >= 0 && x < WIDTH && y >= 0 && y < HEIGHT;
+        const get = (x, y) => inBounds(x, y) ? grid[idx(x, y)] : WALL; // Walls act as boundaries
+        const set = (x, y, type) => { if(inBounds(x,y)) grid[idx(x, y)] = type; };
+
+        // --- Interaction / Emitters ---
+        let spawnX = WIDTH / 2;
+        let spawnDir = 1;
+
+        function emit() {
+            // Move emitter
+            spawnX += spawnDir * 1.5;
+            if (spawnX < 20 || spawnX > WIDTH - 20) spawnDir *= -1;
+
+            // Drop Sand
+            if (Math.random() < 0.4) {
+                let sx = Math.floor(spawnX);
+                if (get(sx, 0) === EMPTY) set(sx, 0, SAND);
+            }
+            
+            // Drop Water
+            if (Math.random() < 0.2) {
+                let sx = Math.floor(spawnX) + (Math.random() > 0.5 ? 2 : -2);
+                if (get(sx, 0) === EMPTY) set(sx, 0, WATER);
+            }
+
+            // Occasional Fire
+            if (Math.random() < 0.02) {
+                let sx = Math.floor(spawnX) + (Math.random() > 0.5 ? 5 : -5);
+                if (get(sx, 0) === EMPTY) set(sx, 0, FIRE);
+            }
+        }
+
+        // --- Physics Logic ---
+
+        function update() {
+            frame++;
+            emit();
+
+            // Process bottom-up for falling elements
+            for (let y = HEIGHT - 1; y >= 0; y--) {
+                // Process left-to-right and right-to-left alternating to reduce bias
+                const leftToRight = Math.random() > 0.5;
+                const startX = leftToRight ? 0 : WIDTH - 1;
+                const endX = leftToRight ? WIDTH : -1;
+                const step = leftToRight ? 1 : -1;
+
+                for (let x = startX; x !== endX; x += step) {
+                    const i = idx(x, y);
+                    const type = grid[i];
+
+                    if (type === EMPTY) continue;
+
+                    if (type === SAND) {
+                        updateSand(x, y, i);
+                    } else if (type === WATER) {
+                        updateWater(x, y, i);
+                    } else if (type === WOOD) {
+                        updateWood(x, y, i);
+                    } else if (type === FIRE) {
+                        updateFire(x, y, i);
+                    } else if (type === SMOKE || type === STEAM) {
+                        updateGas(x, y, i, type);
+                    }
+                }
+            }
+
+            // Ledge Erosion and Regeneration (Simulation of "World")
+            if (frame % 200 === 0) {
+                // Erode random wall pixels
+                for(let k=0; k<5; k++) {
+                    let rx = Math.floor(Math.random() * WIDTH);
+                    let ry = Math.floor(Math.random() * HEIGHT);
+                    if (grid[idx(rx, ry)] === WALL) {
+                        grid[idx(rx, ry)] = EMPTY;
+                    }
+                }
+                // Regenerate walls near top or random spots
+                if (Math.random() < 0.3) {
+                    let rx = Math.floor(Math.random() * WIDTH);
+                    // Create a small ledge
+                    let ry = Math.floor(Math.random() * (HEIGHT * 0.6));
+                    set(rx, ry, WALL);
+                    if(Math.random() > 0.5) set(rx+1, ry, WALL);
+                }
+            }
+        }
+
+        function updateSand(x, y, i) {
+            if (y === HEIGHT - 1) return; // Bottom
+
+            const below = get(x, y + 1);
+            if (below === EMPTY) {
+                grid[i] = EMPTY;
+                set(x, y + 1, SAND);
+            } else if (below === WATER) {
+                grid[i] = WATER;
+                set(x, y + 1, SAND);
+            } else {
+                // Slide diagonal
+                const dir = Math.random() > 0.5 ? 1 : -1;
+                const b1 = get(x + dir, y + 1);
+                const b2 = get(x - dir, y + 1);
+                
+                if (b1 === EMPTY || b1 === WATER) {
+                    grid[i] = EMPTY;
+                    set(x + dir, y + 1, SAND);
+                } else if (b2 === EMPTY || b2 === WATER) {
+                    grid[i] = EMPTY;
+                    set(x - dir, y + 1, SAND);
+                }
+            }
+        }
+
+        function updateWater(x, y, i) {
+            if (y === HEIGHT - 1) return;
+
+            const below = get(x, y + 1);
+            if (below === EMPTY) {
+                grid[i] = EMPTY;
+                set(x, y + 1, WATER);
+            } else {
+                // Flow sideways
+                const dir = Math.random() > 0.5 ? 1 : -1;
+                const side = get(x + dir, y);
+                const side2 = get(x - dir, y);
+
+                if (side === EMPTY) {
+                    grid[i] = EMPTY;
+                    set(x + dir, y, WATER);
+                } else if (side2 === EMPTY) {
+                    grid[i] = EMPTY;
+                    set(x - dir, y, WATER);
+                }
+            }
+        }
+
+        function updateWood(x, y, i) {
+            // Check neighbors for fire/steam interaction
+            const neighbors = [
+                get(x+1, y), get(x-1, y), get(x, y+1), get(x, y-1)
+            ];
+
+            if (neighbors.includes(FIRE) || neighbors.includes(STEAM)) {
+                if (Math.random() < 0.1) {
+                    grid[i] = FIRE; // Catch fire
+                } else if (Math.random() < 0.05) {
+                    grid[i] = SMOKE; // Burn to smoke
+                }
+            }
+        }
+
+        function updateFire(x, y, i) {
+            // Randomly die out
+            if (Math.random() < 0.05) {
+                // Turn to smoke or water if water is present
+                const neighbors = [
+                    get(x+1, y), get(x-1, y), get(x, y+1), get(x, y-1)
+                ];
+                if (neighbors.includes(WATER)) {
+                    grid[i] = STEAM;
+                    // Turn water neighbor to steam too
+                    for(let dx=-1; dx<=1; dx++) {
+                        for(let dy=-1; dy<=1; dy++) {
+                            if (get(x+dx, y+dy) === WATER && Math.random() < 0.5) {
+                                set(x+dx, y+dy, STEAM);
+                            }
+                        }
+                    }
+                } else {
+                    grid[i] = Math.random() < 0.5 ? SMOKE : EMPTY;
+                }
+                return;
+            }
+
+            // Spread fire
+            const neighbors = [
+                {dx:0, dy:-1}, {dx:0, dy:1}, {dx:-1, dy:0}, {dx:1, dy:0}
+            ];
+            
+            for (let n of neighbors) {
+                let nx = x + n.dx;
+                let ny = y + n.dy;
+                let type = get(nx, ny);
+                
+                if (type === WOOD && Math.random() < 0.1) {
+                    set(nx, ny, FIRE);
+                }
+            }
+        }
+
+        function updateGas(x, y, i, type) {
+            if (y === 0) { grid[i] = EMPTY; return; } // Disappear at top
+
+            if (Math.random() < 0.2) {
+                const dir = Math.random() > 0.5 ? 1 : -1;
+                if (get(x + dir, y - 1) === EMPTY) {
+                    grid[i] = EMPTY;
+                    set(x + dir, y - 1, type);
+                } else if (get(x - dir, y - 1) === EMPTY) {
+                    grid[i] = EMPTY;
+                    set(x - dir, y - 1, type);
+                } else if (get(x, y - 1) === EMPTY) {
+                    grid[i] = EMPTY;
+                    set(x, y - 1, type);
+                }
+            }
+        }
+
+        // --- Rendering ---
+        const imgData = ctx.createImageData(WIDTH, HEIGHT);
+        const buf = new Uint32Array(imgData.data.buffer);
+
+        function draw() {
+            // Clear buffer (transparent black)
+            buf.fill(0xFF101010); // Dark background
+
+            for (let y = 0; y < HEIGHT; y++) {
+                for (let x = 0; x < WIDTH; x++) {
+                    const type = grid[idx(x, y)];
+                    if (type === EMPTY) continue;
+
+                    let color = COLORS[type];
+                    
+                    // Add noise/variation for aesthetic
+                    let noise = (Math.random() - 0.5) * 10;
+                    
+                    let h = color[0];
+                    let s = color[1];
+                    let l = Math.min(100, Math.max(0, color[2] + noise));
+                    let a = color[3];
+
+                    // Convert HSL to RGB for buffer (ABGR format)
+                    // Simplified conversion for speed
+                    let r, g, b;
+                    if (type === SAND) {
+                        r = 180 + noise; g = 160 + noise; b = 100 + noise;
+                    } else if (type === WATER) {
+                        r = 20 + noise; g = 100 + noise; b = 200 + noise;
+                    } else if (type === FIRE) {
+                        r = 255; g = 100 + (Math.random()*100); b = 0;
+                    } else if (type === WOOD) {
+                        r = 80 + noise; g = 50 + noise; b = 30 + noise;
+                    } else if (type === WALL) {
+                        r = 40; g = 40; b = 50;
+                    } else if (type === SMOKE) {
+                        let v = 50 + (Math.random()*30);
+                        r=v; g=v; b=v;
+                    } else if (type === STEAM) {
+                        let v = 150 + (Math.random()*50);
+                        r=v; g=v; b=v;
+                    } else {
+                        r=0; g=0; b=0;
+                    }
+
+                    // ABGR
+                    buf[idx(x, y)] = (a << 24) | (b << 16) | (g << 8) | r;
+                }
+            }
+            ctx.putImageData(imgData, 0, 0);
+        }
+
+        // --- Main Loop ---
+        function loop() {
+            update();
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        loop();
+
+    </script>
+</body>
+</html>

@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Glyph Rain</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #05000a; /* Deep dark purple base */
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+
+<script>
+/**
+ * CONFIGURATION & SETUP
+ */
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+// Colors: Teal (#00FFFF) to Violet (#8A2BE2)
+const COLOR_TEAL = { r: 0, g: 255, b: 255 };
+const COLOR_VIOLET = { r: 138, g: 43, b: 226 };
+
+// Hidden words to occasionally align
+const SECRET_WORDS = [
+    "MATRIX", "SYSTEM", "OVERRIDE", "GLYPH", "NEURAL", 
+    "DECODE", "SIGNAL", "NOISE", "RENDER", "ACCESS",
+    "PROTOCOL", "VIRTUAL", "REALITY", "HACKER", "DATA"
+];
+
+// Katakana + Latin + Numerals
+const CHARSET = "ｦｧｨｩｪｫｬｭｮｯｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+let width, height;
+let columns = [];
+let layers = [];
+let glitchTimer = 0;
+let secretWordTimer = 0;
+let cameraOffset = { x: 0, y: 0 };
+let cameraAngle = 0;
+
+// Layer Configuration
+// 0: Background (Small, slow, blur)
+// 1: Midground (Medium, medium speed)
+// 2: Foreground (Large, fast, sharp)
+const LAYER_CONFIG = [
+    { fontSize: 14, charCount: 40, speed: 0.5, blur: 4, opacity: 0.4, color: COLOR_VIOLET },
+    { fontSize: 22, charCount: 25, speed: 1.0, blur: 0, opacity: 0.7, color: { r: 100, g: 200, b: 255 } }, // Light Blue
+    { fontSize: 34, charCount: 15, speed: 1.8, blur: 0, opacity: 1.0, color: COLOR_TEAL }
+];
+
+/**
+ * UTILITIES
+ */
+function randomInt(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function randomChar() {
+    return CHARSET.charAt(Math.floor(Math.random() * CHARSET.length));
+}
+
+function lerpColor(c1, c2, t) {
+    return {
+        r: Math.round(c1.r + (c2.r - c1.r) * t),
+        g: Math.round(c1.g + (c2.g - c1.g) * t),
+        b: Math.round(c1.b + (c2.b - c1.b) * t)
+    };
+}
+
+function resize() {
+    width = canvas.width = window.innerWidth;
+    height = canvas.height = window.innerHeight;
+    initLayers();
+}
+
+/**
+ * CLASSES
+ */
+
+class Glyph {
+    constructor(x, y, layerConfig) {
+        this.x = x;
+        this.y = y;
+        this.layerConfig = layerConfig;
+        this.char = randomChar();
+        this.speed = (Math.random() * 0.5 + 0.5) * layerConfig.speed;
+        this.baseSpeed = this.speed;
+        this.isHead = true;
+        this.opacity = 0;
+        this.targetOpacity = 0;
+        this.highlight = false;
+        this.highlightTimer = 0;
+    }
+
+    update() {
+        // Apply speed
+        this.y += this.speed;
+        
+        // Fade in logic
+        if (this.opacity < this.targetOpacity) {
+            this.opacity += 0.05;
+        }
+
+        // Highlight decay
+        if (this.highlight) {
+            this.highlightTimer--;
+            if (this.highlightTimer <= 0) {
+                this.highlight = false;
+                this.char = randomChar(); // Change char after highlight
+            }
+        }
+
+        // Reset if off screen
+        if (this.y > height + this.layerConfig.fontSize) {
+            this.y = -this.layerConfig.fontSize;
+            this.char = randomChar();
+            this.opacity = 0;
+            this.targetOpacity = Math.random() * 0.5 + 0.5; // Random brightness
+        }
+    }
+
+    draw(ctx) {
+        ctx.font = `bold ${this.layerConfig.fontSize}px monospace`;
+        ctx.textBaseline = 'top';
+        
+        // Color Logic
+        let color = this.layerConfig.color;
+        
+        if (this.highlight) {
+            // Flash white/yellow during secret word
+            color = { r: 255, g: 255, b: 200 };
+        } else if (this.isHead) {
+            // Head is brighter
+            color = lerpColor(color, { r: 255, g: 255, b: 255 }, 0.5);
+        }
+
+        // Apply Opacity
+        const alpha = Math.min(1, this.opacity * this.layerConfig.opacity);
+        
+        ctx.fillStyle = `rgba(${color.r},${color.g},${color.b},${alpha})`;
+        
+        // Apply Layer Blur (expensive, so only if > 0)
+        if (this.layerConfig.blur > 0) {
+            ctx.shadowBlur = this.layerConfig.blur;
+            ctx.shadowColor = `rgba(${color.r},${color.g},${color.b},0.5)`;
+        } else {
+            ctx.shadowBlur = 0;
+        }
+
+        ctx.fillText(this.char, this.x, this.y);
+        
+        // Reset shadow for performance
+        ctx.shadowBlur = 0;
+    }
+}
+
+class Column {
+    constructor(x, layerConfig) {
+        this.x = x;
+        this.layerConfig = layerConfig;
+        this.glyphs = [];
+        this.spacing = layerConfig.fontSize * 1.2; // Vertical spacing
+        
+        // Initialize glyphs vertically
+        let y = -Math.random() * height;
+        while (y < height + this.spacing) {
+            let g = new Glyph(x, y, layerConfig);
+            // Only the top-most one is visually a "head" usually, 
+            // but we handle head coloring in the draw loop based on index
+            this.glyphs.push(g);
+            y += this.spacing;
+        }
+        
+        // Head index
+        this.headIndex = 0;
+    }
+
+    update() {
+        // Update all glyphs
+        this.glyphs.forEach(g => g.update());
+
+        // Wrap around logic for the whole column
+        // If the head goes off screen, recycle the tail to the top
+        if (this.glyphs[0].y > height + this.layerConfig.fontSize) {
+            const tail = this.glyphs.shift();
+            // Find the topmost glyph to place the new one above
+            let minY = this.glyphs[this.glyphs.length - 1].y;
+            tail.y = minY - this.spacing; // Place above the last one
+            tail.char = randomChar();
+            tail.opacity = 0;
+            tail.targetOpacity = Math.random() * 0.5 + 0.5;
+            tail.highlight = false;
+            this.glyphs.push(tail);
+        }
+    }
+
+    draw(ctx) {
+        // To simulate the "fading tail", we draw from bottom to top (index 0 is bottom visually in array logic usually, but here index 0 is top)
+        // Actually, index 0 is the top (head).
+        
+        // Draw from bottom (tail) to top (head)
+        for (let i = this.glyphs.length - 1; i >= 0; i--) {
+            const g = this.glyphs[i];
+            
+            // Calculate distance from head
+            const distFromHead = i;
+            
+            // Head logic
+            g.isHead = (i === 0);
+            
+            // Fade out tail
+            let fadeFactor = 1.0;
+            if (i > 5) {
+                fadeFactor = Math.max(0.1, 1.0 - (i * 0.05));
+            }
+            
+            // Apply temporary opacity override for tail fading
+            const originalOpacity = g.opacity;
+            g.opacity = originalOpacity * fadeFactor;
+            
+            // Glitch effect: random offset
+            if (Math.random() < 0.001) {
+                g.x += randomInt(-5, 5);
+            }
+
+            g.draw(ctx);
+            
+            // Reset opacity
+            g.opacity = originalOpacity;
+        }
+    }
+}
+
+class Layer {
+    constructor(config, index) {
+        this.config = config;
+        this.index = index;
+        this.columns = [];
+        this.init();
+    }
+
+    init() {
+        this.columns = [];
+        const colWidth = this.config.fontSize * 1.5;
+        const count = Math.ceil(width / colWidth) + 5;
+        
+        for (let i = 0; i < count; i++) {
+            // Add some randomness to X position
+            const x = (i * colWidth) + randomInt(-10, 10);
+            this.columns.push(new Column(x, this.config));
+        }
+    }
+
+    update() {
+        this.columns.forEach(col => col.update());
+    }
+
+    draw(ctx) {
+        this.columns.forEach(col => col.draw(ctx));
+    }
+    
+    // Helper to find a glyph near a specific coordinate
+    getGlyphAt(x, y, tolerance) {
+        for (let col of this.columns) {
+            if (Math.abs(col.x - x) < tolerance) {
+                for (let g of col.glyphs) {
+                    if (Math.abs(g.y - y) < tolerance) {
+                        return g;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+}
+
+/**
+ * INITIALIZATION
+ */
+function initLayers() {
+    layers = [];
+    LAYER_CONFIG.forEach((config, i) => {
+        layers.push(new Layer(config, i));
+    });
+}
+
+window.addEventListener('resize', resize);
+resize();
+
+/**
+ * GAME LOGIC: SECRET WORDS
+ */
+function triggerSecretWord() {
+    // 1. Pick a random word
+    const word = SECRET_WORDS[Math.floor(Math.random() * SECRET_WORDS.length)];
+    
+    // 2. Pick a random layer (Foreground is best for visibility)
+    const targetLayer = layers[2]; 
+    
+    // 3. Pick a random Y position (ensure it's visible)
+    const y = randomInt(height * 0.2, height * 0.8);
+    
+    // 4. Calculate X position to fit the word
+    // We need to find columns that roughly align with the word width
+    const charWidth = targetLayer.config.fontSize * 1.5;
+    const startX = randomInt(0, width - (word.length * charWidth));
+    
+    // 5. Inject the word into the columns
+    for (let i = 0; i < word.length; i++) {
+        const charX = startX + (i * charWidth);
+        const char = word[i];
+        
+        // Find the closest column
+        let closestCol = null;
+        let minDiff = Infinity;
+        
+        for (let col of targetLayer.columns) {
+            const diff = Math.abs(col.x - charX);
+            if (diff < minDiff) {
+                minDiff = diff;
+                closestCol = col;
+            }
+        }
+        
+        if (closestCol && minDiff < charWidth / 2) {
+            // Find the glyph closest to Y
+            let targetGlyph = null;
+            let minGlyphDiff = Infinity;
+            
+            for (let g of closestCol.glyphs) {
+                const diff = Math.abs(g.y - y);
+                if (diff < minGlyphDiff) {
+                    minGlyphDiff = diff;
+                    targetGlyph = g;
+                }
+            }
+            
+            if (targetGlyph) {
+                // Override the glyph
+                targetGlyph.char = char;
+                targetGlyph.highlight = true;
+                targetGlyph.highlightTimer = 120; // Frames to show
+                targetGlyph.targetOpacity = 1.0; // Ensure bright
+            }
+        }
+    }
+}
+
+/**
+ * GAME LOGIC: GLITCH BURSTS
+ */
+function triggerGlitch() {
+    // Randomly shift a few columns horizontally for a brief moment
+    const layer = layers[randomInt(0, 2)];
+    const numCols = randomInt(2, 5);
+    
+    for(let i=0; i<numCols; i++) {
+        if (layer.columns.length > 0) {
+            const col = layer.columns[randomInt(0, layer.columns.length - 1)];
+            const shift = randomInt(-20, 20);
+            const originalX = col.x;
+            
+            // Apply shift
+            col.x += shift;
+            
+            // Revert after short time
+            setTimeout(() => {
+                col.x = originalX;
+            }, 100 + Math.random() * 200);
+        }
+    }
+}
+
+/**
+ * MAIN LOOP
+ */
+function animate() {
+    // Clear with trail effect
+    // Instead of clearRect, we draw a semi-transparent rect to create trails
+    ctx.fillStyle = 'rgba(5, 0, 10, 0.3)'; // Dark purple with opacity
+    ctx.fillRect(0, 0, width, height);
+
+    // Camera Drift
+    cameraAngle += 0.005;
+    cameraOffset.x = Math.sin(cameraAngle) * 20;
+    cameraOffset.y = Math.cos(cameraAngle * 0.7) * 10;
+
+    ctx.save();
+    // Apply subtle camera movement
+    ctx.translate(cameraOffset.x, cameraOffset.y);
+
+    // Update Timers
+    glitchTimer--;
+    secretWordTimer--;
+
+    // Trigger Glitch
+    if (glitchTimer <= 0) {
+        triggerGlitch();
+        glitchTimer = randomInt(100, 500);
+    }
+
+    // Trigger Secret Word
+    if (secretWordTimer <= 0) {
+        if (Math.random() < 0.02) { // Small chance every frame if timer is up
+            triggerSecretWord();
+            secretWordTimer = randomInt(300, 600); // Cooldown
+        }
+    }
+
+    // Draw Layers
+    layers.forEach(layer => {
+        layer.update();
+        layer.draw(ctx);
+    });
+
+    ctx.restore();
+
+    requestAnimationFrame(animate);
+}
+
+// Start
+animate();
+
+</script>
+</body>
+</html>

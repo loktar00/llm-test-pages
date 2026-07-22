@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Boids Murmuration</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+
+<script>
+/**
+ * Configuration
+ */
+const CONFIG = {
+    boidCount: 600,
+    visualRange: 80,
+    separationDist: 25,
+    maxSpeed: 4.5,
+    minSpeed: 2.5,
+    edgeMargin: 100,
+    turnFactor: 0.05, // How fast they turn
+    predatorForce: 3.5,
+    predatorFrequency: 0.002, // Chance per frame
+    predatorDuration: 300, // Frames
+    colors: {
+        skyTop: '#1a1a2e',
+        skyMid: '#4a3b52',
+        skyBot: '#8c6b5d',
+        boid: 'rgba(10, 10, 10, 0.8)',
+        ground: '#050505'
+    }
+};
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+let width, height;
+let boids = [];
+let predator = { active: false, x: 0, y: 0, vx: 0, vy: 0, timer: 0 };
+
+// Generate a jagged landscape silhouette
+let landscapePoints = [];
+
+function resize() {
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = width;
+    canvas.height = height;
+    generateLandscape();
+}
+
+function generateLandscape() {
+    landscapePoints = [];
+    const resolution = 20;
+    const segments = Math.ceil(width / resolution) + 1;
+    
+    // Simple noise generation for hills
+    let y = height * 0.75;
+    landscapePoints.push({x: 0, y: y});
+    
+    for (let i = 1; i < segments; i++) {
+        // Random slope
+        const slope = (Math.random() - 0.5) * 40;
+        y += slope;
+        
+        // Keep within bounds (bottom 30% of screen)
+        if (y < height * 0.5) y = height * 0.5;
+        if (y > height * 0.9) y = height * 0.9;
+        
+        landscapePoints.push({x: i * resolution, y: y});
+    }
+    landscapePoints.push({x: width, y: height});
+    landscapePoints.push({x: width, y: height * 0.9}); // Close shape
+}
+
+class Boid {
+    constructor() {
+        this.x = Math.random() * width;
+        this.y = Math.random() * (height * 0.6); // Start in sky
+        this.vx = (Math.random() - 0.5) * 4;
+        this.vy = (Math.random() - 0.5) * 4;
+    }
+
+    update(boids) {
+        let sx = 0, sy = 0; // Separation
+        let ax = 0, ay = 0; // Alignment
+        let cx = 0, cy = 0; // Cohesion
+        let neighbors = 0;
+
+        // Optimization: Simple loop. For 600 boids, N^2 is ~360k ops, acceptable for modern JS engines.
+        for (let other of boids) {
+            if (other === this) continue;
+
+            const dx = other.x - this.x;
+            const dy = other.y - this.y;
+            const distSq = dx * dx + dy * dy;
+
+            if (distSq < CONFIG.visualRange * CONFIG.visualRange) {
+                // Separation
+                if (distSq < CONFIG.separationDist * CONFIG.separationDist) {
+                    const dist = Math.sqrt(distSq);
+                    sx -= (dx / dist);
+                    sy -= (dy / dist);
+                }
+
+                // Alignment
+                ax += other.vx;
+                ay += other.vy;
+
+                // Cohesion
+                cx += other.x;
+                cy += other.y;
+
+                neighbors++;
+            }
+        }
+
+        if (neighbors > 0) {
+            // Alignment
+            ax /= neighbors;
+            ay /= neighbors;
+            // Cohesion
+            cx = (cx / neighbors) - this.x;
+            cy = (cy / neighbors) - this.y;
+        }
+
+        // Apply Steering Forces
+        // We add a fraction of the desired velocity to current velocity
+        
+        // Separation force (strongest)
+        this.vx += sx * 0.5;
+        this.vy += sy * 0.5;
+
+        // Alignment force
+        this.vx += (ax - this.vx) * 0.05;
+        this.vy += (ay - this.vy) * 0.05;
+
+        // Cohesion force
+        this.vx += cx * 0.005;
+        this.vy += cy * 0.005;
+
+        // Predator Avoidance
+        if (predator.active) {
+            const pdx = this.x - predator.x;
+            const pdy = this.y - predator.y;
+            const pDistSq = pdx*pdx + pdy*pdy;
+            const pDist = Math.sqrt(pDistSq);
+            
+            if (pDist < 150) {
+                const force = (150 - pDist) / 150;
+                this.vx += (pdx / pDist) * force * CONFIG.predatorForce;
+                this.vy += (pdy / pDist) * force * CONFIG.predatorForce;
+            }
+        }
+
+        // Limit Speed
+        let speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+        if (speed > CONFIG.maxSpeed) {
+            this.vx = (this.vx / speed) * CONFIG.maxSpeed;
+            this.vy = (this.vy / speed) * CONFIG.maxSpeed;
+        } else if (speed < CONFIG.minSpeed) {
+            this.vx = (this.vx / speed) * CONFIG.minSpeed;
+            this.vy = (this.vy / speed) * CONFIG.minSpeed;
+        }
+
+        // Boundary Wrapping (Soft)
+        if (this.x < -CONFIG.edgeMargin) this.x = width + CONFIG.edgeMargin;
+        if (this.x > width + CONFIG.edgeMargin) this.x = -CONFIG.edgeMargin;
+        if (this.y < -CONFIG.edgeMargin) this.y = height + CONFIG.edgeMargin;
+        if (this.y > height + CONFIG.edgeMargin) this.y = -CONFIG.edgeMargin;
+
+        // Move
+        this.x += this.vx;
+        this.y += this.vy;
+    }
+
+    draw() {
+        ctx.fillStyle = CONFIG.colors.boid;
+        // Draw a small speck
+        ctx.fillRect(this.x, this.y, 2, 2);
+    }
+}
+
+function init() {
+    resize();
+    for (let i = 0; i < CONFIG.boidCount; i++) {
+        boids.push(new Boid());
+    }
+    loop();
+}
+
+function updatePredator() {
+    if (!predator.active) {
+        // Small chance to spawn
+        if (Math.random() < CONFIG.predatorFrequency) {
+            predator.active = true;
+            predator.timer = CONFIG.predatorDuration;
+            
+            // Spawn from random edge
+            const side = Math.floor(Math.random() * 4);
+            if (side === 0) { // Top
+                predator.x = Math.random() * width;
+                predator.y = -50;
+                predator.vy = 5;
+            } else if (side === 1) { // Right
+                predator.x = width + 50;
+                predator.y = Math.random() * height;
+                predator.vx = -5;
+            } else if (side === 2) { // Bottom
+                predator.x = Math.random() * width;
+                predator.y = height + 50;
+                predator.vy = -5;
+            } else { // Left
+                predator.x = -50;
+                predator.y = Math.random() * height;
+                predator.vx = 5;
+            }
+            predator.vx = (predator.vx || 0) + (Math.random() - 0.5) * 5;
+            predator.vy = (predator.vy || 0) + (Math.random() - 0.5) * 5;
+        }
+    } else {
+        predator.timer--;
+        predator.x += predator.vx;
+        predator.y += predator.vy;
+
+        // Add some noise to predator path
+        predator.vx += (Math.random() - 0.5) * 0.5;
+        predator.vy += (Math.random() - 0.5) * 0.5;
+
+        if (predator.timer <= 0) {
+            predator.active = false;
+        }
+    }
+}
+
+function drawSky() {
+    const gradient = ctx.createLinearGradient(0, 0, 0, height);
+    gradient.addColorStop(0, CONFIG.colors.skyTop);
+    gradient.addColorStop(0.6, CONFIG.colors.skyMid);
+    gradient.addColorStop(1, CONFIG.colors.skyBot);
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, width, height);
+}
+
+function drawLandscape() {
+    ctx.fillStyle = CONFIG.colors.ground;
+    ctx.beginPath();
+    ctx.moveTo(0, height);
+    for (let p of landscapePoints) {
+        ctx.lineTo(p.x, p.y);
+    }
+    ctx.lineTo(width, height);
+    ctx.closePath();
+    ctx.fill();
+}
+
+function loop() {
+    // Background
+    drawSky();
+    drawLandscape();
+
+    // Logic
+    updatePredator();
+    
+    // Update and Draw Boids
+    // We draw boids on top of landscape
+    for (let boid of boids) {
+        boid.update(boids);
+        boid.draw();
+    }
+
+    // Debug: Draw predator if active (optional, currently invisible as requested)
+    /*
+    if (predator.active) {
+        ctx.fillStyle = 'red';
+        ctx.beginPath();
+        ctx.arc(predator.x, predator.y, 5, 0, Math.PI*2);
+        ctx.fill();
+    }
+    */
+
+    requestAnimationFrame(loop);
+}
+
+window.addEventListener('resize', resize);
+init();
+
+</script>
+</body>
+</html>

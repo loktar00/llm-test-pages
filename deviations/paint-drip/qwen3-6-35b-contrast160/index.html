@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width=device-width, initial-scale=1.0">
+    <title>Paint Drip Art</title>
+    <style>
+        body, html, body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #ffffff;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    
+    let width, height;
+    const THRESHOLD = 0.85;
+    const FADE_SPEED = 0.0008;
+    
+    // Paint properties
+    const PAINT_TYPES = [
+        { color: '#FF0055', wet: 0.03, dry: 0.015 },  // Red
+        { color: '#00E5FF', wet: 0.025, dry: 0.01 },   // Cyan
+        { color: '#FFEA00', wet: 0.04, dry: 0.02 },    // Yellow
+        { color: '#AA00FF', wet: 0.035, dry: 0.012 },  // Purple
+        { color: '#00FF41', wet: 0.02, dry: 0.008 },   // Green
+        { color: '#FF5500', wet: 0.03, dry: 0.015 },   // Orange
+    ];
+
+    let drips = [];
+    let particles = []; // Splash particles
+    let totalPaint = 0;
+    let fadeProgress = 0;
+    let isFading = false;
+    let time = 0;
+
+    function resize() {
+        width = canvas.width = window.innerWidth;
+        height = canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    class Drip {
+        constructor() {
+            this.x = Math.random() * width;
+            this.y = -10;
+            this.radius = 20 + Math.random() * 30;
+            this.type = PAINT_TYPES[Math.floor(Math.random() * PAINT_TYPES.length)];
+            this.wetness = 1.0; // 1.0 = wet, 0.0 = dry
+            this.ySpeed = 0;
+            this.vx = 0;
+            this.active = true;
+            this.tail = []; // For trail effect
+            this.maxTail = 10;
+            this.wobblePhase = Math.random() * Math.PI * 2;
+            
+            // Initial impact splash
+            this.createSplash();
+        }
+
+        createSplash() {
+            const count = 5 + Math.floor(Math.random() * 10);
+            for (let i = 0; i < count; i++) {
+                particles.push(new Particle(this.x, 0, this.type.color));
+            }
+        }
+
+        update() {
+            // Physics
+            this.ySpeed += 0.05; // Gravity
+            
+            // Wetness reduces speed (viscosity)
+            const viscosity = 1.0 - (this.wetness * 0.8); 
+            this.ySpeed *= (0.95 * viscosity + 0.05); // Damping
+            
+            // Wobble
+            this.wobblePhase += 0.05;
+            this.vx += Math.sin(this.wobblePhase) * 0.05;
+            this.vx *= 0.9; // Friction
+            
+            this.x += this.vx;
+            this.y += this.ySpeed;
+
+            // Dryness logic
+            if (this.ySpeed < 0.5) {
+                this.wetness -= this.type.dry;
+            } else {
+                this.wetness -= this.type.wet;
+            }
+
+            // Tail generation
+            this.tail.unshift({x: this.x, y: this.y, r: this.radius, w: this.wetness});
+            if (this.tail.length > this.maxTail) this.tail.pop();
+
+            // Bounds
+            if (this.y > height + 50 || this.wetness <= 0) {
+                this.active = false;
+            }
+        }
+
+        draw() {
+            // Draw Tail (The stream of paint)
+            if (this.tail.length > 1) {
+                for (let i = 0; i < this.tail.length - 1; i++) {
+                    const p1 = this.tail[i];
+                    const p2 = this.tail[i+1];
+                    const alpha = (1 - i / this.tail.length) * p1.w;
+                    const size = p1.r * (1 - i / this.tail.length);
+                    
+                    ctx.beginPath();
+                    ctx.arc(p1.x, p1.y, size * 0.8, 0, Math.PI * 2);
+                    ctx.fillStyle = this.type.color + Math.floor(alpha * 255).toString(16).padStart(2, '0');
+                    ctx.fill();
+                }
+            }
+
+            // Draw Head
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+            // Visual darkening based on wetness
+            ctx.fillStyle = this.type.color + Math.floor(this.wetness * 255).toString(16).padStart(2, '0');
+            ctx.fill();
+        }
+    }
+
+    class Particle {
+        constructor(x, y, color) {
+            this.x = x;
+            this.y = y;
+            this.vx = (Math.random() - 0.5) * 4;
+            this.vy = Math.random() * 2 + 1;
+            this.life = 1.0;
+            this.color = color;
+            this.size = Math.random() * 3 + 1;
+        }
+        update() {
+            this.x += this.vx;
+            this.y += this.vy;
+            this.vy += 0.2; // Gravity
+            this.life -= 0.05;
+        }
+        draw() {
+            ctx.globalAlpha = this.life;
+            ctx.fillStyle = this.color;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalAlpha = 1.0;
+        }
+    }
+
+    function applyPaint() {
+        // We use a offscreen canvas to track the total paint amount
+        // but we draw directly to the main canvas for the visual effect.
+        
+        // To calculate coverage, we sample pixels or use a low-res buffer.
+        // Using a low-res buffer for performance is better than sampling.
+        const res = 4; // Resolution scale
+        const w = Math.ceil(width / res);
+        const h = Math.ceil(height / res);
+        
+        // Create offscreen canvas for density calculation
+        if (!densityCanvas) {
+            densityCanvas = document.createElement('canvas');
+            densityCanvas.width = w;
+            densityCanvas.height = h;
+            densityCtx = densityCanvas.getContext('2d');
+        }
+        
+        if (densityCanvas.width !== w || densityCanvas.height !== h) {
+            densityCanvas.width = w;
+            densityCanvas.height = h;
+            densityCtx = densityCanvas.getContext('2d');
+        }
+
+        // Draw current visual state to density canvas (scaled down)
+        // We need to draw the main canvas to the density canvas
+        // This is expensive but we do it sparingly or optimized.
+        // Actually, let's just draw the drips to the density canvas directly.
+        
+        // Optimization: We maintain a 'density' buffer array or canvas.
+        // Let's use the main canvas to calculate coverage.
+        
+        // Get data of the main canvas (expensive)
+        // Instead, let just track paint visually.
+        
+        let covered = 0;
+        const totalPixels = w * h;
+        
+        // Draw drips to main canvas
+        drips.forEach(d => {
+            if (!d.active) return;
+            
+            // Draw drip head
+            ctx.beginPath();
+            ctx.arc(d.x, d.y, d.radius, 0, Math.PI * 2);
+            ctx.fillStyle = d.type.color;
+            // Add global composite for blending
+            ctx.globalCompositeOperation = 'source-over'; 
+            ctx.fill();
+            
+            // Draw tail
+            ctx.beginPath();
+            ctx.moveTo(d.x, d.y);
+            for(let i=0; i<d.tail.length; i++) {
+                ctx.lineTo(d.tail[i].x, d.tail[i].y);
+            }
+            ctx.lineWidth = d.radius;
+            ctx.lineCap = 'round';
+            ctx.strokeStyle = d.type.color;
+            ctx.stroke();
+            
+            // Calculate density contribution (approximate)
+            // We check pixels in a low-res grid
+            const densityY = Math.floor(d.y / res);
+            const densityX = Math.floor(d.x / res);
+            const r = Math.floor(d.radius / res);
+            
+            for(let dy = -r; dy <= r; dy++) {
+                for(let dx = -r; dx <= r; dx++) {
+                    const py = densityY + dy;
+                    const px = densityX + dx;
+                    if (py >= 0 && py < h && px >= 0 && px < w) {
+                        // Simple distance check for circle
+                        if (dx*dx + dy*dy <= r*r) {
+                            // Increment density
+                            // We can avoid checking the pixel data every frame
+                            // Instead, we just increment a counter in a 1D array
+                            // But JS array access is fast.
+                            // Let defer density calc to a separate loop or just accept the cost
+                        }
+                    }
+                }
+            }
+        });
+        
+        // Calculate density via pixel data (every 10 frames or if sparse)
+        if (time % 10 === 0) {
+            const imgData = ctx.getImageData(0, 0, width, height);
+            const data = imgData.data;
+            let whitePixels = 0;
+            
+            // Sample every 4th pixel for performance
+            for (let i = 0; i < data.length; i += 16) {
+                // Check if pixel is mostly white (background)
+                if (data[i] > 240 && data[i+1] > 240 && data[i+2] > 240) {
+                    whitePixels++;
+                }
+            }
+            
+            const sampleSize = data.length / 16;
+            const coverage = 1 - (whitePixels / sampleSize);
+            
+            if (coverage > THRESHOLD) {
+                isFading = true;
+                fadeProgress = 0;
+            }
+        }
+    }
+
+    let densityCanvas, densityCtx;
+
+    function resetCanvas() {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
+        drips = [];
+        particles = [];
+        isFading = false;
+        fadeProgress = 0;
+    }
+
+    function animate() {
+        time++;
+        
+        // Spawn drips
+        if (!isFading && Math.random() < 0.05) {
+            drips.push(new Drip());
+        }
+        
+        // Update Drips
+        drips.forEach(d => d.update());
+        drips = drips.filter(d => d.active);
+        
+        // Update Particles
+        particles.forEach(p => p.update());
+        particles = particles.filter(p => p.life > 0);
+        
+        // Draw
+        if (isFading) {
+            fadeProgress += FADE_SPEED;
+            ctx.fillStyle = `rgba(255, 255, 255, ${fadeProgress})`;
+            ctx.fillRect(0, 0, width, height);
+            
+            if (fadeProgress >= 1.0) {
+                resetCanvas();
+            }
+        } else {
+            // Draw drips
+            drips.forEach(d => d.draw());
+            particles.forEach(p => p.draw());
+        }
+        
+        requestAnimationFrame(animate);
+    }
+
+    animate();
+
+</script>
+</body>
+</html>

@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width-scale=1.0">
+<title>Crystal Cavern</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #050508; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// --- Color Palettes ---
+const PALETTES = [
+  [
+    [120, 180, 220],
+    [160, 120, 240],
+    [200, 140, 180],
+    [100, 200, 200],
+    [180, 160, 220],
+    [140, 200, 160],
+  ],
+  [
+    [200, 160, 100],
+    [240, 180, 120],
+    [160, 200, 240],
+    [180, 120, 200],
+    [220, 140, 160],
+    [120, 220, 180],
+  ]
+];
+
+let currentPalette = 0;
+let paletteTransition = 0;
+
+function getColor(paletteIdx, i) {
+  const p = PALETTES[paletteIdx % PALETTES.length];
+  return p[i % p.length];
+}
+
+// --- Light Source ---
+let light = { x: W * 0.5, y: H * 0.3, vx: 0, vy: 0 };
+let lightTime = 0;
+
+function updateLight(dt) {
+  lightTime += dt;
+  light.vx = Math.cos(lightTime * 0.15) * 30 + Math.sin(lightTime * 0.07) * 20;
+  light.vy = Math.sin(lightTime * 0.2) * 15 + Math.cos(lightTime * 0.11) * 10;
+  light.x += light.vx * dt;
+  light.y += light.vy * dt;
+  
+  // Wrap around
+  if (light.x < -100) light.x = W + 100;
+  if (light.x > W + 100) light.x = -100;
+  if (light.y < -100) light.y = H + 100;
+  if (light.y > H + 100) light.y = -100;
+}
+
+function getLightColor() {
+  const t = (Math.sin(lightTime * 0.3) + 1) / 2;
+  const r = Math.floor(200 + 55 * t);
+  const g = Math.floor(180 + 75 * t);
+  const b = Math.floor(220 + 35 * (1 - t));
+  return [r, g, b];
+}
+
+// --- Crystal Growth System ---
+class Crystal {
+  constructor(x, y, angle, colorIdx, isCeiling) {
+    this.x = x;
+    this.y = y;
+    this.angle = angle;
+    this.colorIdx = colorIdx;
+    this.isCeiling = isCeiling;
+    this.length = 0;
+    this.maxLength = 50 + Math.random() * 150;
+    this.growSpeed = 15 + Math.random() * 25;
+    this.width = 2 + Math.random() * 4;
+    this.segments = [];
+    this.branches = [];
+    this.alive = true;
+    this.growthPaused = false;
+    this.growthPauseTimer = 0;
+    this.growthPauseDuration = 0.5 + Math.random() * 2;
+    this.lastBranchLength = 10 + Math.random() * 20;
+    this.growthTime = 0;
+    this.glimmerPhase = Math.random() * Math.PI * 2;
+    this.glimmerSpeed = 0.5 + Math.random() * 2;
+    this.opacity = 1;
+    this.shatterProgress = -1; // -1 = not shattering
+    this.shardParticles = [];
+  }
+
+  update(dt) {
+    if (this.shatterProgress >= 0) {
+      this.shatterProgress += dt * 0.5;
+      if (this.shatterProgress > 1) {
+        this.alive = false;
+      }
+      return;
+    }
+    
+    if (!this.alive) return;
+    
+    this.growthTime += dt;
+    this.glimmerPhase += this.glimmerSpeed * dt;
+    
+    // Grow
+    if (!this.growthPaused) {
+      this.length += this.growSpeed * dt;
+      
+      // Add segment
+      if (this.length > 0 && this.segments.length === 0) {
+        this.segments.push({ x: this.x, y: this.y });
+      }
+      
+      // Add more segments as growing
+      const segSpacing = 8;
+      while (this.segments.length * segSpacing < this.length) {
+        this.segments.push({
+          x: this.x + Math.cos(this.angle) * this.segments.length * segSpacing,
+          y: this.y + Math.sin(this.angle) * this.segments.length * segSpacing
+        });
+      }
+      
+      // Branching
+      if (this.length > this.lastBranchLength && Math.random() < 0.002) {
+        const branchAngle = this.angle + (Math.random() > 0.5 ? 1 : -1) * (0.3 + Math.random() * 0.5);
+        const branch = new Crystal(
+          this.x + Math.cos(this.angle) * this.length,
+          this.y + Math.sin(this.angle) * this.length,
+          branchAngle,
+          (this.colorIdx + 1 + Math.floor(Math.random() * 2)) % 6,
+          this.isCeiling
+        );
+        branch.maxLength = this.maxLength * (0.4 + Math.random() * 0.4);
+        branch.growSpeed = this.growSpeed * (0.6 + Math.random() * 0.4);
+        branch.width = this.width * 0.6;
+        branch.lastBranchLength = 5 + Math.random() * 10;
+        this.branches.push(branch);
+        this.lastBranchLength = this.length + 20 + Math.random() * 30;
+      }
+      
+      // Pause growth occasionally
+      if (this.length > 10 && Math.random() < 0.001) {
+        this.growthPaused = true;
+        this.growthPauseTimer = this.growthPauseDuration;
+      }
+    } else {
+      this.growthPauseTimer -= dt;
+      if (this.growthPauseTimer <= 0) {
+        this.growthPaused = false;
+      }
+    }
+    
+    // Check if max length reached
+    if (this.length >= this.maxLength) {
+      this.alive = false;
+    }
+    
+    // Update branches
+    for (let i = this.branches.length - 1; i >= 0; i--) {
+      this.branches[i].update(dt);
+      if (!this.branches[i].alive) {
+        this.branches.splice(i, 1);
+      }
+    }
+  }
+
+  draw(ctx, lightPos, lightCol, time) {
+    if (!this.alive && this.shatterProgress < 0) return;
+    
+    if (this.shatterProgress >= 0) {
+      this.drawShatter(ctx, lightPos, lightCol, time);
+      return;
+    }
+    
+    const col = getColor(currentPalette, this.colorIdx);
+    const glimmer = Math.sin(this.glimmerPhase + time * 2) * 0.3 + 0.7;
+    
+    // Light influence
+    const dist = Math.hypot(lightPos.x - this.x, lightPos.y - this.y);
+    const lightInfluence = Math.max(0.3, 1 - dist / 400);
+    
+    // Draw crystal body
+    ctx.save();
+    ctx.globalAlpha = this.opacity * glimmer * lightInfluence;
+    
+    // Main crystal
+    this.drawCrystalBody(ctx, col, lightCol, time);
+    
+    // Draw branches
+    for (const branch of this.branches) {
+      branch.draw(ctx, lightPos, lightCol, time);
+    }
+    
+    ctx.restore();
+  }
+
+  drawCrystalBody(ctx, col, lightCol, time) {
+    const segments = this.segments;
+    if (segments.length < 2) return;
+    
+    // Faceted crystal look
+    const facets = 3;
+    for (let f = 0; f < facets; f++) {
+      const facetAngle = this.angle + (f - 1) * 0.15;
+      const offset = Math.sin(f * 2.5 + time) * 0.02;
+      const a = facetAngle + offset;
+      
+      const r = Math.floor(col[0] * (0.6 + 0.4 * Math.sin(time * 0.5 + f)));
+      const g = Math.floor(col[1] * (0.6 + 0.4 * Math.sin(time * 0.7 + f + 1)));
+      const b = Math.floor(col[2] * (0.6 + 0.4 * Math.sin(time * 0.6 + f + 2)));
+      
+      ctx.beginPath();
+      ctx.moveTo(segments[0].x, segments[0].y);
+      
+      for (let i = 1; i < segments.length; i++) {
+        const prev = segments[i - 1];
+        const curr = segments[i];
+        const nx = (prev.x + curr.x) / 2 + Math.cos(a + Math.PI/2) * this.width * (1 + f * 0.5);
+        const ny = (prev.y + curr.y) / 2 + Math.sin(a + Math.PI/2) * this.width * (1 + f * 0.5);
+        ctx.quadraticCurveTo(prev.x, prev.y, nx, ny, curr.x, curr.y);
+      }
+      
+      ctx.strokeStyle = `rgb(${r},${g},${b})`;
+      ctx.lineWidth = this.width * (1 + f * 0.5);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.stroke();
+      
+      // Highlight
+      ctx.strokeStyle = `rgba(${Math.min(255, r + 80)},${Math.min(255, g + 80)},${Math.min(255, b + 80)},0.4)`;
+      ctx.lineWidth = this.width * 0.3;
+      ctx.stroke();
+    }
+    
+    // Glow effect
+    const gradient = ctx.createRadialGradient(
+      segments[segments.length - 1].x,
+      segments[segments.length - 1].y,
+      0,
+      segments[segments.length - 1].x,
+      segments[segments.length - 1].y,
+      20
+    );
+    gradient.addColorStop(0, `rgba(${col[0]},${col[1]},${col[2]},0.3)`);
+    gradient.addColorStop(1, `rgba(${col[0]},${col[1]},${col[2]},0)`);
+    ctx.fillStyle = gradient;
+    ctx.fillRect(
+      segments[segments.length - 1].x - 20,
+      segments[segments.length - 1].y - 20,
+      40, 40
+    );
+  }
+
+  drawShatter(ctx, lightPos, lightCol, time) {
+    if (this.shardParticles.length === 0) {
+      // Generate shard particles
+      const segments = this.segments;
+      const numShards = 10 + Math.floor(Math.random() * 10);
+      for (let i = 0; i < numShards; i++) {
+        const segIdx = Math.floor(Math.random() * segments.length);
+        const seg = segments[segIdx] || segments[0];
+        this.shardParticles.push({
+          x: seg.x + (Math.random() - 0.5) * 10,
+          y: seg.y + (Math.random() - 0.5) * 10,
+          vx: (Math.random() - 0.5) * 100,
+          vy: (Math.random() - 0.5) * 50 + 30,
+          rotation: Math.random() * Math.PI * 2,
+          rotSpeed: (Math.random() - 0.5) * 5,
+          size: 2 + Math.random() * 6,
+          opacity: 1,
+          colorIdx: this.colorIdx
+        });
+      }
+    }
+    
+    const col = getColor(currentPalette, this.colorIdx);
+    
+    for (const shard of this.shardParticles) {
+      shard.x += shard.vx * 0.016;
+      shard.y += shard.vy * 0.016;
+      shard.vy += 0.5; // gravity
+      shard.rotation += shard.rotSpeed * 0.016;
+      shard.opacity = Math.max(0, 1 - this.shatterProgress);
+      
+      ctx.save();
+      ctx.translate(shard.x, shard.y);
+      ctx.rotate(shard.rotation);
+      ctx.globalAlpha = shard.opacity;
+      ctx.fillStyle = `rgb(${col[0]},${col[1]},${col[2]})`;
+      ctx.fillRect(-shard.size/2, -shard.size/4, shard.size, shard.size/2);
+      ctx.restore();
+    }
+  }
+}
+
+// --- Cave System ---
+let crystals = [];
+let stalactites = []; // Dripping formations
+let waterPools = [];
+let tremorActive = false;
+let tremorTimer = 0;
+let growthThreshold = 0.7;
+let totalCrystalLength = 0;
+let maxCrystalLength = 0;
+let caveFloorY = H * 0.85;
+let caveCeilingY = H * 0.15;
+let lastTremorTime = 0;
+let time = 0;
+
+function initCave() {
+  crystals = [];
+  stalactites = [];
+  waterPools = [];
+  
+  // Create initial crystals from cave floor
+  const numFloorCrystals = 8 + Math.floor(Math.random() * 5);
+  for (let i = 0; i < numFloorCrystals; i++) {
+    const x = (W / (numFloorCrystals + 1)) * (i + 1) + (Math.random() - 0.5) * 100;
+    const angle = -Math.PI / 2 + (Math.random() - 0.5) * 0.5;
+    const colorIdx = Math.floor(Math.random() * 6);
+    crystals.push(new Crystal(x, caveFloorY, angle, colorIdx, false));
+  }
+  
+  // Create initial crystals from cave ceiling
+  const numCeilingCrystals = 8 + Math.floor(Math.random() * 5);
+  for (let i = 0; i < numCeilingCrystals; i++) {
+    const x = (W / (numCeilingCrystals + 1)) * (i + 1) + (Math.random() - 0.5) * 100;
+    const angle = Math.PI / 2 + (Math.random() - 0.5) * 0.5;
+    const colorIdx = Math.floor(Math.random() * 6);
+    crystals.push(new Crystal(x, caveCeilingY, angle, colorIdx, true));
+  }
+  
+  // Create stalactites (dripping formations)
+  for (let i = 0; i < 5 + Math.floor(Math.random() * 5); i++) {
+    stalactites.push({
+      x: Math.random() * W,
+      y: caveCeilingY + Math.random() * (caveFloorY - caveCeilingY) * 0.3,
+      dripTimer: Math.random() * 5,
+      dripInterval: 2 + Math.random() * 4,
+      dripSize: 1 + Math.random() * 2
+    });
+  }
+  
+  // Create water pools
+  for (let i = 0; i < 3 + Math.floor(Math.random() * 3); i++) {
+    waterPools.push({
+      x: Math.random() * W,
+      y: caveFloorY + 10 + Math.random() * 30,
+      radius: 10 + Math.random() * 20,
+      ripples: []
+    });
+  }
+}
+
+function calculateCrystalCoverage() {
+  totalCrystalLength = 0;
+  maxCrystalLength = 0;
+  for (const crystal of crystals) {
+    if (crystal.alive) {
+      totalCrystalLength += crystal.length;
+      maxCrystalLength = Math.max(maxCrystalLength, crystal.maxLength);
+    }
+  }
+  return maxCrystalLength > 0 ? totalCrystalLength / (maxCrystalLength * crystals.length) : 0;
+}
+
+function triggerTremor() {
+  tremorActive = true;
+  tremorTimer = 3; // seconds
+  
+  // Shatter oldest crystals (first added)
+  let shattered = 0;
+  for (const crystal of crystals) {
+    if (crystal.alive && crystal.shatterProgress < 0 && shattered < 5) {
+      crystal.shatterProgress = 0;
+      shattered++;
+    }
+  }
+}
+
+function updateCave(dt) {
+  time += dt;
+  
+  // Update light
+  updateLight(dt);
+  
+  // Update crystals
+  for (let i = crystals.length - 1; i >= 0; i--) {
+    crystals[i].update(dt);
+    if (!crystals[i].alive) {
+      crystals.splice(i, 1);
+    }
+  }
+  
+  // Check coverage and trigger tremor
+  const coverage = calculateCrystalCoverage();
+  if (coverage > growthThreshold && !tremorActive) {
+    triggerTremor();
+  }
+  
+  // Update tremor
+  if (tremorActive) {
+    tremorTimer -= dt;
+    if (tremorTimer <= 0) {
+      tremorActive = false;
+      // Regrow crystals
+      const numNewCrystals = 5 + Math.floor(Math.random() * 3);
+      for (let i = 0; i < numNewCrystals; i++) {
+        const x = Math.random() * W;
+        const isCeiling = Math.random() > 0.5;
+        const angle = isCeiling ? Math.PI / 2 + (Math.random() - 0.5) * 0.5 : -Math.PI / 2 + (Math.random() - 0.5) * 0.5;
+        const colorIdx = Math.floor(Math.random() * 6);
+        crystals.push(new Crystal(x, isCeiling ? caveCeilingY : caveFloorY, angle, colorIdx, isCeiling));
+      }
+    }
+  }
+  
+  // Update stalactites
+  for (const stalactite of stalactites) {
+    stalactite.dripTimer -= dt;
+    if (stalactite.dripTimer <= 0) {
+      stalactite.dripTimer = stalactite.dripInterval;
+      // Create drip ripple
+      for (const pool of waterPools) {
+        if (Math.abs(stalactite.x - pool.x) < pool.radius * 2) {
+          pool.ripples.push({
+            x: stalactite.x,
+            y: pool.y,
+            radius: 0,
+            maxRadius: pool.radius,
+            opacity: 0.6,
+            speed: 30
+          });
+          break;
+        }
+      }
+    }
+  }
+  
+  // Update water pools
+  for (const pool of waterPools) {
+    for (let i = pool.ripples.length - 1; i >= 0; i--) {
+      const ripple = pool.ripples[i];
+      ripple.radius += ripple.speed * dt;
+      ripple.opacity -= dt * 0.5;
+      if (ripple.opacity <= 0 || ripple.radius > ripple.maxRadius) {
+        pool.ripples.splice(i, 1);
+      }
+    }
+  }
+  
+  // Palette transition
+  paletteTransition += dt * 0.05;
+  if (paletteTransition > 1) {
+    paletteTransition = 0;
+    currentPalette = (currentPalette + 1) % PALETTES.length;
+  }
+}
+
+// --- Drawing Functions ---
+function drawBackground(ctx, lightPos, lightCol) {
+  // Cave background gradient
+  const gradient = ctx.createLinearGradient(0, 0, 0, H);
+  gradient.addColorStop(0, '#0a0a12');
+  gradient.addColorStop(0.5, '#080810');
+  gradient.addColorStop(1, '#050508');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, W, H);
+  
+  // Light source glow
+  const lightGlow = ctx.createRadialGradient(lightPos.x, lightPos.y, 0, lightPos.x, lightPos.y, 300);
+  lightGlow.addColorStop(0, `rgba(${lightCol[0]},${lightCol[1]},${lightCol[2]},0.15)`);
+  lightGlow.addColorStop(0.5, `rgba(${lightCol[0]},${lightCol[1]},${lightCol[2]},0.05)`);
+  lightGlow.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = lightGlow;
+  ctx.fillRect(0, 0, W, H);
+}
+
+function drawCaveWalls(ctx, lightPos, lightCol) {
+  // Cave floor
+  ctx.beginPath();
+  ctx.moveTo(0, H);
+  ctx.lineTo(0, caveFloorY);
+  
+  // Jagged floor
+  for (let x = 0; x <= W; x += 50) {
+    const y = caveFloorY + Math.sin(x * 0.01) * 10 + Math.sin(x * 0.03) * 5;
+    ctx.lineTo(x, y);
+  }
+  ctx.lineTo(W, H);
+  ctx.closePath();
+  
+  const floorGradient = ctx.createLinearGradient(0, caveFloorY - 20, 0, H);
+  floorGradient.addColorStop(0, '#1a1520');
+  floorGradient.addColorStop(1, '#0a0810');
+  ctx.fillStyle = floorGradient;
+  ctx.fill();
+  
+  // Cave ceiling
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(0, caveCeilingY);
+  
+  // Jagged ceiling
+  for (let x = 0; x <= W; x += 50) {
+    const y = caveCeilingY + Math.sin(x * 0.015 + 1) * 15 + Math.sin(x * 0.025) * 8;
+    ctx.lineTo(x, y);
+  }
+  ctx.lineTo(W, 0);
+  ctx.closePath();
+  
+  const ceilGradient = ctx.createLinearGradient(0, 0, 0, caveCeilingY + 20);
+  ceilGradient.addColorStop(0, '#0a0810');
+  ceilGradient.addColorStop(1, '#1a1520');
+  ctx.fillStyle = ceilGradient;
+  ctx.fill();
+  
+  // Light caustics on walls
+  const distToFloor = Math.hypot(lightPos.x - W/2, lightPos.y - caveFloorY);
+  const causticIntensity = Math.max(0, 0.1 - distToFloor / 5000);
+  if (causticIntensity > 0) {
+    ctx.fillStyle = `rgba(${lightCol[0]},${lightCol[1]},${lightCol[2]},${causticIntensity})`;
+    ctx.fillRect(0, caveFloorY - 5, W, 10);
+    ctx.fillRect(0, caveCeilingY - 5, W, 10);
+  }
+}
+
+function drawWaterPools(ctx, lightPos, lightCol) {
+  for (const pool of waterPools) {
+    // Pool base
+    const poolGradient = ctx.createRadialGradient(pool.x, pool.y, 0, pool.x, pool.y, pool.radius);
+    poolGradient.addColorStop(0, `rgba(${lightCol[0] * 0.3},${lightCol[1] * 0.3},${lightCol[2] * 0.3},0.3)`);
+    poolGradient.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = poolGradient;
+    ctx.beginPath();
+    ctx.ellipse(pool.x, pool.y, pool.radius, pool.radius * 0.3, 0, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Ripples
+    for (const ripple of pool.ripples) {
+      ctx.strokeStyle = `rgba(${lightCol[0]},${lightCol[1]},${lightCol[2]},${ripple.opacity * 0.5})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.ellipse(ripple.x, ripple.y, ripple.radius, ripple.radius * 0.3, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+}
+
+function drawStalactites(ctx, lightPos, lightCol) {
+  for (const stalactite of stalactites) {
+    // Draw drip
+    if (stalactite.dripTimer < 0.5) {
+      const dripProgress = 1 - stalactite.dripTimer / 0.5;
+      ctx.fillStyle = `rgba(${lightCol[0]},${lightCol[1]},${lightCol[2]},${0.8 * dripProgress})`;
+      ctx.beginPath();
+      ctx.arc(stalactite.x, stalactite.y + stalactite.dripSize * dripProgress, stalactite.dripSize * (1 - dripProgress * 0.5), 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+function drawTremorEffect(ctx) {
+  if (!tremorActive) return;
+  
+  const intensity = Math.sin(tremorTimer * 10) * 0.1;
+  ctx.fillStyle = `rgba(255,255,255,${Math.abs(intensity)})`;
+  ctx.fillRect(0, 0, W, H);
+}
+
+function drawGlimmer(ctx, time) {
+  // Ambient glimmer particles
+  const numParticles = 20;
+  for (let i = 0; i < numParticles; i++) {
+    const x = (Math.sin(time * 0.1 + i * 1.5) * 0.5 + 0.5) * W;
+    const y = (Math.cos(time * 0.15 + i * 2.3) * 0.5 + 0.5) * H;
+    const size = 1 + Math.sin(time * 2 + i) * 0.5;
+    const opacity = Math.sin(time * 3 + i * 0.5) * 0.3 + 0.3;
+    
+    ctx.fillStyle = `rgba(200,220,255,${Math.max(0, opacity)})`;
+    ctx.beginPath();
+    ctx.arc(x, y, size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// --- Main Render Loop ---
+let lastTime = 0;
+
+function render(timestamp) {
+  const dt = Math.min((timestamp - lastTime) / 1000, 0.1);
+  lastTime = timestamp;
+  
+  // Update
+  updateCave(dt);
+  
+  // Get light color
+  const lightCol = getLightColor();
+  
+  // Draw
+  drawBackground(ctx, light, lightCol);
+  drawCaveWalls(ctx, light, lightCol);
+  drawWaterPools(ctx, light, lightCol);
+  
+  // Draw crystals
+  for (const crystal of crystals) {
+    crystal.draw(ctx, light, lightCol, time);
+  }
+  
+  drawStalactites(ctx, light, lightCol);
+  drawGlimmer(ctx, time);
+  drawTremorEffect(ctx);
+  
+  // Vignette
+  const vignette = ctx.createRadialGradient(W/2, H/2, W*0.3, W/2, H/2, W*0.8);
+  vignette.addColorStop(0, 'rgba(0,0,0,0)');
+  vignette.addColorStop(1, 'rgba(0,0,0,0.6)');
+  ctx.fillStyle = vignette;
+  ctx.fillRect(0, 0, W, H);
+  
+  requestAnimationFrame(render);
+}
+
+// Initialize and start
+initCave();
+requestAnimationFrame(render);
+</script>
+</body>
+</html>

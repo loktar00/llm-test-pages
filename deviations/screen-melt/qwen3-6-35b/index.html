@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Doom Screen Melt</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            image-rendering: pixelated; /* Retro feel */
+        }
+    </style>
+</head>
+<body>
+    <canvas id="c"></canvas>
+    <script>
+        const canvas = document.getElementById('c');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let imgData; // The current image buffer
+        let meltData; // The buffer storing the melt state
+        let columns = [];
+        let animationId;
+        let sceneCounter = 0;
+        let state = 'IDLE'; // IDLE, MELTING, REVEALING
+        let meltStartY = 0;
+        const meltSpeed = 8;
+        const idleDuration = 2000; // ms to hold scene before melting
+        let idleTimer = 0;
+
+        // Resize handling
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            
+            // Initialize melt data if new
+            if (!meltData || meltData.length !== width) {
+                initMeltSystem();
+            }
+        }
+
+        function initMeltSystem() {
+            columns = [];
+            for (let x = 0; x < width; x++) {
+                columns.push({
+                    x: x,
+                    y: height, // Start melted out
+                    speed: Math.random() * 2 + 2, // Random speed
+                    wobbleOffset: Math.random() * 1000, // For sine wave wobble
+                    wobbleFreq: Math.random() * 0.05 + 0.02,
+                    active: false
+                });
+            }
+            // Create a blank buffer for melt state
+            meltData = new Uint8ClampedArray(width * height * 4);
+        }
+
+        // --- Scene Generators ---
+
+        function drawSkyline(ctx, w, h) {
+            // Background
+            const grad = ctx.createLinearGradient(0, 0, 0, h);
+            grad.addColorStop(0, '#050510');
+            grad.addColorStop(1, '#202040');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, w, h);
+
+            // Stars
+            ctx.fillStyle = '#fff';
+            for(let i=0; i<100; i++) {
+                ctx.fillRect(Math.random()*w, Math.random()*h*0.6, 2, 2);
+            }
+
+            // City
+            const numBuildings = Math.floor(w / 30);
+            for (let i = 0; i < numBuildings; i++) {
+                const bw = 20 + Math.random() * 40;
+                const bh = 100 + Math.random() * (h * 0.6);
+                const bx = i * 30 + Math.random() * 10;
+                const by = h - bh;
+                
+                ctx.fillStyle = `rgba(10, 10, 20, ${0.8 + Math.random() * 0.2})`;
+                ctx.fillRect(bx, by, bw, bh);
+
+                // Windows
+                ctx.fillStyle = Math.random() > 0.5 ? '#ffeb3b' : '#00bcd4';
+                for(let wy = by + 10; wy < h - 20; wy += 15) {
+                    for(let wx = bx + 5; wx < bx + bw - 5; wx += 10) {
+                        if(Math.random() > 0.3) ctx.fillRect(wx, wy, 4, 8);
+                    }
+                }
+            }
+        }
+
+        function drawTerrain(ctx, w, h) {
+            // Background
+            const grad = ctx.createLinearGradient(0, 0, 0, h);
+            grad.addColorStop(0, '#001133');
+            grad.addColorStop(0.5, '#004488');
+            grad.addColorStop(1, '#0088aa');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, w, h);
+
+            // Sun
+            ctx.fillStyle = '#ffaa00';
+            ctx.beginPath();
+            ctx.arc(w * 0.8, h * 0.3, 60, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Mountains (Layers)
+            for (let l = 0; l < 3; l++) {
+                ctx.beginPath();
+                ctx.moveTo(0, h);
+                const baseY = h * (0.5 + l * 0.15);
+                
+                for (let x = 0; x <= w; x += 10) {
+                    const y = baseY + Math.sin(x * 0.01 + l) * 50 + Math.sin(x * 0.03 + l * 2) * 20;
+                    ctx.lineTo(x, y);
+                }
+                ctx.lineTo(w, h);
+                ctx.fillStyle = `rgba(${10 + l*10}, ${50 + l*20}, ${50 + l*20}, 1)`;
+                ctx.fill();
+            }
+        }
+
+        function drawAbstract(ctx, w, h) {
+            // Background
+            ctx.fillStyle = '#111';
+            ctx.fillRect(0, 0, w, h);
+
+            // Grid
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 1;
+            const gridSize = 40;
+            ctx.beginPath();
+            for(let x=0; x<w; x+=gridSize) { ctx.moveTo(x,0); ctx.lineTo(x,h); }
+            for(let y=0; y<h; y+=gridSize) { ctx.moveTo(0,y); ctx.lineTo(w,y); }
+            ctx.stroke();
+
+            // Floating shapes
+            for(let i=0; i<20; i++) {
+                const x = Math.random() * w;
+                const y = Math.random() * h;
+                const r = 20 + Math.random() * 100;
+                const hue = Math.random() * 360;
+                
+                ctx.beginPath();
+                ctx.arc(x, y, r, 0, Math.PI * 2);
+                ctx.fillStyle = `hsla(${hue}, 70%, 50%, 0.2)`;
+                ctx.fill();
+                ctx.strokeStyle = `hsla(${hue}, 70%, 70%, 0.5)`;
+                ctx.stroke();
+            }
+        }
+
+        const scenes = [drawSkyline, drawTerrain, drawAbstract];
+
+        // --- Rendering & Logic ---
+
+        function generateScene() {
+            // Create an offscreen canvas to render the next scene
+            const offCanvas = document.createElement('canvas');
+            offCanvas.width = width;
+            offCanvas.height = height;
+            const offCtx = offCanvas.getContext('2d');
+            
+            // Pick random scene (excluding current one if possible, or just random)
+            const sceneIndex = Math.floor(Math.random() * scenes.length);
+            scenes[sceneIndex](offCtx, width, height);
+            
+            // Get image data
+            imgData = offCtx.getImageData(0, 0, width, height);
+        }
+
+        function updateMelt() {
+            if (state === 'IDLE') {
+                // Check if we need to start melting
+                if (Date.now() - idleTimer > idleDuration) {
+                    state = 'MELTING';
+                    // Randomize start delays for columns
+                    columns.forEach(c => {
+                        c.delay = Math.random() * 500; // ms to wait before starting
+                        c.startDelay = Date.now() + c.delay;
+                        c.active = true;
+                    });
+                }
+                return;
+            }
+
+            if (state === 'MELTING') {
+                const now = Date.now();
+                let allDone = true;
+
+                for (let i = 0; i < columns.length; i++) {
+                    const col = columns[i];
+                    
+                    if (now < col.startDelay) {
+                        allDone = false;
+                        continue;
+                    }
+
+                    // Move column down
+                    col.y += col.speed;
+                    
+                    // Add slight wobble to position
+                    const wobble = Math.sin(col.y * col.wobbleFreq + col.wobbleOffset) * 2;
+                    
+                    // Copy pixels from imgData to meltData
+                    // We copy a horizontal strip at col.y with width 1
+                    // To make it look like "drips", we actually want to copy from the top 
+                    // but shift it down. 
+                    // The visual effect: The "melt" is the image moving down.
+                    // We need to store the pixels that are currently at (x, y) in the buffer.
+                    
+                    const srcY = col.y - col.speed; // Where the pixels came from (approx)
+                    // Actually, simpler approach for "melt":
+                    // We just shift the data down in the buffer.
+                    // But since we want to READ from the original image and WRITE to the buffer:
+                    
+                    // Logic: 
+                    // 1. The buffer shows the "melted" version.
+                    // 2. The column moves down.
+                    // 3. We copy the pixel at (x, current_y) from the Source Image to the Buffer.
+                    // 4. This makes the image appear to stretch downwards.
+                    
+                    // Let's refine: 
+                    // The buffer `meltData` holds the composite.
+                    // We iterate down the column `col.y`.
+                    // We take pixel from `imgData` at `col.y`.
+                    // We put it into `meltData` at `col.y`.
+                    // This effectively reveals the image at the bottom of the column.
+                    // But wait, that just draws the image.
+                    
+                    // Correct Doom Logic:
+                    // The "melt" is a hole in the current image.
+                    // We need to composite:
+                    // 1. Existing pixels in meltData (background).
+                    // 2. Pixels from imgData (the current scene) at the specific coordinates of the dripping column.
+                    
+                    // If col.y < height:
+                    // Take pixel from imgData at (x, col.y).
+                    // Write to meltData at (x, col.y).
+                    // This makes the column "grow" downwards with the image content.
+                    
+                    if (col.y < height) {
+                        allDone = false;
+                        const idx = (col.y * width + col.x) * 4;
+                        
+                        // Apply wobble to source X to make it look distorted? 
+                        // Doom has slight lateral shifting.
+                        const srcX = Math.max(0, Math.min(width-1, col.x + Math.floor(Math.sin(col.y * 0.1) * 5)));
+                        const srcIdx = (col.y * width + srcX) * 4;
+
+                        meltData[idx] = imgData[srcIdx];     // R
+                        meltData[idx+1] = imgData[srcIdx+1]; // G
+                        meltData[idx+2] = imgData[srcIdx+2]; // B
+                        meltData[idx+3] = 255;               // A
+                    }
+                }
+
+                if (allDone) {
+                    state = 'REVEALING';
+                    // Fade out effect logic could go here, but for now we jump to new scene
+                    setTimeout(() => {
+                        sceneCounter++;
+                        generateScene();
+                        state = 'IDLE';
+                        idleTimer = Date.now();
+                        
+                        // Reset melt buffer
+                        meltData.fill(0); 
+                        
+                        // Reset columns for next time
+                        columns.forEach(c => {
+                            c.y = height;
+                            c.speed = Math.random() * 2 + 2;
+                            c.delay = Math.random() * 500;
+                            c.active = false;
+                        });
+                    }, 500); // Brief pause before new scene
+                }
+            }
+        }
+
+        function render() {
+            // Put the melt data onto the canvas
+            ctx.putImageData(new ImageData(meltData, width, height), 0, 0);
+            
+            // If state is IDLE, draw the full source image on top so it's visible
+            if (state === 'IDLE') {
+                ctx.putImageData(imgData, 0, 0);
+            }
+        }
+
+        function loop() {
+            updateMelt();
+            render();
+            animationId = requestAnimationFrame(loop);
+        }
+
+        // Init
+        window.addEventListener('resize', resize);
+        resize();
+        generateScene();
+        loop();
+
+    </script>
+</body>
+</html>

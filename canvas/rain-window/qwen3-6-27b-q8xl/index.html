@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rain on Window</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #050505;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d', { alpha: false });
+
+        let width, height;
+        let drops = [];
+        let bokeh = [];
+        
+        // Configuration
+        const config = {
+            dropCount: 150,
+            bokehCount: 40,
+            gravity: 0.15,
+            growthRate: 0.05,
+            mergeDistance: 15,
+            streakThreshold: 8, // Size at which drop falls
+            lightningChance: 0.001,
+            lightningDuration: 15,
+            refractionStrength: 0.8
+        };
+
+        let lightning = {
+            active: false,
+            opacity: 0,
+            timer: 0
+        };
+
+        // Resize handler
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            initBokeh();
+        }
+        window.addEventListener('resize', resize);
+
+        // --- Bokeh Background ---
+        function initBokeh() {
+            bokeh = [];
+            for (let i = 0; i < config.bokehCount; i++) {
+                bokeh.push({
+                    x: Math.random() * width,
+                    y: Math.random() * height,
+                    radius: Math.random() * 60 + 20,
+                    vx: (Math.random() - 0.5) * 0.5,
+                    vy: (Math.random() - 0.5) * 0.2,
+                    color: `hsla(${Math.random() * 360}, 70%, 60%, 0.4)`,
+                    blur: 10 + Math.random() * 20
+                });
+            }
+        }
+
+        function drawBackground() {
+            // Night sky gradient
+            const grad = ctx.createLinearGradient(0, 0, 0, height);
+            grad.addColorStop(0, '#020205');
+            grad.addColorStop(1, '#0a0a15');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, width, height);
+
+            // Bokeh lights
+            ctx.globalCompositeOperation = 'screen';
+            for (let b of bokeh) {
+                b.x += b.vx;
+                b.y += b.vy;
+
+                // Wrap around
+                if (b.x < -b.radius) b.x = width + b.radius;
+                if (b.x > width + b.radius) b.x = -b.radius;
+                if (b.y < -b.radius) b.y = height + b.radius;
+                if (b.y > height + b.radius) b.y = -b.radius;
+
+                ctx.beginPath();
+                ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+                
+                // Create soft blur using radial gradient
+                const radGrad = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, b.radius);
+                radGrad.addColorStop(0, b.color);
+                radGrad.addColorStop(1, 'rgba(0,0,0,0)');
+                
+                ctx.fillStyle = radGrad;
+                ctx.fill();
+            }
+            ctx.globalCompositeOperation = 'source-over';
+        }
+
+        // --- Rain Drop Logic ---
+        class Drop {
+            constructor(x, y, r) {
+                this.x = x;
+                this.y = y;
+                this.r = r || Math.random() * 2 + 1;
+                this.vy = 0;
+                this.falling = false;
+                this.trail = []; // For streaks
+            }
+
+            update() {
+                if (this.falling) {
+                    // Streak physics
+                    this.vy += config.gravity * 2;
+                    this.y += this.vy;
+                    this.x += (Math.random() - 0.5) * 0.5; // Slight wobble
+
+                    // Leave trail
+                    if (Math.random() > 0.5) {
+                        this.trail.push({x: this.x, y: this.y, r: this.r});
+                    }
+
+                    // Clean up trail
+                    if (this.trail.length > 20) this.trail.shift();
+
+                    // Reset if off screen
+                    if (this.y > height + this.r) {
+                        this.reset();
+                    }
+                } else {
+                    // Condensation physics
+                    this.r += config.growthRate;
+                    
+                    // Random chance to start falling
+                    if (this.r > config.streakThreshold && Math.random() < 0.05) {
+                        this.falling = true;
+                        this.vy = 0;
+                    }
+                }
+            }
+
+            reset() {
+                this.falling = false;
+                this.vy = 0;
+                this.trail = [];
+                this.x = Math.random() * width;
+                this.y = Math.random() * height;
+                this.r = Math.random() * 2 + 0.5;
+            }
+
+            draw() {
+                if (this.falling) {
+                    // Draw Streak
+                    ctx.beginPath();
+                    ctx.strokeStyle = 'rgba(200, 220, 255, 0.3)';
+                    ctx.lineWidth = this.r * 1.5;
+                    ctx.lineCap = 'round';
+                    
+                    if (this.trail.length > 0) {
+                        ctx.moveTo(this.trail[0].x, this.trail[0].y);
+                        for (let i = 1; i < this.trail.length; i++) {
+                            ctx.lineTo(this.trail[i].x, this.trail[i].y);
+                        }
+                        ctx.lineTo(this.x, this.y);
+                        ctx.stroke();
+                    }
+                } else {
+                    // Draw Drop (Lenticular shape)
+                    // The "Refraction" effect:
+                    // We draw a distorted circle that mimics looking through a lens.
+                    // We pull a bit of the background color to the center (caustics).
+                    
+                    const cx = this.x;
+                    const cy = this.y;
+                    const r = this.r;
+
+                    // 1. The main drop body (dark/glassy)
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
+                    ctx.fill();
+
+                    // 2. The Refraction (Simulated)
+                    // We draw a smaller circle slightly offset, colored by the "background"
+                    // Since we can't easily sample the canvas, we use a bright highlight 
+                    // to simulate the light bending.
+                    
+                    // Highlight (Top Left)
+                    ctx.beginPath();
+                    ctx.arc(cx - r*0.3, cy - r*0.3, r*0.2, 0, Math.PI * 2);
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+                    ctx.fill();
+
+                    // Refraction Ring (Bottom Right) - simulates light bending around edges
+                    ctx.beginPath();
+                    ctx.arc(cx + r*0.2, cy + r*0.2, r*0.8, 0, Math.PI * 2);
+                    ctx.strokeStyle = 'rgba(200, 220, 255, 0.15)';
+                    ctx.lineWidth = r * 0.2;
+                    ctx.stroke();
+                }
+            }
+        }
+
+        function initDrops() {
+            drops = [];
+            for (let i = 0; i < config.dropCount; i++) {
+                drops.push(new Drop(Math.random() * width, Math.random() * height));
+            }
+        }
+
+        function updateDrops() {
+            for (let i = 0; i < drops.length; i++) {
+                let d = drops[i];
+                d.update();
+
+                // Merging Logic
+                if (!d.falling) {
+                    for (let j = i + 1; j < drops.length; j++) {
+                        let other = drops[j];
+                        if (!other.falling) {
+                            let dx = d.x - other.x;
+                            let dy = d.y - other.y;
+                            let dist = Math.sqrt(dx*dx + dy*dy);
+                            
+                            if (dist < d.r + other.r) {
+                                // Merge: Grow larger, move towards center
+                                d.r += other.r * 0.2;
+                                other.r = 1; // Reset smaller one to tiny speck
+                                other.x = d.x + (Math.random()-0.5)*10;
+                                other.y = d.y + (Math.random()-0.5)*10;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Lightning ---
+        function updateLightning() {
+            if (Math.random() < config.lightningChance && !lightning.active) {
+                lightning.active = true;
+                lightning.timer = config.lightningDuration;
+                lightning.opacity = 1;
+            }
+
+            if (lightning.active) {
+                lightning.timer--;
+                if (lightning.timer <= 0) {
+                    lightning.active = false;
+                    lightning.opacity = 0;
+                } else {
+                    // Flicker
+                    lightning.opacity = Math.random() * 0.8 + 0.2;
+                }
+            }
+        }
+
+        function drawLightning() {
+            if (lightning.active) {
+                ctx.fillStyle = `rgba(200, 200, 255, ${lightning.opacity * 0.5})`;
+                ctx.fillRect(0, 0, width, height);
+                
+                // Add a subtle blue tint to bokeh via composite
+                ctx.globalCompositeOperation = 'screen';
+                ctx.fillStyle = `rgba(100, 100, 255, ${lightning.opacity * 0.2})`;
+                ctx.fillRect(0, 0, width, height);
+                ctx.globalCompositeOperation = 'source-over';
+            }
+        }
+
+        // --- Main Loop ---
+        function loop() {
+            drawBackground();
+            
+            updateLightning();
+            
+            updateDrops();
+            
+            // Draw all drops
+            for (let d of drops) {
+                d.draw();
+            }
+
+            // Draw Lightning Overlay
+            drawLightning();
+
+            requestAnimationFrame(loop);
+        }
+
+        // Start
+        resize();
+        initDrops();
+        loop();
+
+    </script>
+</body>
+</html>

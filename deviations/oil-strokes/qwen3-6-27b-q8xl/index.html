@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Procedural Oil Painter</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #1a1a1a;
+            overflow: hidden;
+            font-family: 'Courier New', Courier, monospace;
+        }
+        canvas {
+            display: block;
+        }
+        #ui {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 12px;
+            pointer-events: none;
+            mix-blend-mode: difference;
+        }
+    </style>
+</head>
+<body>
+    <div id="ui">Generating Landscape...</div>
+    <canvas id="canvas"></canvas>
+
+    <script>
+        /**
+         * PROCEDURAL OIL PAINTER
+         * 
+         * Logic:
+         * 1. Generate a procedural "underpainting" map (Sky, Hills, Ground).
+         * 2. Define "Strokes" based on geometry.
+         * 3. Animate the drawing of strokes with impasto/bristle textures.
+         */
+
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        const ui = document.getElementById('ui');
+
+        let width, height;
+        let strokes = [];
+        let currentStrokeIndex = 0;
+        let animationId;
+        let isPainting = false;
+        
+        // Palette Generator
+        const Palettes = {
+            sunset: {
+                sky: ['#2b1d42', '#5c2c4d', '#9e4658', '#d67d55', '#f5b365'],
+                ground: ['#1a1510', '#2d241b', '#4a3b2a', '#6b5744', '#8c7355'],
+                accent: ['#fff0d4', '#ffcc80']
+            },
+            gloom: {
+                sky: ['#0f172a', '#1e293b', '#334155', '#475569', '#64748b'],
+                ground: ['#020617', '#0f172a', '#1e293b', '#334155', '#475569'],
+                accent: ['#cbd5e1', '#94a3b8']
+            },
+            spring: {
+                sky: ['#87CEEB', '#4682B4', '#5F9EA0', '#20B2AA', '#008B8B'],
+                ground: ['#556B2F', '#6B8E23', '#8FBC8F', '#2E8B57', '#006400'],
+                accent: ['#98FB98', '#F0FFF0']
+            }
+        };
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+        }
+
+        window.addEventListener('resize', resize);
+        resize();
+
+        // --- Geometry & Noise ---
+
+        // Simple pseudo-random noise for hills
+        function noise(x) {
+            return Math.sin(x * 0.01) * 100 + Math.sin(x * 0.03) * 50 + Math.sin(x * 0.1) * 20;
+        }
+
+        function generateTerrain() {
+            const paletteKey = Object.keys(Palettes)[Math.floor(Math.random() * Object.keys(Palettes).length)];
+            const colors = Palettes[paletteKey];
+            const horizonY = height * 0.4 + (Math.random() * 100 - 50);
+            
+            // Generate Stroke Data
+            strokes = [];
+
+            // 1. SKY LAYERS (Horizontal)
+            // We divide the sky into bands
+            const skySteps = 8;
+            for (let y = 0; y < horizonY; y += (horizonY / skySteps)) {
+                const colorIdx = Math.floor((y / horizonY) * (colors.sky.length - 1));
+                const c = colors.sky[colorIdx];
+                const nextC = colors.sky[Math.min(colorIdx + 1, colors.sky.length - 1)];
+                
+                // Create broad horizontal strokes
+                const strokeW = width / (Math.random() * 2 + 3); 
+                const strokeH = (horizonY / skySteps) * 1.5; // Overlap
+                
+                for (let x = 0; x < width; x += strokeW * 0.7) {
+                    strokes.push({
+                        type: 'sky',
+                        x: x,
+                        y: y,
+                        w: strokeW + Math.random() * 50,
+                        h: strokeH,
+                        color: lerpColor(c, nextC, Math.random()),
+                        angle: (Math.random() - 0.5) * 0.05, // Mostly horizontal
+                        layer: 0
+                    });
+                }
+            }
+
+            // 2. HILLS (Contour-ish)
+            const hillLayers = 3;
+            for (let h = 0; h < hillLayers; h++) {
+                const baseY = horizonY + (h * (height - horizonY) / hillLayers);
+                const colorIdx = Math.floor((h / hillLayers) * (colors.ground.length - 1));
+                const c = colors.ground[colorIdx];
+                
+                // Draw a strip of strokes following the noise curve
+                const sliceHeight = (height - horizonY) / hillLayers * 1.5;
+                
+                for (let x = 0; x < width; x += 40 + Math.random() * 30) {
+                    const n = noise(x + h * 500);
+                    const yPos = baseY + n;
+                    
+                    strokes.push({
+                        type: 'hill',
+                        x: x,
+                        y: yPos,
+                        w: 50 + Math.random() * 40,
+                        h: sliceHeight / 2,
+                        color: c,
+                        angle: Math.atan2(noise(x + 5) - noise(x - 5), 10), // Tangent to slope
+                        layer: 1
+                    });
+                }
+            }
+
+            // 3. FOREGROUND (Vertical/Diagonal texture)
+            const fgY = height * 0.75;
+            const fgColor = colors.ground[colors.ground.length - 1];
+            
+            for (let y = fgY; y < height; y += 20) {
+                for (let x = 0; x < width; x += 30) {
+                    // Only paint if we are "below" the hills (simple depth check)
+                    const hillHeight = horizonY + noise(x) + (height-horizonY)/3; // Approximate front hill
+                    if (y > hillHeight) {
+                        strokes.push({
+                            type: 'grass',
+                            x: x,
+                            y: y,
+                            w: 10 + Math.random() * 15,
+                            h: 40 + Math.random() * 60,
+                            color: lerpColor(fgColor, colors.accent[0], Math.random() * 0.3),
+                            angle: (Math.random() - 0.5) * 0.5, // Mostly vertical
+                            layer: 2
+                        });
+                    }
+                }
+            }
+
+            // 4. HIGHLIGHTS / FLECKS (Impasto)
+            for(let i=0; i<50; i++) {
+                const x = Math.random() * width;
+                const y = Math.random() * height;
+                strokes.push({
+                    type: 'fleck',
+                    x: x,
+                    y: y,
+                    w: 5 + Math.random() * 10,
+                    h: 5 + Math.random() * 10,
+                    color: colors.accent[Math.floor(Math.random()*colors.accent.length)],
+                    angle: Math.random() * Math.PI,
+                    layer: 3
+                });
+            }
+            
+            // Sort by layer
+            strokes.sort((a, b) => a.layer - b.layer);
+        }
+
+        // --- Drawing Utilities ---
+
+        function hexToRgb(hex) {
+            const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+            return result ? {
+                r: parseInt(result[1], 16),
+                g: parseInt(result[2], 16),
+                b: parseInt(result[3], 16)
+            } : null;
+        }
+
+        function lerpColor(c1, c2, t) {
+            const rgb1 = hexToRgb(c1);
+            const rgb2 = hexToRgb(c2);
+            const r = Math.round(rgb1.r + (rgb2.r - rgb1.r) * t);
+            const g = Math.round(rgb1.g + (rgb2.g - rgb1.g) * t);
+            const b = Math.round(rgb1.b + (rgb2.b - rgb1.b) * t);
+            return `rgb(${r},${g},${b})`;
+        }
+
+        function drawBristleStroke(ctx, stroke, progress) {
+            ctx.save();
+            ctx.translate(stroke.x, stroke.y);
+            ctx.rotate(stroke.angle);
+
+            // Clip to reveal progress
+            ctx.beginPath();
+            ctx.rect(-stroke.w/2, -stroke.h/2, stroke.w * progress, stroke.h);
+            ctx.clip();
+
+            // Base color
+            ctx.fillStyle = stroke.color;
+            ctx.fillRect(-stroke.w/2, -stroke.h/2, stroke.w, stroke.h);
+
+            // Impasto / Texture Effect
+            // We draw darker/lighter streaks to simulate bristles
+            ctx.globalCompositeOperation = 'source-atop';
+            
+            const bristleCount = Math.floor(stroke.w / 3);
+            for(let i=0; i<bristleCount; i++) {
+                const bx = (Math.random() - 0.5) * stroke.w;
+                const bh = (Math.random() * 0.8 + 0.2) * stroke.h;
+                
+                // Shadow (bristle gap)
+                ctx.fillStyle = 'rgba(0,0,0,0.15)';
+                ctx.fillRect(bx, -stroke.h/2, 1, bh);
+                
+                // Highlight (paint ridge)
+                ctx.fillStyle = 'rgba(255,255,255,0.1)';
+                ctx.fillRect(bx + 1, -stroke.h/2, 1, bh);
+            }
+
+            // Soften edges slightly (canvas doesn't have perfect blending for this, but we can try)
+            ctx.globalCompositeOperation = 'source-over';
+            
+            ctx.restore();
+        }
+
+        function drawSignature(ctx) {
+            ctx.save();
+            ctx.translate(width - 150, height - 50);
+            ctx.strokeStyle = '#111';
+            ctx.lineWidth = 2;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            
+            // Procedural scribble signature
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.bezierCurveTo(20, -20, 40, 20, 60, 0);
+            ctx.bezierCurveTo(80, -20, 100, 20, 120, 0);
+            ctx.stroke();
+            
+            ctx.font = "italic 14px serif";
+            ctx.fillStyle = "#111";
+            ctx.fillText("AI Painter", 10, 30);
+            ctx.restore();
+        }
+
+        // --- Animation Loop ---
+
+        function animate() {
+            if (!isPainting) return;
+
+            // Clear only if starting a new cycle (handled in reset)
+            
+            // Paint logic
+            // We paint in batches to speed it up
+            const batchSize = 3 + Math.floor(currentStrokeIndex / 100); // Speed up as we go
+            
+            for (let i = 0; i < batchSize && currentStrokeIndex < strokes.length; i++) {
+                const s = strokes[currentStrokeIndex];
+                
+                // If stroke is new, init its progress
+                if (!s.progress) s.progress = 0;
+                
+                // Animate progress
+                s.progress += 0.1;
+                
+                // Draw the stroke
+                // To make it look like it's building up, we redraw the whole stroke 
+                // but clipped to the progress width? 
+                // Actually, simpler: Draw the stroke fully, but mask it?
+                // Or just draw segments.
+                
+                // Let's use a simpler approach: Draw the stroke fully. 
+                // To simulate "writing", we can just draw it. 
+                // But the prompt asks for "emerges".
+                
+                // Optimized approach: Just draw the stroke. 
+                // To make it look like a stroke being laid down, we draw the rect.
+                
+                ctx.save();
+                ctx.translate(s.x, s.y);
+                ctx.rotate(s.angle);
+                
+                // The visual of the stroke
+                // We simulate the "wet paint" look by drawing slightly larger with shadow
+                ctx.shadowColor = "rgba(0,0,0,0.2)";
+                ctx.shadowBlur = 4;
+                ctx.shadowOffsetX = 2;
+                ctx.shadowOffsetY = 2;
+
+                ctx.fillStyle = s.color;
+                
+                // Draw main body
+                ctx.beginPath();
+                // Slightly irregular rect for brush feel
+                ctx.moveTo(-s.w/2, -s.h/2);
+                ctx.lineTo(s.w/2, -s.h/2 + (Math.random()*4-2));
+                ctx.lineTo(s.w/2, s.h/2);
+                ctx.lineTo(-s.w/2, s.h/2 + (Math.random()*4-2));
+                ctx.fill();
+
+                // Bristles (Impasto detail)
+                ctx.shadowColor = "transparent"; // Remove shadow for details
+                ctx.globalCompositeOperation = 'source-atop';
+                
+                // Add texture lines
+                const numLines = Math.floor(s.w / 4);
+                for(let k=0; k<numLines; k++) {
+                    const lx = (Math.random() - 0.5) * s.w;
+                    const lh = s.h * (0.5 + Math.random() * 0.5);
+                    
+                    // Shadow line
+                    ctx.fillStyle = 'rgba(0,0,0,0.1)';
+                    ctx.fillRect(lx, -s.h/2, 2, lh);
+                    
+                    // Highlight line
+                    ctx.fillStyle = 'rgba(255,255,255,0.15)';
+                    ctx.fillRect(lx + 1, -s.h/2, 1, lh);
+                }
+                
+                ctx.restore();
+
+                currentStrokeIndex++;
+            }
+
+            if (currentStrokeIndex >= strokes.length) {
+                // Finished painting
+                isPainting = false;
+                drawSignature(ctx);
+                ui.innerText = "Completed. Resetting in 5s...";
+                
+                setTimeout(() => {
+                    resetCanvas();
+                }, 5000);
+            } else {
+                animationId = requestAnimationFrame(animate);
+            }
+        }
+
+        function resetCanvas() {
+            if (animationId) cancelAnimationFrame(animationId);
+            
+            // Fade out effect
+            ctx.fillStyle = 'rgba(245, 240, 230, 0.1)'; // Canvas paper color
+            ctx.fillRect(0, 0, width, height);
+            
+            // If fully faded or just reset immediately? Let's reset immediately for flow
+            ctx.fillStyle = '#f5f0e6'; // Off-white canvas
+            ctx.fillRect(0, 0, width, height);
+            
+            // Add canvas texture noise
+            const imageData = ctx.getImageData(0, 0, width, height);
+            const data = imageData.data;
+            for (let i = 0; i < data.length; i += 4) {
+                const noise = (Math.random() - 0.5) * 10;
+                data[i] += noise;
+                data[i+1] += noise;
+                data[i+2] += noise;
+            }
+            ctx.putImageData(imageData, 0, 0);
+
+            currentStrokeIndex = 0;
+            generateTerrain();
+            isPainting = true;
+            ui.innerText = "Painting...";
+            animate();
+        }
+
+        // Start
+        resetCanvas();
+
+    </script>
+</body>
+</html>

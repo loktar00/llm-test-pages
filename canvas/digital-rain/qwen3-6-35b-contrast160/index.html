@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width=device-width, initial-scale=1.0">
+    <title>Glyph Rain</title>
+    <style>
+        :root {
+            --bg: #05050a;
+            --fg: #00ffff;
+        }
+        body, html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: var(--bg);
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            filter: contrast(1.1) brightness(1.1);
+        }
+    </style>
+</head>
+<body>
+    <canvas id="c"></canvas>
+    <script>
+        /**
+         * GLYPH RAIN SCREENSAVER
+         * 
+         * Features:
+         * - 3 Parallax layers (Foreground, Midground, Background)
+         * - Falling glyphs with fading tails
+         * - "Hidden words" that form horizontally and dissolve
+         * - Slow camera drift
+         * - Occasional column glitch bursts
+         * - Teal-to-Violet palette
+         */
+
+        const canvas = document.getElementById('c');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let dpr = window.devicePixelRatio || 1;
+        
+        const LAYERS = [
+            { scale: 0.6, speed: 0.5, blur: 2, opacity: 0.4, color: '#4a4aff' }, // Back (Violet)
+            { scale: 1.0, speed: 1.0, blur: 1, opacity: 0.7, color: '#00aaff' }, // Mid (Teal)
+            { scale: 1.5, speed: 1.5, blur: 0, opacity: 1.0, color: '#00ffff' }  // Front (Bright Teal)
+        ];
+
+        let cols = [];
+        let words = [];
+        let lastTime = 0;
+        let drift = 0;
+
+        // Glyph pool
+        const GLYPHS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@#$%&*+<>/?:=^~[]{}';
+        const GLYPH_LEN = GLYPHS.length;
+
+        // Resize handler
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width * dpr;
+            canvas.height = height * dpr;
+            ctx.scale(dpr, dpr);
+            initCols();
+        }
+
+        // Column class
+        class Column {
+            constructor(x) {
+                this.x = x;
+                this.y = Math.random() * height;
+                this.speed = 1 + Math.random() * 2;
+                this.chars = [];
+                this.maxLength = 10 + Math.floor(Math.random() * 20);
+                this.glyphInterval = 100;
+                this.lastGlyphTime = 0;
+                this.glitching = false;
+                this.glitchTimer = 0;
+            }
+
+            update(dt, layer) {
+                // Glitch logic
+                if (this.glitching) {
+                    this.glitchTimer -= dt;
+                    if (this.glitchTimer <= 0) {
+                        this.glitching = false;
+                    }
+                }
+
+                // Move down
+                let speed = this.speed * layer.speed;
+                if (this.glitching) speed *= 3;
+                
+                this.y += speed * dt;
+
+                // Reset if off screen
+                if (this.y > height + 100) {
+                    this.y = -100 - Math.random() * 200;
+                    this.chars = [];
+                    this.glitching = false;
+                }
+
+                // Add new glyph
+                this.lastGlyphTime += dt;
+                let interval = 200 / layer.speed;
+                if (this.lastGlyphTime > interval) {
+                    this.lastGlyphTime = 0;
+                    this.chars.push({
+                        char: GLYPHS[Math.floor(Math.random() * GLYPH_LEN)],
+                        life: 1.0
+                    });
+                    if (this.chars.length > this.maxLength) {
+                        this.chars.shift();
+                    }
+                }
+
+                // Update life of chars (tail fade)
+                for (let i = 0; i < this.chars.length; i++) {
+                    this.chars[i].life -= 0.005 * layer.speed;
+                    if (this.glitching) {
+                        this.chars[i].char = GLYPHS[Math.floor(Math.random() * GLYPH_LEN)];
+                    }
+                }
+                // Remove dead chars
+                this.chars = this.chars.filter(c => c.life > 0);
+            }
+
+            draw(ctx, layer) {
+                ctx.font = `${16 * layer.scale}px monospace`;
+                ctx.textAlign = 'center';
+                
+                // Head (bright)
+                ctx.shadowBlur = 10 * layer.scale;
+                ctx.shadowColor = layer.color;
+                ctx.fillStyle = '#ffffff';
+
+                // Tail (fading)
+                ctx.shadowBlur = 0;
+
+                for (let i = 0; i < this.chars.length; i++) {
+                    let c = this.chars[i];
+                    let charY = this.y - (this.chars.length - 1 - i) * (16 * layer.scale);
+                    
+                    // Skip if off screen
+                    if (charY < -50 || charY > height + 50) continue;
+
+                    // Draw head
+                    if (i === this.chars.length - 1) {
+                        ctx.fillText(c.char, this.x, charY);
+                    } else {
+                        // Draw tail
+                        ctx.globalAlpha = c.life * layer.opacity;
+                        ctx.fillStyle = layer.color;
+                        ctx.fillText(c.char, this.x, charY);
+                    }
+                }
+                ctx.globalAlpha = 1.0;
+                ctx.shadowBlur = 0;
+            }
+        }
+
+        // Word class (Hidden words)
+        class Word {
+            constructor(x, y, text) {
+                this.x = x;
+                this.y = y;
+                this.text = text;
+                this.life = 1.0;
+                this.duration = 3000; // ms
+                this.age = 0;
+                this.active = true;
+            }
+
+            update(dt) {
+                this.age += dt;
+                if (this.age > this.duration) {
+                    this.life -= 0.05;
+                    if (this.life <= 0) this.active = false;
+                }
+            }
+
+            draw(ctx) {
+                ctx.font = '16px monospace';
+                ctx.textAlign = 'left';
+                ctx.shadowBlur = 15;
+                ctx.shadowColor = '#ffffff';
+                ctx.fillStyle = `rgba(255, 255, 255, ${this.life})`;
+                ctx.fillText(this.text, this.x, this.y);
+                ctx.shadowBlur = 0;
+            }
+        }
+
+        function initCols() {
+            cols = [];
+            let spacing = 20; // Distance between columns
+            let numCols = Math.ceil(width / spacing);
+            for (let i = 0; i < numCols; i++) {
+                cols.push(new Column(i * spacing + spacing / 2));
+            }
+        }
+
+        function triggerGlitch() {
+            let idx = Math.floor(Math.random() * cols.length);
+            cols[idx].glitching = true;
+            cols[idx].glitchTimer = 500; // 500ms glitch
+        }
+
+        function spawnWord() {
+            // Find a column that not glitching
+            let col = cols[Math.floor(Math.random() * cols.length)];
+            if (col.glitching) return;
+
+            // Generate a short word
+            let word = '';
+            for (let i = 0; i < 5 + Math.floor(Math.random() * 5); i++) {
+                word += GLYPHS[Math.floor(Math.random() * GLYPH_LEN)];
+            }
+
+            // Check overlap with existing words
+            let overlap = false;
+            for (let w of words) {
+                if (Math.abs(w.x - col.x) < 50 && Math.abs(w.y - col.y) < 50) {
+                    overlap = true;
+                    break;
+                }
+            }
+
+            if (!overlap) {
+                words.push(new Word(col.x, col.y, word));
+            }
+        }
+
+        function drawBackground() {
+            // Gradient background
+            let grad = ctx.createLinearGradient(0, 0, 0, height);
+            grad.addColorStop(0, '#05050a');
+            grad.addColorStop(1, '#1a0a2a');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, width, height);
+        }
+
+        function loop(timestamp) {
+            let dt = timestamp - lastTime;
+            lastTime = timestamp;
+
+            if (dt > 100) dt = 16; // Cap dt for tab switching
+
+            // Clear and draw bg
+            drawBackground();
+
+            // Camera drift
+            drift += 0.001 * dt;
+            let offsetX = Math.sin(drift) * 5;
+            let offsetY = Math.cos(drift * 0.7) * 2;
+
+            ctx.save();
+            ctx.translate(offsetX, offsetY);
+
+            // Update and draw columns
+            for (let layer of LAYERS) {
+                // Set blur for layer
+                ctx.filter = `blur(${layer.blur}px)`;
+                
+                for (let col of cols) {
+                    col.update(dt, layer);
+                    col.draw(ctx, layer);
+                }
+            }
+            ctx.filter = 'none';
+
+            // Draw words
+            for (let i = words.length - 1; i >= 0; i--) {
+                let w = words[i];
+                w.update(dt);
+                w.draw(ctx);
+                if (!w.active) words.splice(i, 1);
+            }
+
+            ctx.restore();
+
+            // Random events
+            if (Math.random() < 0.005) triggerGlitch();
+            if (Math.random() < 0.002) spawnWord();
+
+            requestAnimationFrame(loop);
+        }
+
+        // Init
+        window.addEventListener('resize', resize);
+        resize();
+        requestAnimationFrame(loop);
+
+    </script>
+</body>
+</html>

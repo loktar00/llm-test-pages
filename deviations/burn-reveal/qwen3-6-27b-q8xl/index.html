@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Infinite Burn Reveal</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d', { alpha: false });
+
+        // Configuration
+        const BURN_SPEED = 2.5; // How fast the fire spreads
+        const SPARK_COUNT = 3; // Sparks generated per frame per burn pixel (approx)
+        const CHARS_LIFE = 120; // Frames before char disappears
+        const PATTERN_SEED_CHANGE = 2000; // Randomness seed for new patterns
+
+        let width, height;
+        let imageData, bufferData;
+        let grid; // 2D array tracking state of every pixel
+        let sparks = [];
+        let frameCount = 0;
+        let patternSeed = Math.random() * 10000;
+        let nextPatternSeed = Math.random() * 10000;
+        
+        // State constants for grid
+        const STATE_INTACT = 0;
+        const STATE_BURNING = 1;
+        const STATE_CHAR = 2;
+
+        // Resize handler
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            initGrid();
+            startNewBurn();
+        }
+
+        // Initialize the tracking grid
+        function initGrid() {
+            // Using a 1D array for performance, mapped to 2D coordinates
+            grid = new Uint8Array(width * height);
+        }
+
+        // Fast pseudo-random noise for procedural generation
+        function noise(x, y, seed) {
+            const n = Math.sin(x * 12.9898 + y * 78.233 + seed) * 43758.5453;
+            return n - Math.floor(n);
+        }
+
+        // Generate the "Top" pattern (The one burning away)
+        function drawTopPattern(ctx, seed) {
+            // We draw directly to the canvas buffer logic, but for the "Top" layer,
+            // we actually just need to define its colors per pixel.
+            // However, to keep it simple and performant, we will draw the "Bottom" pattern
+            // to an offscreen canvas or just redraw it every frame? 
+            // Redrawing every frame is expensive.
+            // Strategy: 
+            // 1. Draw Bottom Pattern to a persistent ImageData object.
+            // 2. Draw Top Pattern to a persistent ImageData object.
+            // 3. Composite them based on the Grid state.
+        }
+
+        // Offscreen canvases for the patterns
+        const topCanvas = document.createElement('canvas');
+        const topCtx = topCanvas.getContext('2d');
+        const botCanvas = document.createElement('canvas');
+        const botCtx = botCanvas.getContext('2d');
+
+        function generatePattern(context, w, h, seed, colorBase) {
+            context.fillStyle = '#000';
+            context.fillRect(0, 0, w, h);
+            
+            // Procedural Geometry
+            const count = Math.floor(w * h / 4000);
+            for (let i = 0; i < count; i++) {
+                const x = Math.random() * w;
+                const y = Math.random() * h;
+                const size = Math.random() * 50 + 10;
+                
+                context.beginPath();
+                // Random shapes
+                if (Math.random() > 0.5) {
+                    context.arc(x, y, size, 0, Math.PI * 2);
+                } else {
+                    context.rect(x, y, size, size);
+                }
+                
+                // Color variation based on seed
+                const hue = (seed + i) % 360;
+                const sat = 50 + Math.random() * 50;
+                const light = 20 + Math.random() * 40;
+                context.fillStyle = `hsl(${hue}, ${sat}%, ${light}%)`;
+                context.fill();
+            }
+            
+            // Add some texture/noise
+            const imgData = context.getImageData(0, 0, w, h);
+            const data = imgData.data;
+            for (let i = 0; i < data.length; i += 4) {
+                const noiseVal = (Math.random() - 0.5) * 20;
+                data[i] += noiseVal;
+                data[i+1] += noiseVal;
+                data[i+2] += noiseVal;
+            }
+            context.putImageData(imgData, 0, 0);
+        }
+
+        function startNewBurn() {
+            // Resize offscreen canvases
+            topCanvas.width = width;
+            topCanvas.height = height;
+            botCanvas.width = width;
+            botCanvas.height = height;
+
+            // Generate patterns
+            generatePattern(topCtx, width, height, patternSeed);
+            generatePattern(botCtx, width, height, nextPatternSeed);
+
+            // Store pixel data for fast access
+            const topData = topCtx.getImageData(0, 0, width, height).data;
+            const botData = botCtx.getImageData(0, 0, width, height).data;
+
+            // Reset Grid
+            for (let i = 0; i < grid.length; i++) {
+                grid[i] = STATE_INTACT;
+            }
+
+            // Ignite random point
+            const startX = Math.floor(Math.random() * width);
+            const startY = Math.floor(Math.random() * height);
+            
+            // Ignite a small cluster
+            for(let dx = -5; dx <= 5; dx++) {
+                for(let dy = -5; dy <= 5; dy++) {
+                    if (dx*dx + dy*dy < 25) {
+                        const x = startX + dx;
+                        const y = startY + dy;
+                        if (x >= 0 && x < width && y >= 0 && y < height) {
+                            grid[y * width + x] = STATE_BURNING;
+                        }
+                    }
+                }
+            }
+
+            sparks = [];
+        }
+
+        // Spark Particle Class
+        class Spark {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                const angle = Math.random() * Math.PI * 2;
+                const speed = Math.random() * 2 + 0.5;
+                this.vx = Math.cos(angle) * speed;
+                this.vy = Math.sin(angle) * speed - 1; // Tend upwards
+                this.life = 1.0;
+                this.decay = Math.random() * 0.02 + 0.01;
+                this.size = Math.random() * 2 + 1;
+            }
+
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.vy -= 0.02; // Gravity (negative is up in canvas usually, but let's say sparks float up)
+                // Actually canvas y increases downwards. So gravity is +. Upward force is -.
+                // Let's make them drift up.
+                this.vy += 0.02; // Gravity pulls down
+                this.life -= this.decay;
+            }
+
+            draw(ctx) {
+                ctx.globalAlpha = Math.max(0, this.life);
+                ctx.fillStyle = `rgb(255, ${Math.floor(this.life * 200)}, 0)`;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.globalAlpha = 1.0;
+            }
+        }
+
+        function updateBurn() {
+            // We iterate through the grid. 
+            // To make it look organic, we only check neighbors of burning pixels.
+            // But iterating the whole array is fast enough for modern JS on reasonable resolutions.
+            // To optimize, we can iterate a subset or use a list of active fire pixels, 
+            // but let's try full scan first with a stride or simple logic.
+            
+            // Actually, scanning 1080p (2M pixels) every frame is heavy if logic is complex.
+            // Let's use a "Fire Front" list approach implicitly by checking neighbors.
+            // But for simplicity in a single file, let's just iterate and use random chance for spread.
+            
+            // Optimization: Only iterate pixels that are likely to change or checking neighbors.
+            // A simple grid scan is O(W*H). Let's do it.
+            
+            // We need to read the pixel data from the canvases to composite.
+            // Instead of getImageData every frame (slow), we keep the data in memory?
+            // No, let's just draw the Bottom Canvas to the main canvas first.
+            
+            // Wait, the requirement is "Reveal next pattern".
+            // So: 
+            // 1. Draw Bottom Pattern (The revealed one).
+            // 2. Draw Top Pattern (The burning one) ONLY where grid is INTACT.
+            // 3. Draw Fire effects where grid is BURNING.
+            // 4. Draw Char where grid is CHAR.
+            
+            // But drawing 2 million rects is slow.
+            // We should use `putImageData`.
+            
+            // Let's create a final ImageData buffer.
+            // Copy Bottom Pattern data.
+            // Overlay Top Pattern data where intact.
+            // Modify pixels where burning/charred.
+            
+            // This is the most performant way.
+            
+            // Get data once
+            const topData = topCtx.getImageData(0, 0, width, height).data;
+            const botData = botCtx.getImageData(0, 0, width, height).data;
+            
+            // Create a mutable copy of the bottom data (this will be our output)
+            // We can't modify botData directly if we want to keep it clean, but we are regenerating patterns only on loop.
+            // Actually, for the "Reveal" effect, the bottom pattern is static until the loop resets.
+            // So we can use botData as the base.
+            
+            // NOTE: In a real loop, we need to preserve the bottom pattern.
+            // Let's clone it.
+            // Actually, `new Uint8ClampedArray(botData)` is expensive every frame.
+            // Let's just draw the bottom canvas to the main canvas using `drawImage` first.
+            // Then we only draw the changes on top?
+            // No, `drawImage` is fast.
+            // 1. ctx.drawImage(botCanvas, 0, 0);
+            // 2. We need to draw the Top Pattern ONLY on intact pixels.
+            //    This requires pixel manipulation.
+            
+            // Let's go back to the ImageData approach. It's the only way to get per-pixel burn control.
+            // We will maintain a `currentOutput` buffer.
+            
+            if (!window.outputBuffer) {
+                window.outputBuffer = ctx.createImageData(width, height);
+            }
+            const output = window.outputBuffer.data;
+            
+            // Logic:
+            // Iterate y, x.
+            // If Intact: Copy Top Pattern pixel.
+            // If Burning: Calculate fire color.
+            // If Char: Calculate char color (fade to bottom pattern?).
+            // If Burnt (Gone): Copy Bottom Pattern pixel.
+            
+            // To handle the "Charred residue briefly remains before clearing"
+            // We need a state for "Charred" that transitions to "Gone" (showing bottom).
+            // Let's add STATE_GONE = 3.
+            
+            // Optimization: Only process pixels that are not GONE?
+            // No, we need to draw the bottom pattern where it's gone.
+            
+            // Let's optimize the loop.
+            // We can use a 1D loop.
+            
+            const len = width * height;
+            
+            // Pre-calculate some values
+            const time = Date.now() * 0.001;
+            
+            for (let i = 0; i < len; i++) {
+                const state = grid[i];
+                const pIdx = i * 4;
+                
+                if (state === STATE_INTACT) {
+                    // Copy from Top
+                    output[pIdx] = topData[pIdx];
+                    output[pIdx+1] = topData[pIdx+1];
+                    output[pIdx+2] = topData[pIdx+2];
+                    output[pIdx+3] = 255;
+                    
+                    // Check for spread
+                    // Only check spread for a subset of pixels to save perf? 
+                    // Or check neighbors.
+                    // Let's check neighbors.
+                    // To avoid boundary checks, pad the loop or check indices.
+                    const x = i % width;
+                    const y = (i - x) / width;
+                    
+                    // Simple spread logic:
+                    // If any neighbor is BURNING, chance to become BURNING.
+                    // Noise affects spread speed.
+                    
+                    let isNeighborBurning = false;
+                    
+                    // Check 4 neighbors
+                    if (x > 0 && grid[i-1] === STATE_BURNING) isNeighborBurning = true;
+                    else if (x < width-1 && grid[i+1] === STATE_BURNING) isNeighborBurning = true;
+                    else if (y > 0 && grid[i-width] === STATE_BURNING) isNeighborBurning = true;
+                    else if (y < height-1 && grid[i+width] === STATE_BURNING) isNeighborBurning = true;
+                    
+                    if (isNeighborBurning) {
+                        // Noise threshold for organic edge
+                        const xNoise = noise(x, y, time * 10);
+                        if (xNoise > 0.98) { // 2% chance per frame if neighbor is burning
+                             grid[i] = STATE_BURNING;
+                             // Update output for this frame to show it burning? 
+                             // No, next frame it will be processed as burning.
+                             // But to make it instant, let's process it now? 
+                             // No, standard cellular automata step.
+                        }
+                    }
+
+                } else if (state === STATE_BURNING) {
+                    // Fire Color
+                    // Oscillate between Orange, Yellow, White
+                    const flicker = Math.random();
+                    const r = 255;
+                    const g = Math.floor(100 + flicker * 155);
+                    const b = Math.floor(flicker * 100);
+                    
+                    output[pIdx] = r;
+                    output[pIdx+1] = g;
+                    output[pIdx+2] = b;
+                    output[pIdx+3] = 255;
+                    
+                    // Spawn sparks
+                    if (Math.random() < 0.05) { // Limit spark spawn rate
+                        sparks.push(new Spark(i % width, (i - (i%width))/width));
+                    }
+                    
+                    // Transition to Char
+                    if (Math.random() < 0.1) {
+                        grid[i] = STATE_CHAR;
+                    }
+
+                } else if (state === STATE_CHAR) {
+                    // Charred look: Dark, reddish/black
+                    // Fade out to reveal bottom pattern?
+                    // Or just stay dark for a bit then switch to "Gone"
+                    
+                    // Let's make it look like burnt paper/wood
+                    const r = 20 + Math.random() * 30;
+                    const g = 10 + Math.random() * 10;
+                    const b = 10 + Math.random() * 10;
+                    
+                    output[pIdx] = r;
+                    output[pIdx+1] = g;
+                    output[pIdx+2] = b;
+                    output[pIdx+3] = 255;
+                    
+                    // Transition to Gone (Reveal Bottom)
+                    // We need a counter for char life. 
+                    // Since we don't store per-pixel life in the grid (it's Uint8),
+                    // we can use a global "Char Decay" or just random chance.
+                    // Random chance is easier but less controlled.
+                    // Let's use a simple random chance to clear it.
+                    if (Math.random() < 0.05) {
+                        grid[i] = 3; // STATE_GONE
+                    }
+
+                } else {
+                    // STATE_GONE (3) or default
+                    // Reveal Bottom Pattern
+                    output[pIdx] = botData[pIdx];
+                    output[pIdx+1] = botData[pIdx+1];
+                    output[pIdx+2] = botData[pIdx+2];
+                    output[pIdx+3] = 255;
+                }
+            }
+            
+            ctx.putImageData(window.outputBuffer, 0, 0);
+        }
+
+        function updateSparks() {
+            for (let i = sparks.length - 1; i >= 0; i--) {
+                const s = sparks[i];
+                s.update();
+                s.draw(ctx);
+                if (s.life <= 0) {
+                    sparks.splice(i, 1);
+                }
+            }
+        }
+
+        function checkLoop() {
+            // Check if almost everything is gone
+            // Simple check: count intact pixels? Expensive.
+            // Just use a timer or check center point?
+            // Let's check a random sample of pixels.
+            
+            let intactCount = 0;
+            const sampleSize = 100;
+            for(let k=0; k<sampleSize; k++) {
+                const idx = Math.floor(Math.random() * grid.length);
+                if (grid[idx] === STATE_INTACT) intactCount++;
+            }
+            
+            // If very few intact pixels left, restart
+            if (intactCount < 5) {
+                patternSeed = nextPatternSeed;
+                nextPatternSeed = Math.random() * 10000;
+                startNewBurn();
+            }
+        }
+
+        function loop() {
+            updateBurn();
+            updateSparks();
+            checkLoop();
+            requestAnimationFrame(loop);
+        }
+
+        // Init
+        window.addEventListener('resize', resize);
+        resize();
+        loop();
+
+    </script>
+</body>
+</html>

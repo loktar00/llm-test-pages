@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width=device-width, initial-scale=1.0">
+    <title>Pendulum Wave</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #050508;
+            color: #aaa;
+            font-family: 'Courier New', Courier, monospace;
+        }
+        canvas {
+            display: block;
+        }
+        #info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            pointer-events: none;
+            text-shadow: 0 0 5px #000;
+        }
+        h1 {
+            margin: 0;
+            font-size: 1.2rem;
+            color: #fff;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+        }
+        p {
+            margin: 5px 0 0 0;
+            font-size: 0.8rem;
+            opacity: 0.7;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">
+        <h1>Pendulum Wave</h1>
+        <p>Period: 60s | Phase Reset</p>
+    </div>
+    <canvas id="canvas"></canvas>
+
+    <script>
+        /**
+         * Configuration
+         */
+        const CONFIG = {
+            pendulumCount: 24,
+            frameRate: 60,
+            cycleDuration: 60, // seconds
+            gravity: 9.81,
+            baseLength: 1.0,
+            lengthScale: 150, // pixels per meter
+            bobRadius: 6,
+            trailLength: 400, // frames
+            damping: 0.999, // Slight energy loss to keep it going
+            colors: {
+                bg: '#050508',
+                line: '#222',
+                trail: ['#00ffff', '#00ccff', '#0099ff', '#0066ff', '#0033ff', '#0000ff'],
+                chartLine: '#1a3a4a',
+                chartMarker: '#ffffff'
+            }
+        };
+
+        /**
+         * Setup Canvas
+         */
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let width, height;
+        let centerX, pivotY;
+
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            centerX = width / 2;
+            pivotY = height * 0.25; // Pivot point near top
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        /**
+         * Physics Engine
+         */
+        class Pendulum {
+            constructor(index, total) {
+                this.index = index;
+                this.total = total;
+                
+                // Calculate length based on cycle duration
+                // T = 2*pi*sqrt(L/g) => L = g*(T/2*pi)^2
+                // We want the last pendulum to complete exactly N cycles while the first completes 1.
+                // Frequency f_i = (i+1) / Total_Cycles. Period T_i = Total_Cycles / (i+1)
+                // Let Total_Cycles = 24 (so last one is 24x faster).
+                // T_0 = 60s.
+                
+                // Formula for length L:
+                // L = g * (T / (2*pi))^2
+                // T = CycleDuration / (index + 1)
+                
+                // Let's use a slightly offset approach for visual beauty
+                // The first pendulum (index 0) has Period = CycleDuration
+                // The last pendulum (index N-1) has Period = CycleDuration / N
+                
+                const cyclesPerMinute = 24; // Arbitrary harmonic choice for visual density
+                const period = CONFIG.cycleDuration / (1 + (index / (total - 1)) * (cyclesPerMinute - 1));
+                
+                this.length = (CONFIG.gravity * Math.pow(period / (2 * Math.PI), 2));
+                
+                // Initial conditions: All start at slightly displaced angle
+                this.angle = 0.5; // Radians (approx 30 degrees)
+                this.velocity = 0;
+                
+                // Trail history
+                this.history = [];
+                
+                // Visual properties
+                this.color = CONFIG.colors.trail[index % CONFIG.colors.trail.length];
+            }
+
+            update(dt) {
+                // Simple Euler integration for the pendulum
+                // alpha = -(g/L) * sin(theta)
+                const acceleration = -(CONFIG.gravity / this.length) * Math.sin(this.angle);
+                
+                this.velocity += acceleration * dt;
+                this.velocity *= CONFIG.damping; // Minimal damping to prevent infinite energy issues in sim
+                this.angle += this.velocity * dt;
+            }
+
+            getPosition() {
+                const x = Math.sin(this.angle) * this.length;
+                const y = Math.cos(this.angle) * this.length;
+                return { x, y };
+            }
+            
+            addHistoryPoint(x, y) {
+                this.history.push({ x, y });
+                if (this.history.length > CONFIG.trailLength) {
+                    this.history.shift();
+                }
+            }
+        }
+
+        // Initialize Pendulums
+        const pendulums = [];
+        for (let i = 0; i < CONFIG.pendulumCount; i++) {
+            pendulums.push(new Pendulum(i, CONFIG.pendulumCount));
+        }
+
+        /**
+         * Main Loop
+         */
+        let lastTime = 0;
+        let timeAccumulator = 0;
+
+        function loop(timestamp) {
+            if (!lastTime) lastTime = timestamp;
+            const dt = (timestamp - lastTime) / 1000; // Convert to seconds
+            lastTime = timestamp;
+
+            // Update Physics
+            pendulums.forEach(p => p.update(dt));
+
+            // Check for Cycle Reset
+            timeAccumulator += dt;
+            const resetFlash = timeAccumulator >= CONFIG.cycleDuration;
+            if (resetFlash) {
+                timeAccumulator = 0;
+                // Reset angles to original state for seamless loop
+                pendulums.forEach(p => {
+                    p.angle = 0.5;
+                    p.velocity = 0;
+                    p.history = [];
+                });
+            }
+
+            draw(resetFlash);
+            requestAnimationFrame(loop);
+        }
+
+        function draw(resetFlash) {
+            // 1. Clear Screen with Fade effect for trails
+            // We draw a semi-transparent rect instead of clearRect to create trails
+            ctx.fillStyle = 'rgba(5, 5, 8, 0.3)';
+            ctx.fillRect(0, 0, width, height);
+
+            // 2. Calculate Positions
+            const spacing = Math.min(40, width / CONFIG.pendulumCount);
+            const startX = centerX - ((CONFIG.pendulumCount - 1) * spacing) / 2;
+
+            const positions = pendulums.map(p => {
+                const pos = p.getPosition();
+                // Convert physics coords to screen coords
+                // Y is pointing down, so we add pivotY
+                const screenX = startX + (p.index * spacing);
+                const screenY = pivotY + (pos.y * CONFIG.lengthScale);
+                
+                // Add to history (store screen coords for trails)
+                p.addHistoryPoint(screenX, screenY);
+                
+                return { x: screenX, y: screenY };
+            });
+
+            // 3. Draw Persistence Chart (Seismograph)
+            // Draw horizontal lines for each pendulum
+            ctx.lineWidth = 1;
+            
+            pendulums.forEach((p, i) => {
+                const yBase = pivotY + (CONFIG.lengthScale * (p.length + 0.5)); // Below the bottom of pendulum
+                const xStart = positions[i].x;
+                
+                // Draw the trail for this pendulum
+                if (p.history.length > 1) {
+                    ctx.beginPath();
+                    ctx.strokeStyle = p.color;
+                    ctx.lineWidth = 2;
+                    ctx.globalAlpha = 0.6;
+                    
+                    // Draw the trail connecting points
+                    // Optimization: Draw multiple lines or just one path
+                    // For performance, we limit iterations or use a path
+                    ctx.moveTo(p.history[0].x, p.history[0].y);
+                    for (let j = 1; j < p.history.length; j++) {
+                        ctx.lineTo(p.history[j].x, p.history[j].y);
+                    }
+                    ctx.stroke();
+                    
+                    // Draw the current bob
+                    ctx.globalAlpha = 1.0;
+                    ctx.beginPath();
+                    ctx.arc(positions[i].x, positions[i].y, CONFIG.bobRadius, 0, Math.PI * 2);
+                    ctx.fillStyle = '#fff';
+                    ctx.fill();
+                    
+                    // Draw glow
+                    ctx.shadowBlur = 10;
+                    ctx.shadowColor = p.color;
+                    ctx.fill();
+                    ctx.shadowBlur = 0;
+                }
+            });
+
+            // 4. Draw Persistence Chart (Bottom)
+            // We draw a faint horizontal line across the bottom for each pendulum
+            // and trace the x-position over time
+            
+            // We shift the chart to the right or overlay it? 
+            // Requirement: "beneath them" implies below the visual area.
+            // Let's draw a chart at the bottom 100px
+            
+            const chartHeight = 80;
+            const chartY = height - chartHeight;
+            
+            // Draw chart background grid
+            ctx.strokeStyle = '#111';
+            ctx.lineWidth = 1;
+            for(let i=0; i<CONFIG.pendulumCount; i++) {
+                const cx = startX + (i * spacing);
+                ctx.beginPath();
+                ctx.moveTo(cx, chartY);
+                ctx.lineTo(cx, height);
+                ctx.stroke();
+            }
+            
+            // Draw the "Seismograph" traces
+            // We map time to x-axis of the chart. 
+            // Let the chart represent 10 seconds of history
+            const chartWindow = 10; // seconds
+            const timeNow = timeAccumulator;
+            
+            ctx.lineWidth = 1.5;
+            pendulums.forEach((p, i) => {
+                const cx = startX + (i * spacing);
+                ctx.beginPath();
+                ctx.strokeStyle = p.color;
+                ctx.globalAlpha = 0.4;
+                
+                // Draw a line segment representing the past x-displacement
+                // We iterate backwards in time
+                const step = 0.1; // 100ms resolution for chart
+                let prevX = cx;
+                
+                for(let t = 0; t < chartWindow; t += step) {
+                    // We need to find the history point at (timeNow - t)
+                    // Since history is only screen coords, we approximate by using the current angle
+                    // Or simpler: just draw the current displacement as a bar?
+                    // "tracing each bob x-position over time" -> A line graph
+                    
+                    // This is a real-time oscilloscope view
+                    // x-axis of chart = time, y-axis of chart = displacement
+                    // Actually, "beneath them" usually implies a 2D plot where X=Space, Y=Time
+                    // But "tracing x-position over time" implies a 1D plot.
+                    
+                    // Let's do a classic Seismograph: 
+                    // X-axis = Spatial Position (same with pendulums)
+                    // Y-axis = Time (Downwards)
+                    // This is a "waterfall" plot.
+                }
+            });
+            
+            // Let's implement the "Waterfall" / "Space-Time" plot
+            // It looks like a standing wave pattern.
+            // X-axis: Pendulum Index
+            // Y-axis: Time (going down)
+            // Color: Displacement (X position)
+            
+            ctx.globalAlpha = 0.8;
+            ctx.lineWidth = 1;
+            
+            // Draw each pendulum's history as a vertical line in the chart area
+            pendulums.forEach((p, i) => {
+                const cx = startX + (i * spacing);
+                
+                // We need the displacement history. 
+                // We store it in the physics update, but let's compute it now for the chart
+                // Or better: store displacement in history
+                
+                // Let's modify Pendulum to store displacement (angle)
+                // For simplicity, we recalculate displacement from angle
+                const displacement = Math.sin(p.angle) * CONFIG.lengthScale;
+                
+                // Draw a marker on the chart
+                // Chart Y: bottom is now, top is past
+                // Map timeAccumulator to height
+                
+                const maxHistory = 500; // frames worth of history
+                // We need to be smooth. Let's just draw the current marker on the chart line
+                
+                // Draw a line from the pivot down to the displacement, fading out
+                // This creates the "Ghosting" effect
+                ctx.beginPath();
+                ctx.strokeStyle = p.color;
+                
+                // Draw "ghost" trail going up
+                const trailCount = 20;
+                for(let k=0; k<trailCount; k++) {
+                    const alpha = 1 - (k / trailCount);
+                    ctx.globalAlpha = alpha * 0.5;
+                    // Shift up based on k
+                    const ghostY = height - (k * 2) - (chartHeight/2); 
+                    // Simple visual trick: just a vertical line representing amplitude
+                    // But we want the "x-position over time".
+                    
+                    // Correct interpretation:
+                    // The chart is a oscilloscope.
+                    // X-axis = Time (scrolling)
+                    // Y-axis = Amplitude
+                    // But "beneath them" implies X-axis = Spatial (pendulums).
+                    
+                    // Let's do a "Space-Time" diagram.
+                    // X = Pendulum Index
+                    // Y = Time (going up from bottom)
+                    // Color = Displacement
+                    
+                    // We iterate history?
+                }
+                
+                // Simplified: Just draw the current state on the chart
+                // And a fading trail upwards
+                const amplitude = Math.sin(p.angle) * 40; // Scaled for visual
+                const yBase = height;
+                const yTop = height - chartHeight;
+                
+                // Current position on chart
+                const currentY = yBase - (amplitude * 2); // Center is at bottom?
+                // Actually, let's make the chart center at Y = height - chartHeight/2
+                
+                const centerY = height - chartHeight/2;
+                const chartYPos = centerY - amplitude;
+                
+                ctx.beginPath();
+                ctx.moveTo(cx, centerY);
+                ctx.lineTo(cx, chartYPos);
+                ctx.stroke();
+                
+                // Draw dot
+                ctx.fillStyle = p.color;
+                ctx.beginPath();
+                ctx.arc(cx, chartYPos, 2, 0, Math.PI*2);
+                ctx.fill();
+            });
+            
+            // Draw Reset Marker
+            if (resetFlash) {
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+                ctx.fillRect(0, height - chartHeight, width, 2);
+                
+                // Flash text
+                ctx.font = "20px Courier New";
+                ctx.fillStyle = "#fff";
+                ctx.textAlign = "center";
+                ctx.fillText("PHASE RESET", centerX, height - chartHeight - 10);
+            }
+            
+            // Reset Alpha
+            ctx.globalAlpha = 1.0;
+        }
+
+        // Start
+        requestAnimationFrame(loop);
+
+    </script>
+</body>
+</html>

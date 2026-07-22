@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Exploding Clock</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #050505;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let particles = [];
+        let lastTime = '';
+        let lastExplosionTime = 0;
+        const EXPLOSION_INTERVAL = 10000; // 10 seconds
+        
+        // Physics constants
+        const GRAVITY = 0.15;
+        const FRICTION = 0.96;
+        const RETURN_SPEED = 0.15; // Lerp factor
+        const EXPLOSION_FORCE = 15;
+
+        // Colors
+        const COLOR_BASE = { h: 200, s: 80, l: 60 }; // Cyan/Blue
+        const COLOR_HOT = { h: 10, s: 90, l: 60 }; // Red/Orange
+
+        class Particle {
+            constructor(x, y, color) {
+                this.x = x;
+                this.y = y;
+                this.ox = x; // Origin X (Target)
+                this.oy = y; // Origin Y (Target)
+                this.vx = 0;
+                this.vy = 0;
+                this.size = Math.random() * 1.5 + 1;
+                this.color = color;
+                this.life = 1;
+            }
+
+            update(state) {
+                if (state === 'EXPLODE') {
+                    this.x += this.vx;
+                    this.y += this.vy;
+                    this.vy += GRAVITY;
+                    this.vx *= FRICTION;
+                    this.vy *= FRICTION;
+                } else if (state === 'REASSEMBLE') {
+                    // Move towards origin
+                    const dx = this.ox - this.x;
+                    const dy = this.oy - this.y;
+                    
+                    this.x += dx * RETURN_SPEED;
+                    this.y += dy * RETURN_SPEED;
+
+                    // Add some "swarm" noise
+                    this.x += (Math.random() - 0.5) * 2;
+                    this.y += (Math.random() - 0.5) * 2;
+                } else if (state === 'BREATHE') {
+                    // Gentle sine wave movement
+                    this.x = this.ox + Math.sin(Date.now() / 500 + this.ox) * 1;
+                    this.y = this.oy + Math.cos(Date.now() / 500 + this.oy) * 1;
+                }
+            }
+
+            draw(ctx) {
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            initParticles(getCurrentTime());
+        }
+
+        function getCurrentTime() {
+            const now = new Date();
+            return now.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        }
+
+        function getPixels(text) {
+            // Create an offscreen canvas to scan pixel data
+            const offCanvas = document.createElement('canvas');
+            const offCtx = offCanvas.getContext('2d');
+            offCanvas.width = width;
+            offCanvas.height = height;
+
+            // Style the text
+            const fontSize = Math.min(width / 10, 300);
+            offCtx.font = `bold ${fontSize}px monospace`;
+            offCtx.textAlign = 'center';
+            offCtx.textBaseline = 'middle';
+            offCtx.fillStyle = 'white';
+            offCtx.fillText(text, width / 2, height / 2);
+
+            const imageData = offCtx.getImageData(0, 0, width, height);
+            const data = imageData.data;
+            const pixels = [];
+            
+            // Sampling step (higher = fewer particles, better performance)
+            const gap = 4; 
+
+            for (let y = 0; y < height; y += gap) {
+                for (let x = 0; x < width; x += gap) {
+                    const index = (y * width + x) * 4;
+                    // Check alpha channel
+                    if (data[index + 3] > 128) {
+                        pixels.push({ x, y });
+                    }
+                }
+            }
+            return pixels;
+        }
+
+        function initParticles(timeStr) {
+            particles = [];
+            const pixels = getPixels(timeStr);
+            
+            pixels.forEach(p => {
+                particles.push(new Particle(p.x, p.y, `hsl(${COLOR_BASE.h}, ${COLOR_BASE.s}%, ${COLOR_BASE.l}%)`));
+            });
+        }
+
+        function updateTargetPositions(timeStr) {
+            const pixels = getPixels(timeStr);
+            // Ensure we have enough particles (if new text is longer)
+            while (particles.length < pixels.length) {
+                particles.push(new Particle(width/2, height/2, `hsl(${COLOR_BASE.h}, ${COLOR_BASE.s}%, ${COLOR_BASE.l}%)`));
+            }
+            // If text is shorter, hide extras or just ignore them
+            // For simplicity, we update existing ones and leave extras floating or hide them
+            
+            particles.forEach((p, i) => {
+                if (i < pixels.length) {
+                    p.ox = pixels[i].x;
+                    p.oy = pixels[i].y;
+                    p.color = `hsl(${COLOR_BASE.h}, ${COLOR_BASE.s}%, ${COLOR_BASE.l}%)`;
+                    p.active = true;
+                } else {
+                    p.active = false; // Hide particles that aren't needed for the new number
+                }
+            });
+        }
+
+        function explode() {
+            const centerX = width / 2;
+            const centerY = height / 2;
+
+            particles.forEach(p => {
+                if (!p.active) return;
+
+                // Calculate vector from center
+                const dx = p.x - centerX;
+                const dy = p.y - centerY;
+                const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+
+                // Explosion force
+                const force = EXPLOSION_FORCE * (Math.random() + 0.5);
+                
+                p.vx = (dx / dist) * force + (Math.random() - 0.5) * 10;
+                p.vy = (dy / dist) * force + (Math.random() - 0.5) * 10;
+
+                // Change color to hot
+                p.color = `hsl(${COLOR_HOT.h}, ${COLOR_HOT.s}%, ${COLOR_HOT.l}%)`;
+            });
+        }
+
+        let state = 'BREATHE'; // BREATHE, EXPLODE, REASSEMBLE
+
+        function animate() {
+            // Clear canvas with trail effect
+            ctx.fillStyle = 'rgba(5, 5, 5, 0.4)';
+            ctx.fillRect(0, 0, width, height);
+
+            const now = Date.now();
+            const currentTime = getCurrentTime();
+
+            // Check for time change or interval trigger
+            if (currentTime !== lastTime || (now - lastExplosionTime > EXPLOSION_INTERVAL)) {
+                if (state !== 'EXPLODE') {
+                    // Trigger sequence
+                    state = 'EXPLODE';
+                    lastExplosionTime = now;
+                    lastTime = currentTime;
+                    updateTargetPositions(currentTime);
+                    explode();
+                }
+            }
+
+            // State Machine
+            let transitioning = false;
+
+            particles.forEach(p => {
+                if (!p.active) return;
+
+                if (state === 'EXPLODE') {
+                    p.update('EXPLODE');
+                    transitioning = true;
+                } else if (state === 'REASSEMBLE') {
+                    p.update('REASSEMBLE');
+                    transitioning = true;
+                    // Check if close enough to switch to breathe
+                    const dist = Math.abs(p.x - p.ox) + Math.abs(p.y - p.oy);
+                    if (dist < 2) {
+                        p.x = p.ox;
+                        p.y = p.oy;
+                    }
+                } else {
+                    p.update('BREATHE');
+                }
+
+                p.draw(ctx);
+            });
+
+            // Logic to switch states
+            if (state === 'EXPLODE' && !transitioning) {
+                // Fallback safety, though logic above handles transition
+                state = 'REASSEMBLE';
+            }
+            
+            // Check if explosion has slowed down enough to start reassembly
+            if (state === 'EXPLODE') {
+                // Simple heuristic: wait a bit or check max velocity
+                // For smoother animation, we switch to reassemble after a short delay or when velocities drop
+                // Let's just switch to reassemble immediately but keep physics active for a moment?
+                // Better: Switch to REASSEMBLE state after a short duration of explosion
+                if (now - lastExplosionTime > 200) { // 200ms of explosion
+                    state = 'REASSEMBLE';
+                }
+            }
+
+            // Check if reassembly is complete
+            if (state === 'REASSEMBLE') {
+                let settled = true;
+                for(let p of particles) {
+                    if(p.active && (Math.abs(p.x - p.ox) > 5 || Math.abs(p.y - p.oy) > 5)) {
+                        settled = false;
+                        break;
+                    }
+                }
+                if (settled) {
+                    state = 'BREATHE';
+                }
+            }
+
+            requestAnimationFrame(animate);
+        }
+
+        window.addEventListener('resize', resize);
+        resize();
+        animate();
+
+    </script>
+</body>
+</html>

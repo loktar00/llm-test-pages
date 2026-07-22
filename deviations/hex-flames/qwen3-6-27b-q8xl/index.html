@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hexagonal Fire</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d', { alpha: false });
+
+        // Configuration
+        const HEX_SIZE = 8; // Radius of hexagon
+        const HEX_HEIGHT = Math.sqrt(3) * HEX_SIZE;
+        const HEX_WIDTH = 2 * HEX_SIZE;
+        const DIAMETER = HEX_WIDTH;
+        const COOLING_RATE = 0.03;
+        const SPARK_CHANCE = 0.002;
+        const WIND_SPEED = 0.002;
+        
+        // State
+        let cols, rows;
+        let grid = [];
+        let sparks = [];
+        let wind = 0;
+        let windTarget = 0;
+        let windTimer = 0;
+
+        // Color Palette (Temperature to RGB)
+        // 0.0 = Black, 0.3 = Red, 0.6 = Orange/Yellow, 1.0 = White
+        function getColor(temp) {
+            if (temp <= 0) return [0, 0, 0];
+            if (temp < 0.3) {
+                // Black to Red
+                const t = temp / 0.3;
+                return [Math.floor(255 * t), 0, 0];
+            } else if (temp < 0.6) {
+                // Red to Orange/Yellow
+                const t = (temp - 0.3) / 0.3;
+                return [255, Math.floor(255 * t), 0];
+            } else {
+                // Orange/Yellow to White
+                const t = (temp - 0.6) / 0.4;
+                return [255, 255, Math.floor(255 * t)];
+            }
+        }
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            
+            // Calculate grid dimensions
+            // Horizontal spacing for pointy-top hex is sqrt(3) * size
+            // Vertical spacing is 1.5 * size
+            const w = Math.sqrt(3) * HEX_SIZE;
+            const h = 1.5 * HEX_SIZE;
+            
+            cols = Math.ceil(canvas.width / w) + 2;
+            rows = Math.ceil(canvas.height / h) + 2;
+
+            // Re-initialize grid
+            const newGrid = new Float32Array(cols * rows);
+            
+            // Copy old data if possible (resize up), otherwise start fresh
+            if (grid.length > 0) {
+                for (let i = 0; i < Math.min(newGrid.length, grid.length); i++) {
+                    newGrid[i] = grid[i];
+                }
+            }
+            grid = newGrid;
+        }
+
+        function init() {
+            resize();
+            window.addEventListener('resize', resize);
+            loop();
+        }
+
+        function updateWind() {
+            windTimer--;
+            if (windTimer <= 0) {
+                // Pick a new random wind target between -1 and 1
+                windTarget = (Math.random() * 2 - 1);
+                windTimer = Math.random() * 200 + 100;
+            }
+            // Smoothly interpolate current wind to target
+            wind += (windTarget - wind) * 0.05;
+        }
+
+        function spawnSparks() {
+            // Chance to spawn spark based on hot cells
+            for (let y = 0; y < rows - 1; y++) {
+                for (let x = 0; x < cols - 1; x++) {
+                    const idx = y * cols + x;
+                    if (grid[idx] > 0.8 && Math.random() < SPARK_CHANCE) {
+                        sparks.push({
+                            x: x * (Math.sqrt(3) * HEX_SIZE) + (y % 2 ? Math.sqrt(3) * HEX_SIZE / 2 : 0),
+                            y: y * (1.5 * HEX_SIZE),
+                            vx: (Math.random() - 0.5) * 1 + wind * 2,
+                            vy: -(Math.random() * 2 + 1),
+                            life: 1.0,
+                            decay: 0.01 + Math.random() * 0.02
+                        });
+                    }
+                }
+            }
+        }
+
+        function updateSparks() {
+            for (let i = sparks.length - 1; i >= 0; i--) {
+                const s = sparks[i];
+                s.x += s.vx;
+                s.y += s.vy;
+                s.life -= s.decay;
+                
+                // Wind effect on sparks
+                s.vx += wind * 0.05;
+
+                if (s.life <= 0 || s.y < 0) {
+                    sparks.splice(i, 1);
+                }
+            }
+        }
+
+        function updateGrid() {
+            // Create a copy for simultaneous updates
+            // Using a typed array for performance
+            const nextGrid = new Float32Array(cols * rows);
+            
+            // Copy current grid
+            nextGrid.set(grid);
+
+            // Iterate through grid (skip edges to avoid bounds checks)
+            // We process top to bottom, but since we copy, order doesn't strictly matter for causality
+            // within the frame, but usually fire goes up.
+            
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    const idx = y * cols + x;
+                    
+                    // 1. Base Cooling
+                    let temp = grid[idx] - COOLING_RATE;
+                    if (temp < 0) temp = 0;
+
+                    // 2. Heat Propagation
+                    // We look at neighbors. 
+                    // For pointy-top hex grid (odd-r offset coordinates):
+                    // Direction depends on whether row y is even or odd.
+                    
+                    let heatGain = 0;
+                    const neighbors = [];
+
+                    // Helper to add neighbor
+                    const add = (nx, ny) => {
+                        if (nx >= 0 && nx < cols && ny >= 0 && ny < rows) {
+                            neighbors.push(ny * cols + nx);
+                        }
+                    };
+
+                    // Odd-r (odd rows shifted right) vs Even-r logic
+                    // My drawing logic: x * width + (y%2 * width/2)
+                    // This is effectively "odd-r" horizontal layout (rows are offset)
+                    
+                    if (y % 2 === 0) {
+                        // Even Row
+                        add(x, y - 1);       // Top
+                        add(x - 1, y - 1);   // Top Left
+                        add(x, y - 1);       // Top Right (duplicate in this logic? No, standard hex has 6)
+                        // Let's use standard neighbor offsets for pointy-top, odd-r offset
+                        // Even Row Neighbors:
+                        // (-1, -1), (0, -1)
+                        // (-1, 0), (1, 0)
+                        // (-1, 1), (0, 1)
+                        add(x - 1, y - 1);
+                        add(x, y - 1);
+                        add(x - 1, y);
+                        add(x + 1, y);
+                        add(x - 1, y + 1);
+                        add(x, y + 1);
+                    } else {
+                        // Odd Row
+                        // (0, -1), (1, -1)
+                        // (-1, 0), (1, 0)
+                        // (0, 1), (1, 1)
+                        add(x, y - 1);
+                        add(x + 1, y - 1);
+                        add(x - 1, y);
+                        add(x + 1, y);
+                        add(x, y + 1);
+                        add(x + 1, y + 1);
+                    }
+
+                    // Calculate heat transfer
+                    // Fire rises: prioritize top neighbors
+                    // Wind: bias neighbors based on wind direction
+                    
+                    let maxNeighbor = 0;
+                    let sumNeighbor = 0;
+
+                    for (let nIdx of neighbors) {
+                        const nTemp = grid[nIdx];
+                        sumNeighbor += nTemp;
+                        if (nTemp > maxNeighbor) maxNeighbor = nTemp;
+                    }
+
+                    // Propagation logic:
+                    // Gain heat from max neighbor (fast spread) and average (slow spread)
+                    // Bias towards upward flow
+                    
+                    // Determine wind bias factor (-1 to 1)
+                    // If wind is positive (right), prefer right neighbors
+                    
+                    // Simple propagation:
+                    // Take a portion of the hottest neighbor
+                    const transferRate = 0.15;
+                    const diffusionRate = 0.05;
+                    
+                    // Add random flicker
+                    const flicker = Math.random() * 0.05;
+
+                    temp += (maxNeighbor * transferRate) + (sumNeighbor * diffusionRate / 6) + flicker;
+
+                    // Cap temperature
+                    if (temp > 1.0) temp = 1.0;
+
+                    nextGrid[idx] = temp;
+                }
+            }
+
+            // 3. Fuel Source (Bottom Edge)
+            // Set bottom rows to high temperature
+            for (let x = 0; x < cols; x++) {
+                // Bottom 2 rows
+                for (let r = 0; r < 2; r++) {
+                    const idx = (rows - 1 - r) * cols + x;
+                    // Add randomness to the fuel source for turbulence
+                    let fuel = 0.9 + Math.random() * 0.1;
+                    
+                    // Wind effect on fuel base (leaning)
+                    // We can shift the intensity slightly based on x position relative to wind
+                    // Or just let the propagation handle the lean.
+                    // Let's let propagation handle the lean.
+                    
+                    if (fuel > grid[idx]) {
+                        nextGrid[idx] = fuel;
+                    }
+                }
+            }
+            
+            // Apply Wind Bias to Propagation
+            // We modify the grid directly to push heat horizontally
+            // This is a simplified fluid dynamics approximation
+            if (Math.abs(wind) > 0.01) {
+                for (let y = rows - 2; y > 0; y--) {
+                    for (let x = 0; x < cols; x++) {
+                        const idx = y * cols + x;
+                        let dx = Math.round(wind * 5); // How many cells to shift
+                        
+                        if (dx > 0) {
+                            // Moving right
+                            if (x + dx < cols) {
+                                // Push heat to right
+                                const targetIdx = y * cols + (x + dx);
+                                // Blend heat
+                                let transfer = nextGrid[idx] * 0.1; 
+                                if (nextGrid[targetIdx] < nextGrid[idx]) {
+                                     nextGrid[targetIdx] += transfer;
+                                     nextGrid[idx] -= transfer * 0.5; // Conserve some energy
+                                }
+                            }
+                        } else {
+                            // Moving left
+                            if (x + dx >= 0) {
+                                const targetIdx = y * cols + (x + dx);
+                                let transfer = nextGrid[idx] * 0.1;
+                                if (nextGrid[targetIdx] < nextGrid[idx]) {
+                                     nextGrid[targetIdx] += transfer;
+                                     nextGrid[idx] -= transfer * 0.5;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            grid = nextGrid;
+        }
+
+        function draw() {
+            // Clear background
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Use additive blending for glow
+            ctx.globalCompositeOperation = 'lighter';
+
+            // Draw Hexagons
+            // Optimization: Only draw cells with temp > 0.05
+            const w = Math.sqrt(3) * HEX_SIZE;
+            const h = 1.5 * HEX_SIZE;
+
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    const temp = grid[y * cols + x];
+                    if (temp > 0.05) {
+                        const [r, g, b] = getColor(temp);
+                        
+                        // Hexagon Geometry
+                        // Center point
+                        const cx = x * w + (y % 2 ? w / 2 : 0);
+                        const cy = y * h;
+
+                        // Draw Hex
+                        // To make it look dense, we can draw a filled polygon
+                        // Or just a circle for performance? Polygon looks more "hex".
+                        
+                        ctx.fillStyle = `rgb(${r},${g},${b})`;
+                        
+                        // Draw a slightly smaller hex to avoid gaps, or larger to overlap
+                        // Overlap is better for fire look
+                        const size = HEX_SIZE * 1.05; 
+                        
+                        ctx.beginPath();
+                        for (let i = 0; i < 6; i++) {
+                            const angle = 2 * Math.PI / 6 * (i + 0.5); // Pointy top
+                            const px = cx + size * Math.cos(angle);
+                            const py = cy + size * Math.sin(angle);
+                            if (i === 0) ctx.moveTo(px, py);
+                            else ctx.lineTo(px, py);
+                        }
+                        ctx.closePath();
+                        ctx.fill();
+                    }
+                }
+            }
+
+            // Draw Sparks
+            for (let s of sparks) {
+                const [r, g, b] = getColor(s.life);
+                ctx.fillStyle = `rgb(${r},${g},${b})`;
+                ctx.beginPath();
+                ctx.arc(s.x, s.y, 2 * s.life, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Reset composite operation
+            ctx.globalCompositeOperation = 'source-over';
+        }
+
+        function loop() {
+            updateWind();
+            updateGrid();
+            spawnSparks();
+            updateSparks();
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        init();
+    </script>
+</body>
+</html>

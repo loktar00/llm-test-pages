@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Game of Life Factory</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #050505;
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+<canvas id="lifeCanvas"></canvas>
+<script>
+/**
+ * Conway's Game of Life - Factory Mode
+ * Features:
+ * - Fullscreen Canvas
+ * - Known patterns (Glider Guns, Puffers, Spaceships)
+ * - Age-based coloring
+ * - Activity threshold for reset
+ * - Wipe transition effect
+ * - Toroidal (wrapping) grid
+ */
+
+const canvas = document.getElementById('lifeCanvas');
+const ctx = canvas.getContext('2d', { alpha: false });
+
+// Configuration
+const CELL_SIZE = 4;
+const FPS_TARGET = 60;
+const ACTIVITY_THRESHOLD = 0.0005; // Percentage of population change to trigger reset
+const RESET_COOLDOWN = 180; // Frames before next reset check
+const WIPE_SPEED = 20; // Pixels per frame
+
+// State
+let width, height, cols, rows;
+let grid, nextGrid;
+let cellAge; // Stores age of living cells
+let population = 0;
+let lastPopulation = 0;
+let frameCount = 0;
+let wipeY = 0;
+let isWiping = false;
+let wipeDirection = 1; // 1 for down, -1 for up
+let generationTimer = 0;
+
+// Patterns
+const patterns = {
+    gliderGun: [
+        "                   O  ",
+        "                  O O ",
+        "        OO       O    ",
+        "       O  O      O    ",
+        "OO      O  O      OOO ",
+        " OO     OO        O   ",
+        "  O O            O    ",
+        "   O             O    ",
+        "    OO            OO  "
+    ],
+    lwss: [ // Light Weight Spaceship
+        " O  O",
+        "  O  ",
+        "  O  ",
+        "  OOO"
+    ],
+    puffer: [ // Simple Puffer
+        "  OO  ",
+        " O  O ",
+        "OO    ",
+        "  OO  ",
+        "  OO  ",
+        " O  O ",
+        "  OO  "
+    ]
+};
+
+function resize() {
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = width;
+    canvas.height = height;
+    cols = Math.floor(width / CELL_SIZE);
+    rows = Math.floor(height / CELL_SIZE);
+    initGrids();
+}
+
+function initGrids() {
+    grid = new Uint8Array(cols * rows);
+    nextGrid = new Uint8Array(cols * rows);
+    cellAge = new Int16Array(cols * rows); // 16-bit signed is enough for this
+    populateRandomFactory();
+}
+
+function idx(x, y) {
+    return y * cols + x;
+}
+
+function getCell(x, y) {
+    // Wrap coordinates
+    const wx = (x + cols) % cols;
+    const wy = (y + rows) % rows;
+    return grid[idx(wx, wy)];
+}
+
+function setCell(x, y, val, age = 1) {
+    const wx = (x + cols) % cols;
+    const wy = (y + rows) % rows;
+    const i = idx(wx, wy);
+    grid[i] = val;
+    if (val) cellAge[i] = age;
+    else cellAge[i] = 0;
+}
+
+// Parse pattern string to grid data
+function parsePattern(patternKey, startX, startY) {
+    const pat = patterns[patternKey];
+    if (!pat) return;
+
+    pat.forEach((rowStr, y) => {
+        for (let x = 0; x < rowStr.length; x++) {
+            if (rowStr[x] === 'O') {
+                setCell(startX + x, startY + y, 1);
+            }
+        }
+    });
+}
+
+function populateRandomFactory() {
+    // Clear grids
+    grid.fill(0);
+    cellAge.fill(0);
+    
+    // Seed a factory layout
+    // 1. Glider Gun on the left
+    parsePattern('gliderGun', 10, Math.floor(rows / 2) - 5);
+    
+    // 2. Spaceships in the middle to collide
+    parsePattern('lwss', Math.floor(cols / 2) - 20, Math.floor(rows / 3));
+    parsePattern('lwss', Math.floor(cols / 2) - 20, Math.floor(rows / 3) + 10);
+    
+    // 3. Puffer on the right
+    parsePattern('puffer', cols - 40, Math.floor(rows / 2));
+
+    // 4. Random debris
+    for (let i = 0; i < 50; i++) {
+        setCell(
+            Math.floor(Math.random() * cols),
+            Math.floor(Math.random() * rows),
+            1
+        );
+    }
+    
+    population = countPopulation();
+    lastPopulation = population;
+    frameCount = 0;
+}
+
+function countPopulation() {
+    let p = 0;
+    for (let i = 0; i < grid.length; i++) {
+        if (grid[i]) p++;
+    }
+    return p;
+}
+
+function computeNextGen() {
+    let newPop = 0;
+    
+    for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+            const i = idx(x, y);
+            const current = grid[i];
+            
+            // Count neighbors
+            let neighbors = 0;
+            for (let dy = -1; dy <= 1; dy++) {
+                for (let dx = -1; dx <= 1; dx++) {
+                    if (dx === 0 && dy === 0) continue;
+                    if (getCell(x + dx, y + dy)) neighbors++;
+                }
+            }
+
+            // Rules
+            if (current) {
+                if (neighbors === 2 || neighbors === 3) {
+                    nextGrid[i] = 1;
+                    cellAge[i]++;
+                    newPop++;
+                } else {
+                    nextGrid[i] = 0;
+                    cellAge[i] = 0;
+                }
+            } else {
+                if (neighbors === 3) {
+                    nextGrid[i] = 1;
+                    cellAge[i] = 1;
+                    newPop++;
+                } else {
+                    nextGrid[i] = 0;
+                    cellAge[i] = 0;
+                }
+            }
+        }
+    }
+    
+    // Swap buffers
+    let temp = grid;
+    grid = nextGrid;
+    nextGrid = temp;
+    
+    population = newPop;
+}
+
+function getColor(age) {
+    // Color ramp: Fresh (White/Yellow) -> Middle (Cyan) -> Old (Deep Blue/Black)
+    const maxAge = 20; 
+    const t = Math.min(age, maxAge) / maxAge;
+    
+    // R, G, B components
+    let r, g, b;
+    
+    if (t < 0.2) {
+        // White to Yellow
+        r = 255;
+        g = 255;
+        b = Math.floor(255 * (1 - t * 5)); 
+    } else if (t < 0.5) {
+        // Yellow to Cyan
+        const t2 = (t - 0.2) * 3.33;
+        r = Math.floor(255 * (1 - t2));
+        g = 255;
+        b = 255;
+    } else {
+        // Cyan to Deep Blue
+        const t3 = (t - 0.5) * 2;
+        r = 0;
+        g = Math.floor(255 * (1 - t3));
+        b = 255;
+    }
+    
+    return `rgb(${r},${g},${b})`;
+}
+
+function draw() {
+    // Handle Wipe Effect
+    if (isWiping) {
+        // Draw black rectangle for the wipe
+        ctx.fillStyle = "#050505";
+        if (wipeDirection === 1) {
+            ctx.fillRect(0, 0, width, wipeY);
+        } else {
+            ctx.fillRect(0, wipeY, width, height - wipeY);
+        }
+        
+        wipeY += WIPE_SPEED;
+        
+        if (wipeY >= height) {
+            isWiping = false;
+            wipeY = 0;
+            wipeDirection = 1;
+            populateRandomFactory();
+        }
+        return; // Skip drawing grid during wipe
+    }
+
+    // Clear background
+    ctx.fillStyle = "#050505";
+    ctx.fillRect(0, 0, width, height);
+
+    // Draw Cells
+    // Optimization: Only iterate over living cells? 
+    // For full screen 60fps, iterating all might be heavy if grid is huge.
+    // But canvas fillRect is fast. Let's try simple iteration.
+    
+    // To optimize, we can skip drawing dead cells.
+    // We need to access the grid directly.
+    
+    for (let i = 0; i < grid.length; i++) {
+        if (grid[i]) {
+            const x = (i % cols) * CELL_SIZE;
+            const y = Math.floor(i / cols) * CELL_SIZE;
+            const age = cellAge[i];
+            
+            ctx.fillStyle = getColor(age);
+            // Draw slightly smaller than cell size for grid effect, or full for solid
+            ctx.fillRect(x, y, CELL_SIZE, CELL_SIZE);
+        }
+    }
+}
+
+function loop() {
+    if (!isWiping) {
+        computeNextGen();
+        frameCount++;
+        
+        // Check for stagnation
+        if (frameCount > RESET_COOLDOWN) {
+            const change = Math.abs(population - lastPopulation);
+            const activity = change / (population + 1); // Avoid div by zero
+            
+            // If activity is extremely low or population is zero
+            if (activity < ACTIVITY_THRESHOLD || population === 0) {
+                isWiping = true;
+                wipeY = 0;
+                wipeDirection = 1;
+            }
+        }
+        
+        lastPopulation = population;
+    }
+
+    draw();
+    requestAnimationFrame(loop);
+}
+
+// Init
+window.addEventListener('resize', resize);
+resize();
+loop();
+
+</script>
+</body>
+</html>

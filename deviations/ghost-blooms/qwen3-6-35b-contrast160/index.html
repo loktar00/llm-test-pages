@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width=device-width, initial-scale=1.0">
+    <title>Spectral Mist Bursts</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+            background-color: #030108;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+<canvas id="ghostCanvas"></canvas>
+
+<script>
+/**
+ * GHOSTLY EXPLOSION ENGINE
+ * 
+ * Features:
+ * - Perlin noise turbulence for wispy paths
+ * - Cool spectral palette (cyan, indigo, violet) + rare warm anomalies (amber)
+ * - Accumulating ambient fog layer
+ * - Full-screen interactive canvas
+ */
+
+// --- Simplex-ish Noise Implementation ---
+class Noise {
+    constructor() {
+        this.perm = new Uint8Array(512);
+        this.grad = new Float32Array(512);
+        this.seed(Math.random() * 0xFFFFFFFF);
+    }
+
+    seed(s) {
+        for (let i = 0; i < 256; i++) {
+            this.perm[i] = i;
+            this.perm[i + 256] = i;
+        }
+        for (let i = 255; i > 0; i--) {
+            s = (s * 16807 + 0) % 2147483647;
+            const j = s % (i + 1);
+            [this.perm[i], this.perm[j]] = [this.perm[j], this.perm[i]];
+            [this.perm[i + 256], this.perm[j + 256]] = [this.perm[j + 256], this.perm[i + 256]];
+        }
+        for (let i = 0; i < 512; i++) {
+            this.grad[i] = Math.random() * 2 - 1;
+        }
+    }
+
+    noise2D(x, y) {
+        const X = Math.floor(x) & 255;
+        const Y = Math.floor(y) & 255;
+        const xf = x - Math.floor(x);
+        const yf = y - Math.floor(y);
+        const u = this.fade(xf);
+        const v = this.fade(yf);
+        const a = this.perm[X] + Y;
+        const b = this.perm[X + 1] + Y;
+        return this.lerp(v,
+            this.lerp(u, this.grad[this.perm[a]] * xf + this.grad[this.perm[a+1]] * yf,
+                      this.grad[this.perm[b]] * (xf - 1) + this.grad[this.perm[b+1]] * yf),
+            this.lerp(u, this.grad[this.perm[a+1]] * xf + this.grad[this.perm[a+2]] * (yf - 1),
+                      this.grad[this.perm[b+1]] * (xf - 1) + this.grad[this.perm[b+2]] * (yf - 1))
+        );
+    }
+
+    fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+    lerp(t, a, b) { return a + t * (b - a); }
+}
+
+// --- Configuration ---
+const CONFIG = {
+    wispCount: 12,
+    wispLength: 120,
+    particleCount: 300,
+    noiseScale: 0.008,
+    fogDecay: 0.0008,
+    baseSpeed: 0.6,
+    colors: [
+        { r: 100, g: 220, b: 255 }, // Cyan
+        { r: 160, g: 120, b: 255 }, // Violet
+        { r: 80, g: 180, b: 200 },  // Teal
+        { r: 200, g: 180, b: 255 }, // Lavender
+        { r: 120, g: 255, b: 200 }, // Mint
+    ],
+    anomaly: { r: 255, g: 160, b: 60 } // Amber
+};
+
+// --- State ---
+const canvas = document.getElementById('ghostCanvas');
+const ctx = canvas.getContext('2d', { alpha: false });
+const noise = new Noise();
+let width, height;
+let bursts = [];
+let ambientFog = [];
+let time = 0;
+
+// --- Resize Handling ---
+function resize() {
+    width = canvas.width = window.innerWidth;
+    height = canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// --- Utility ---
+function rand(min, max) { return Math.random() * (max - min) + min; }
+function lerpColor(c1, c2, t) {
+    return {
+        r: c1.r + (c2.r - c1.r) * t,
+        g: c1.g + (c2.g - c1.g) * t,
+        b: c1.b + (c2.b - c1.b) * t
+    };
+}
+
+// --- Classes ---
+
+class Particle {
+    constructor(x, y, color, isFog = false) {
+        this.x = x;
+        this.y = y;
+        this.color = color;
+        this.isFog = isFog;
+        this.life = isFog ? rand(200, 400) : rand(60, 150);
+        this.maxLife = this.life;
+        this.vx = rand(-1, 1) * (isFog ? 0.2 : 1.5);
+        this.vy = rand(-1, 1) * (isFog ? 0.2 : 1.5);
+        this.size = rand(2, isFog ? 15 : 6);
+        this.noiseOffsetX = rand(0, 1000);
+        this.noiseOffsetY = rand(0, 1000);
+        this.noiseScaleX = rand(0.005, 0.02);
+        this.noiseScaleY = rand(0.005, 0.02);
+    }
+
+    update() {
+        this.noiseOffsetX += this.noiseScaleX;
+        this.noiseOffsetY += this.noiseScaleY;
+        
+        const force = this.isFog ? 0.05 : 0.15;
+        const n = noise.noise2D(this.noiseOffsetX, this.noiseOffsetY);
+        const angle = n * Math.PI * 2;
+        
+        this.vx += Math.cos(angle) * force;
+        this.vy += Math.sin(angle) * force;
+        
+        // Damping
+        this.vx *= 0.96;
+        this.vy *= 0.96;
+        
+        this.x += this.vx;
+        this.y += this.vy;
+        this.life--;
+    }
+
+    draw(ctx) {
+        const alpha = Math.max(0, this.life / this.maxLife);
+        if (this.isFog) {
+            ctx.fillStyle = `rgba(${this.color.r}, ${this.color.g}, ${this.color.b}, ${alpha * 0.05})`;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+            ctx.fill();
+        } else {
+            ctx.fillStyle = `rgba(${this.color.r}, ${this.color.g}, ${this.color.b}, ${alpha * 0.8})`;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.size * alpha, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+}
+
+class Wisp {
+    constructor(x, y, color, angle) {
+        this.x = x;
+        this.y = y;
+        this.color = color;
+        this.angle = angle;
+        this.speed = rand(CONFIG.baseSpeed, CONFIG.baseSpeed * 2.5);
+        this.life = CONFIG.wispLength;
+        this.maxLife = this.life;
+        this.noiseOffset = rand(0, 1000);
+        this.noiseScale = rand(0.01, 0.03);
+        this.points = [];
+        this.points.push({ x, y });
+    }
+
+    update() {
+        this.noiseOffset += this.noiseScale;
+        const n = noise.noise2D(this.noiseOffset, time * 0.01);
+        this.angle += n * 0.5;
+        
+        this.x += Math.cos(this.angle) * this.speed;
+        this.y += Math.sin(this.angle) * this.speed;
+        
+        this.life--;
+        this.points.push({ x: this.x, y: this.y });
+        if (this.points.length > 10) this.points.shift();
+    }
+
+    draw(ctx) {
+        const alpha = Math.max(0, this.life / this.maxLife);
+        if (this.points.length < 2) return;
+        
+        ctx.strokeStyle = `rgba(${this.color.r}, ${this.color.g}, ${this.color.b}, ${alpha * 0.6})`;
+        ctx.lineWidth = rand(1, 3) * alpha;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        
+        ctx.beginPath();
+        ctx.moveTo(this.points[0].x, this.points[0].y);
+        for (let i = 1; i < this.points.length; i++) {
+            ctx.lineTo(this.points[i].x, this.points[i].y);
+        }
+        ctx.stroke();
+    }
+}
+
+class Burst {
+    constructor(x, y) {
+        this.x = x;
+        this.y = y;
+        this.wisps = [];
+        this.particles = [];
+        this.age = 0;
+        this.isAnomaly = Math.random() < 0.15;
+        this.coreColor = this.isAnomaly ? CONFIG.anomaly : CONFIG.colors[Math.floor(Math.random() * CONFIG.colors.length)];
+        
+        this.init();
+    }
+
+    init() {
+        // Create Wisps
+        for (let i = 0; i < CONFIG.wispCount; i++) {
+            const angle = (Math.PI * 2 / CONFIG.wispCount) * i + rand(-0.2, 0.2);
+            const color = lerpColor(this.coreColor, { r: 255, g: 255, b: 255 }, rand(0, 0.3));
+            this.wisps.push(new Wisp(this.x, this.y, color, angle));
+        }
+        
+        // Create Particles
+        for (let i = 0; i < CONFIG.particleCount; i++) {
+            const angle = rand(0, Math.PI * 2);
+            const dist = rand(0, 50);
+            const color = lerpColor(this.coreColor, { r: 255, g: 255, b: 255 }, rand(0, 0.5));
+            const p = new Particle(this.x + Math.cos(angle) * dist, this.y + Math.sin(angle) * dist, color);
+            p.vx = Math.cos(angle) * rand(0.5, 3);
+            p.vy = Math.sin(angle) * rand(0.5, 3);
+            this.particles.push(p);
+        }
+        
+        // Create Ambient Fog (accumulates)
+        for (let i = 0; i < 20; i++) {
+            const angle = rand(0, Math.PI * 2);
+            const dist = rand(0, 100);
+            const color = lerpColor(this.coreColor, { r: 50, g: 50, b: 80 }, rand(0.5, 0.8));
+            const fog = new Particle(this.x + Math.cos(angle) * dist, this.y + Math.sin(angle) * dist, color, true);
+            ambientFog.push(fog);
+        }
+    }
+
+    update() {
+        this.age++;
+        
+        this.wisps.forEach(w => w.update());
+        this.particles.forEach(p => p.update());
+        
+        // Remove wisps and particles when they die
+        this.wisps = this.wisps.filter(w => w.life > 0);
+        this.particles = this.particles.filter(p => p.life > 0);
+        
+        // Add new particles occasionally to sustain the burst
+        if (this.age % 5 === 0 && this.particles.length < 50) {
+            const angle = rand(0, Math.PI * 2);
+            const dist = rand(0, 30);
+            const color = lerpColor(this.coreColor, { r: 255, g: 255, b: 255 }, rand(0, 0.3));
+            const p = new Particle(this.x + Math.cos(angle) * dist, this.y + Math.sin(angle) * dist, color);
+            p.vx = Math.cos(angle) * rand(0.2, 1);
+            p.vy = Math.sin(angle) * rand(0.2, 1);
+            this.particles.push(p);
+        }
+        
+        return this.wisps.length > 0 || this.particles.length > 0;
+    }
+
+    draw(ctx) {
+        // Draw Wisps
+        this.wisps.forEach(w => w.draw(ctx));
+        
+        // Draw Particles
+        this.particles.forEach(p => p.draw(ctx));
+        
+        // Draw Core Glow
+        const alpha = Math.max(0, 1 - this.age / 150);
+        if (alpha > 0) {
+            const gradient = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, 80);
+            gradient.addColorStop(0, `rgba(${this.coreColor.r}, ${this.coreColor.g}, ${this.coreColor.b}, ${alpha * 0.2})`);
+            gradient.addColorStop(1, `rgba(${this.coreColor.r}, ${this.coreColor.g}, ${this.coreColor.b}, 0)`);
+            ctx.fillStyle = gradient;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, 80, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+}
+
+// --- Main Loop ---
+
+function createBurst(x, y) {
+    bursts.push(new Burst(x, y));
+}
+
+function updateAmbientFog() {
+    ambientFog.forEach(f => f.update());
+    ambientFog = ambientFog.filter(f => f.life > 0);
+}
+
+function drawAmbientFog(ctx) {
+    ambientFog.forEach(f => f.draw(ctx));
+}
+
+function animate() {
+    time++;
+    
+    // Clear with dark background, but keep a faint trail for ghostly feel
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgba(3, 1, 8, 0.15)';
+    ctx.fillRect(0, 0, width, height);
+    
+    // Draw ambient fog first (behind)
+    ctx.globalCompositeOperation = 'lighter';
+    drawAmbientFog(ctx);
+    
+    // Update and draw bursts
+    bursts = bursts.filter(b => {
+        const alive = b.update();
+        b.draw(ctx);
+        return alive;
+    });
+    
+    updateAmbientFog();
+    
+    requestAnimationFrame(animate);
+}
+
+// --- Interaction ---
+
+canvas.addEventListener('mousedown', (e) => {
+    createBurst(e.clientX, e.clientY);
+});
+
+canvas.addEventListener('mousemove', (e) => {
+    if (e.buttons === 1) {
+        if (Math.random() < 0.3) {
+            createBurst(e.clientX, e.clientY);
+        }
+    }
+});
+
+canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    const touch = e.touches[0];
+    createBurst(touch.clientX, touch.clientY);
+}, { passive: false });
+
+canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    const touch = e.touches[0];
+    if (Math.random() < 0.3) {
+        createBurst(touch.clientX, touch.clientY);
+    }
+}, { passive: false });
+
+// --- Start ---
+
+// Initial random bursts
+for (let i = 0; i < 3; i++) {
+    createBurst(rand(width * 0.2, width * 0.8), rand(height * 0.2, height * 0.8));
+}
+
+animate();
+
+</script>
+</body>
+</html>

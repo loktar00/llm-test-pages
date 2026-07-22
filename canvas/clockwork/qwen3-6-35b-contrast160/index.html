@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Clockwork Machine</title>
+<style>
+*{margin:0;padding:0}
+body{background:#0a0806;overflow:hidden;cursor:none}
+canvas{display:block}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+resize();
+addEventListener('resize', resize);
+
+// --- Utilities ---
+const PI = Math.PI, TAU = PI*2, sin = Math.sin, cos = Math.cos, abs = Math.abs, sqrt = Math.sqrt, floor = Math.floor;
+const rand = (a,b) => a + Math.random()*(b-a);
+const lerp = (a,b,t) => a + (b-a)*t;
+const clamp = (v,mn,mx) => Math.max(mn, Math.min(mx, v));
+
+// --- Palette ---
+const COL = {
+    bg: '#0d0a07',
+    darkIron: '#2a2420',
+    iron: '#4a4038',
+    midIron: '#6a5d52',
+    brass: '#b8922e',
+    gold: '#d4aa30',
+    lightGold: '#e8c848',
+    highlight: '#f5e6a3',
+    shadow: '#1a1410',
+    rivet: '#8a7d65',
+    spark: '#ffdd44',
+    bird: '#c8a030'
+};
+
+// --- State ---
+let gears = [];
+let escapement = { angle: 0, speed: 0.04, phase: 0 };
+let pistons = [];
+let bird = { state: 'idle', timer: 45, popY: 0, flap: 0, chirp: 0 };
+let chains = [];
+let particles = [];
+let repairArm = { active: false, x: 0, y: 0, gearIdx: -1, state: 'idle', timer: 0, target: {x:0,y:0}, current: {x:0,y:0} };
+let time = 0;
+let lastTime = performance.now();
+
+// --- Gear Class ---
+class Gear {
+    constructor(x, y, teeth, module, angle, parentGear = null, isMain = false) {
+        this.x = x; this.y = y;
+        this.teeth = teeth;
+        this.module = module;
+        this.baseAngle = angle;
+        this.angle = angle;
+        this.parent = parentGear;
+        this.isMain = isMain;
+        this.radius = module * teeth * 0.5;
+        this.outerR = this.radius + module * 0.8;
+        this.innerR = this.radius - module * 1.2;
+        this.color = isMain ? COL.gold : (teeth > 20 ? COL.brass : COL.midIron);
+        this.highlight = isMain ? COL.highlight : COL.lightGold;
+        this.speed = 0;
+        this.loose = false;
+        this.vx = 0; this.vy = 0;
+        this.looseTimer = 0;
+        this.repairTimer = 0;
+        this.sprocket = teeth <= 8;
+        this.chains = [];
+    }
+    
+    get rotationSpeed() {
+        if (this.isMain) return 0.005;
+        if (this.parent) return -this.parent.speed * this.parent.teeth / this.teeth;
+        return 0;
+    }
+    
+    get angle() { return this._angle; }
+    set angle(v) { 
+        this._angle = v; 
+        if (this.parent) this.baseAngle = v - this._storedOffset;
+    }
+    set storedOffset(v) { this._storedOffset = v; }
+    
+    update(dt) {
+        if (this.loose) {
+            this.vx *= 0.96;
+            this.vy *= 0.96;
+            this.x += this.vx;
+            this.y += this.vy;
+            this.angle += this.speed * dt;
+            this.looseTimer -= dt;
+            if (this.looseTimer <= 0) {
+                this.loose = false;
+                this.repairTimer = 2;
+                repairArm.active = true;
+                repairArm.gearIdx = gears.indexOf(this);
+                repairArm.state = 'grab';
+                repairArm.timer = 0;
+                repairArm.target = { x: this.targetX, y: this.targetY };
+            }
+        } else {
+            if (this.isMain) {
+                this.angle += this.speed * dt;
+            } else if (this.parent && !this.parent.loose) {
+                this.angle += this.speed * dt;
+            } else {
+                this.angle = this.baseAngle;
+            }
+        }
+    }
+    
+    draw() {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.angle);
+        
+        const r = this.radius;
+        const oR = this.outerR;
+        const t = this.teeth;
+        const toothH = (oR - r) * 0.6;
+        const toothW = (TAU / t) * 0.35;
+        
+        // Shadow
+        ctx.shadowColor = 'rgba(0,0,0,0.6)';
+        ctx.shadowBlur = 10;
+        ctx.shadowOffsetX = 3;
+        ctx.shadowOffsetY = 3;
+        
+        // Draw teeth
+        ctx.beginPath();
+        for (let i = 0; i < t; i++) {
+            const a = (TAU / t) * i;
+            const a1 = a - toothW;
+            const a2 = a - toothW * 0.4;
+            const a3 = a + toothW * 0.4;
+            const a4 = a + toothW;
+            const r1 = r - toothH * 0.2;
+            const r2 = oR;
+            
+            if (i === 0) ctx.moveTo(cos(a1)*r1, sin(a1)*r1);
+            ctx.lineTo(cos(a2)*r1, sin(a2)*r1);
+            ctx.lineTo(cos(a2)*r2, sin(a2)*r2);
+            ctx.lineTo(cos(a3)*r2, sin(a3)*r2);
+            ctx.lineTo(cos(a4)*r1, sin(a4)*r1);
+            ctx.lineTo(cos(a4 + TAU/t - toothW)*r1, sin(a4 + TAU/t - toothW)*r1);
+        }
+        ctx.closePath();
+        
+        const grad = ctx.createRadialGradient(0, 0, r*0.2, 0, 0, oR);
+        grad.addColorStop(0, this.highlight);
+        grad.addColorStop(0.5, this.color);
+        grad.addColorStop(1, COL.darkIron);
+        ctx.fillStyle = grad;
+        ctx.fill();
+        
+        ctx.shadowColor = 'transparent';
+        
+        // Inner hole
+        ctx.beginPath();
+        ctx.arc(0, 0, r * 0.4, 0, TAU);
+        ctx.fillStyle = COL.bg;
+        ctx.fill();
+        
+        // Spokes
+        const spokeCount = t > 15 ? 6 : (t > 10 ? 4 : 3);
+        ctx.strokeStyle = this.color;
+        ctx.lineWidth = r * 0.15;
+        for (let i = 0; i < spokeCount; i++) {
+            const a = (TAU / spokeCount) * i;
+            ctx.beginPath();
+            ctx.moveTo(cos(a) * r * 0.4, sin(a) * r * 0.4);
+            ctx.lineTo(cos(a) * r * 0.85, sin(a) * r * 0.85);
+            ctx.stroke();
+        }
+        
+        // Center hub
+        ctx.beginPath();
+        ctx.arc(0, 0, r * 0.25, 0, TAU);
+        ctx.fillStyle = this.color;
+        ctx.fill();
+        ctx.strokeStyle = COL.darkIron;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        
+        // Rivets
+        for (let i = 0; i < 4; i++) {
+            const a = (TAU / 4) * i + PI/4;
+            ctx.beginPath();
+            ctx.arc(cos(a)*r*0.6, sin(a)*r*0.6, 2, 0, TAU);
+            ctx.fillStyle = COL.rivet;
+            ctx.fill();
+        }
+        
+        ctx.restore();
+    }
+}
+
+// --- Initialize Scene ---
+function init() {
+    gears = [];
+    const cx = W * 0.4;
+    const cy = H * 0.45;
+    
+    // Main gear
+    const main = new Gear(cx, cy, 40, 12, 0, null, true);
+    main.speed = main.rotationSpeed;
+    main.targetX = cx; main.targetY = cy;
+    gears.push(main);
+    
+    // Secondary gears meshed with main
+    const offsets = [
+        { angle: 0, teeth: 24, module: 12 },
+        { angle: PI/2, teeth: 30, module: 12 },
+        { angle: PI, teeth: 16, module: 12 },
+        { angle: PI*1.5, teeth: 20, module: 12 }
+    ];
+    
+    offsets.forEach(o => {
+        const dist = (main.radius + o.module * o.teeth * 0.5) * 0.98;
+        const gx = cx + cos(o.angle) * dist;
+        const gy = cy + sin(o.angle) * dist;
+        const g = new Gear(gx, gy, o.teeth, o.module, o.angle + PI/o.teeth, main);
+        g.speed = g.rotationSpeed;
+        g.targetX = gx; g.targetY = gy;
+        gears.push(g);
+        
+        // Chain to main
+        chains.push({ from: main, to: g, points: [] });
+    });
+    
+    // Smaller gears on secondaries
+    gears.forEach((g, i) => {
+        if (i === 0) return;
+        const smallTeeth = floor(g.teeth * rand(0.4, 0.7));
+        const dist = (g.radius + smallTeeth * 6 * 0.5) * 0.98;
+        const a = rand(0, TAU);
+        const gx = g.x + cos(a) * dist;
+        const gy = g.y + sin(a) * dist;
+        const sg = new Gear(gx, gy, smallTeeth, 6, a, g);
+        sg.speed = sg.rotationSpeed;
+        sg.targetX = gx; sg.targetY = gy;
+        gears.push(sg);
+        chains.push({ from: g, to: sg, points: [] });
+    });
+    
+    // Sprockets for chains
+    const sprocket1 = new Gear(W * 0.85, H * 0.3, 8, 10, 0, null, false);
+    sprocket1.speed = sprocket1.rotationSpeed;
+    sprocket1.targetX = W*0.85; sprocket1.targetY = H*0.3;
+    gears.push(sprocket1);
+    
+    const sprocket2 = new Gear(W * 0.85, H * 0.7, 8, 10, PI/8, null, false);
+    sprocket2.speed = sprocket2.rotationSpeed;
+    sprocket2.targetX = W*0.85; sprocket2.targetY = H*0.7;
+    gears.push(sprocket2);
+    
+    chains.push({ from: sprocket1, to: sprocket2, points: [] });
+    
+    // Pistons
+    pistons = [
+        { x: W*0.15, y: H*0.3, length: 120, angle: 0, speed: 0.02, phase: 0 },
+        { x: W*0.15, y: H*0.7, length: 100, angle: PI/2, speed: 0.025, phase: PI/2 }
+    ];
+    
+    // Bird pop-up
+    bird.popY = 0;
+}
+
+// --- Physics for loose gears ---
+function updatePhysics(dt) {
+    gears.forEach(g => {
+        if (g.loose) {
+            // Collision with other gears
+            gears.forEach(other => {
+                if (other === g || !other.loose) return;
+                const dx = other.x - g.x;
+                const dy = other.y - g.y;
+                const dist = sqrt(dx*dx + dy*dy);
+                const minDist = g.radius + other.radius;
+                
+                if (dist < minDist && dist > 0) {
+                    const nx = dx / dist;
+                    const ny = dy / dist;
+                    const overlap = minDist - dist;
+                    
+                    // Push apart
+                    g.x -= nx * overlap * 0.5;
+                    g.y -= ny * overlap * 0.5;
+                    
+                    // Bounce
+                    const dot = g.vx * nx + g.vy * ny;
+                    if (dot < 0) {
+                        g.vx -= nx * dot * 1.5;
+                        g.vy -= ny * dot * 1.5;
+                        
+                        // Transfer energy to other
+                        other.vx += nx * dot * 0.3;
+                        other.vy += ny * dot * 0.3;
+                    }
+                    
+                    // Sparks
+                    if (Math.random() < 0.3) {
+                        particles.push({
+                            x: (g.x + other.x)/2, y: (g.y + other.y)/2,
+                            vx: rand(-3,3), vy: rand(-3,3),
+                            life: 1, color: COL.spark
+                        });
+                    }
+                }
+            });
+            
+            // Wall bounce
+            if (g.x < g.radius) { g.x = g.radius; g.vx *= -0.5; }
+            if (g.x > W - g.radius) { g.x = W - g.radius; g.vx *= -0.5; }
+            if (g.y < g.radius) { g.y = g.radius; g.vy *= -0.5; }
+            if (g.y > H - g.radius) { g.y = H - g.radius; g.vy *= -0.5; }
+        }
+    });
+}
+
+// --- Random loose gear ---
+let looseTimer = rand(5, 15);
+function checkLoose(dt) {
+    looseTimer -= dt;
+    if (looseTimer <= 0) {
+        const nonMain = gears.filter(g => !g.isMain && !g.loose);
+        if (nonMain.length > 0) {
+            const g = nonMain[floor(rand(0, nonMain.length))];
+            g.loose = true;
+            g.vx = rand(-5, 5);
+            g.vy = rand(-5, 5);
+            g.looseTimer = rand(8, 15);
+            looseTimer = rand(10, 20);
+            
+            // Trigger repair
+            repairArm.active = true;
+            repairArm.gearIdx = gears.indexOf(g);
+            repairArm.state = 'grab';
+            repairArm.timer = 0;
+            repairArm.target = { x: g.targetX, y: g.targetY };
+        }
+    }
+}
+
+// --- Draw Chains ---
+function drawChain(from, to) {
+    if (from.loose || to.loose) return;
+    
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const dist = sqrt(dx*dx + dy*dy);
+    const angle = Math.atan2(dy, dx);
+    
+    // Chain points (simplified sprocket chain)
+    const segments = floor(dist / 15);
+    ctx.beginPath();
+    ctx.strokeStyle = COL.iron;
+    ctx.lineWidth = 4;
+    
+    for (let i = 0; i <= segments; i++) {
+        const t = i / segments;
+        const x = from.x + dx * t;
+        const y = from.y + dy * t;
+        const wobble = sin(t * 20 + time * 2) * 2;
+        const nx = -sin(angle) * wobble;
+        const ny = cos(angle) * wobble;
+        
+        if (i === 0) ctx.moveTo(x + nx, y + ny);
+        else ctx.lineTo(x + nx, y + ny);
+    }
+    ctx.stroke();
+    
+    // Chain links
+    ctx.strokeStyle = COL.brass;
+    ctx.lineWidth = 2;
+    for (let i = 0; i < segments; i += 2) {
+        const t = i / segments;
+        const x = from.x + dx * t;
+        const y = from.y + dy * t;
+        const wobble = sin(t * 20 + time * 2) * 2;
+        const nx = -sin(angle) * wobble;
+        const ny = cos(angle) * wobble;
+        
+        ctx.beginPath();
+        ctx.ellipse(x + nx, y + ny, 3, 6, angle + PI/2, 0, TAU);
+        ctx.stroke();
+    }
+}
+
+// --- Draw Piston ---
+function drawPiston(p) {
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(p.angle);
+    
+    const cylLen = 60;
+    const cylW = 20;
+    const strokeLen = p.length;
+    
+    // Cylinder
+    ctx.fillStyle = COL.darkIron;
+    ctx.fillRect(-cylLen, -cylW/2, cylLen, cylW);
+    
+    // Piston rod
+    const extension = sin(time * p.speed + p.phase) * strokeLen * 0.5 + strokeLen * 0.5;
+    ctx.fillStyle = COL.iron;
+    ctx.fillRect(0, -3, extension, 6);
+    
+    // Piston head
+    ctx.fillStyle = COL.brass;
+    ctx.fillRect(extension - 5, -8, 10, 16);
+    
+    // Rivets
+    ctx.fillStyle = COL.rivet;
+    ctx.fillRect(-cylLen + 5, -cylW/2 + 3, 3, 3);
+    ctx.fillRect(-cylLen + 5, cylW/2 - 6, 3, 3);
+    
+    ctx.restore();
+}
+
+// --- Draw Escapement ---
+function drawEscapement() {
+    const ex = W * 0.5;
+    const ey = H * 0.85;
+    
+    ctx.save();
+    ctx.translate(ex, ey);
+    
+    // Base
+    ctx.fillStyle = COL.darkIron;
+    ctx.fillRect(-30, -10, 60, 20);
+    
+    // Pendulum
+    escapement.angle += escapement.speed * sin(escapement.phase) * 0.016;
+    escapement.phase += 0.05;
+    
+    ctx.save();
+    ctx.rotate(sin(escapement.phase) * 0.3);
+    
+    // Rod
+    ctx.strokeStyle = COL.midIron;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(0, -10);
+    ctx.lineTo(0, -60);
+    ctx.stroke();
+    
+    // Bob
+    ctx.fillStyle = COL.brass;
+    ctx.beginPath();
+    ctx.arc(0, -60, 8, 0, TAU);
+    ctx.fill();
+    
+    // Tick mechanism
+    ctx.fillStyle = COL.gold;
+    ctx.fillRect(-5, -5, 10, 5);
+    
+    ctx.restore();
+    ctx.restore();
+}
+
+// --- Draw Bird ---
+function drawBird(bx, by) {
+    if (bird.state === 'idle') return;
+    
+    ctx.save();
+    ctx.translate(bx, by + bird.popY);
+    
+    const flap = sin(bird.flap * 10) * 0.5;
+    
+    // Body
+    ctx.fillStyle = COL.bird;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 15, 10, 0, 0, TAU);
+    ctx.fill();
+    
+    // Head
+    ctx.fillStyle = COL.gold;
+    ctx.beginPath();
+    ctx.arc(10, -5, 8, 0, TAU);
+    ctx.fill();
+    
+    // Beak
+    ctx.fillStyle = COL.highlight;
+    ctx.beginPath();
+    ctx.moveTo(18, -5);
+    ctx.lineTo(25, -3);
+    ctx.lineTo(18, -1);
+    ctx.closePath();
+    ctx.fill();
+    
+    // Eye
+    ctx.fillStyle = COL.bg;
+    ctx.beginPath();
+    ctx.arc(12, -7, 2, 0, TAU);
+    ctx.fill();
+    
+    // Wings
+    ctx.save();
+    ctx.translate(0, -5);
+    ctx.rotate(flap);
+    ctx.fillStyle = COL.brass;
+    ctx.beginPath();
+    ctx.ellipse(-5, 0, 12, 5, -0.3, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+    
+    ctx.save();
+    ctx.translate(0, -5);
+    ctx.rotate(-flap);
+    ctx.fillStyle = COL.brass;
+    ctx.beginPath();
+    ctx.ellipse(-5, 0, 12, 5, 0.3, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+    
+    // Tail
+    ctx.fillStyle = COL.midIron;
+    ctx.beginPath();
+    ctx.moveTo(-15, -3);
+    ctx.lineTo(-25, -8);
+    ctx.lineTo(-25, 2);
+    ctx.closePath();
+    ctx.fill();
+    
+    ctx.restore();
+}
+
+// --- Draw Repair Arm ---
+function drawRepairArm() {
+    if (!repairArm.active) return;
+    
+    const armX = W * 0.9;
+    const armY = H * 0.1;
+    const gear = gears[repairArm.gearIdx];
+    
+    ctx.save();
+    ctx.translate(armX, armY);
+    
+    // Arm base
+    ctx.fillStyle = COL.darkIron;
+    ctx.fillRect(-10, -10, 20, 20);
+    
+    // Arm segment
+    const targetX = gear ? gear.x : repairArm.target.x;
+    const targetY = gear ? gear.y : repairArm.target.y;
+    const dx = targetX - armX;
+    const dy = targetY - armY;
+    const dist = sqrt(dx*dx + dy*dy);
+    const angle = Math.atan2(dy, dx);
+    
+    ctx.save();
+    ctx.rotate(angle);
+    
+    ctx.fillStyle = COL.iron;
+    ctx.fillRect(0, -3, dist, 6);
+    
+    // Claw
+    ctx.fillStyle = COL.brass;
+    ctx.fillRect(dist - 10, -8, 10, 16);
+    ctx.fillRect(dist - 5, -12, 5, 4);
+    ctx.fillRect(dist - 5, 8, 5, 4);
+    
+    ctx.restore();
+    ctx.restore();
+}
+
+// --- Draw Background ---
+function drawBackground() {
+    ctx.fillStyle = COL.bg;
+    ctx.fillRect(0, 0, W, H);
+    
+    // Subtle grid
+    ctx.strokeStyle = 'rgba(100,80,60,0.1)';
+    ctx.lineWidth = 1;
+    const gridSize = 40;
+    for (let x = 0; x < W; x += gridSize) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, H);
+        ctx.stroke();
+    }
+    for (let y = 0; y < H; y += gridSize) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(W, y);
+        ctx.stroke();
+    }
+}
+
+// --- Draw Particles ---
+function drawParticles() {
+    particles.forEach(p => {
+        ctx.fillStyle = p.color;
+        ctx.globalAlpha = p.life;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 2 * p.life, 0, TAU);
+        ctx.fill();
+    });
+    ctx.globalAlpha = 1;
+}
+
+// --- Update Particles ---
+function updateParticles(dt) {
+    particles = particles.filter(p => {
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vy += 0.1;
+        p.life -= dt * 2;
+        return p.life > 0;
+    });
+}
+
+// --- Main Loop ---
+function update(now) {
+    const dt = Math.min((now - lastTime) / 1000, 0.05);
+    lastTime = now;
+    time += dt;
+    
+    // Update gears
+    gears.forEach(g => {
+        g.update(dt);
+    });
+    
+    // Update physics
+    updatePhysics(dt);
+    
+    // Check loose
+    checkLoose(dt);
+    
+    // Update escapement
+    escapement.phase += dt * 3;
+    
+    // Update bird
+    bird.timer -= dt;
+    if (bird.timer <= 0 && bird.state === 'idle') {
+        bird.state = 'active';
+        bird.flap = 0;
+        bird.chirp = 0;
+    }
+    if (bird.state === 'active') {
+        bird.flap += dt;
+        bird.popY = sin(bird.flap * 2) * 20;
+        bird.chirp += dt;
+        if (bird.chirp > 3) {
+            bird.state = 'idle';
+            bird.timer = 45;
+            bird.popY = 0;
+        }
+    }
+    
+    // Update particles
+    updateParticles(dt);
+    
+    // Draw
+    drawBackground();
+    
+    // Draw chains
+    chains.forEach(c => drawChain(c.from, c.to));
+    
+    // Draw pistons
+    pistons.forEach(p => drawPiston(p));
+    
+    // Draw gears
+    gears.forEach(g => g.draw());
+    
+    // Draw escapement
+    drawEscapement();
+    
+    // Draw repair arm
+    drawRepairArm();
+    
+    // Draw bird
+    drawBird(W * 0.5, H * 0.2);
+    
+    // Draw particles
+    drawParticles();
+    
+    requestAnimationFrame(update);
+}
+
+init();
+requestAnimationFrame(update);
+</script>
+</body>
+</html>

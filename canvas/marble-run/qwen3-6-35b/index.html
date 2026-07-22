@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Marble Run</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #111;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        const SEGMENT_HEIGHT = 400;
+        const NUM_SEGMENTS = 10; // Total height coverage
+        const GRAVITY = 0.15;
+        const FRICTION = 0.99;
+        const BOUNCE = 0.6;
+        const SPAWN_RATE = 2; // Frames per spawn attempt
+        
+        // State
+        let camera = { x: 0, y: 0 };
+        let segments = [];
+        let marbles = [];
+        let frameCount = 0;
+        let lastSegmentRebuild = 0;
+
+        // Resize handling
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            camera.x = width / 2;
+            camera.y = 0;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // Vector Math
+        const Vec2 = {
+            add: (v1, v2) => ({ x: v1.x + v2.x, y: v1.y + v2.y }),
+            sub: (v1, v2) => ({ x: v1.x - v2.x, y: v1.y - v2.y }),
+            dot: (v1, v2) => v1.x * v2.x + v1.y * v2.y,
+            mag: (v) => Math.sqrt(v.x * v.x + v.y * v.y),
+            norm: (v) => {
+                const m = Math.sqrt(v.x * v.x + v.y * v.y);
+                return m === 0 ? { x: 0, y: 0 } : { x: v.x / m, y: v.y / m };
+            },
+            scale: (v, s) => ({ x: v.x * s, y: v.y * s }),
+            rotate: (v, angle) => ({
+                x: v.x * Math.cos(angle) - v.y * Math.sin(angle),
+                y: v.x * Math.sin(angle) + v.y * Math.cos(angle)
+            })
+        };
+
+        // Geometry Classes
+        class Bumper {
+            constructor(x, y, r) {
+                this.x = x;
+                this.y = y;
+                this.r = r;
+            }
+            draw(ctx) {
+                ctx.fillStyle = '#ff4081';
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+        }
+
+        class Spinner {
+            constructor(x, y, len, speed) {
+                this.x = x;
+                this.y = y;
+                this.len = len;
+                this.angle = 0;
+                this.speed = speed;
+            }
+            update() {
+                this.angle += this.speed;
+            }
+            getSegments() {
+                const p1 = { x: this.x - Math.cos(this.angle) * this.len, y: this.y - Math.sin(this.angle) * this.len };
+                const p2 = { x: this.x + Math.cos(this.angle) * this.len, y: this.y + Math.sin(this.angle) * this.len };
+                return { p1, p2, cx: this.x, cy: this.y };
+            }
+            draw(ctx) {
+                const { p1, p2 } = this.getSegments();
+                ctx.strokeStyle = '#00e676';
+                ctx.lineWidth = 8;
+                ctx.lineCap = 'round';
+                ctx.beginPath();
+                ctx.moveTo(p1.x, p1.y);
+                ctx.lineTo(p2.x, p2.y);
+                ctx.stroke();
+                
+                ctx.fillStyle = '#fff';
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, 5, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        class Ramp {
+            constructor(x, y, w, h) {
+                this.x = x;
+                this.y = y;
+                this.w = w;
+                this.h = h;
+            }
+            draw(ctx) {
+                ctx.fillStyle = '#2979ff';
+                ctx.fillRect(this.x, this.y, this.w, this.h);
+            }
+            getSegments() {
+                // Top edge
+                return [{ x1: this.x, y1: this.y, x2: this.x + this.w, y2: this.y }];
+            }
+        }
+
+        class Funnel {
+            constructor(x, y, w, h) {
+                this.x = x;
+                this.y = y;
+                this.w = w;
+                this.h = h;
+            }
+            draw(ctx) {
+                ctx.fillStyle = 'rgba(255, 193, 7, 0.3)';
+                ctx.strokeStyle = '#ffc107';
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.moveTo(this.x, this.y);
+                ctx.lineTo(this.x + this.w / 2, this.y + this.h);
+                ctx.lineTo(this.x + this.w, this.y);
+                ctx.closePath();
+                ctx.fill();
+                ctx.stroke();
+            }
+            getSegments() {
+                const mx = this.x + this.w / 2;
+                return [
+                    { x1: this.x, y1: this.y, x2: mx, y2: this.y + this.h },
+                    { x1: this.x + this.w, y1: this.y, x2: mx, y2: this.y + this.h }
+                ];
+            }
+        }
+
+        // Logic
+        function generateSegment(yOffset) {
+            const seg = [];
+            const type = Math.random();
+            const w = width;
+            
+            // Walls
+            seg.push(new Ramp(0, yOffset, 20, SEGMENT_HEIGHT));
+            seg.push(new Ramp(w - 20, yOffset, 20, SEGMENT_HEIGHT));
+
+            if (type < 0.3) {
+                // Ramp
+                const side = Math.random() > 0.5 ? 40 : w - 140;
+                seg.push(new Ramp(side, yOffset + 100, 100, 10));
+            } else if (type < 0.6) {
+                // Funnel
+                seg.push(new Funnel(w/2 - 100, yOffset + 50, 200, 150));
+            } else if (type < 0.8) {
+                // Spinner
+                seg.push(new Spinner(w/2, yOffset + 200, 80, (Math.random() - 0.5) * 0.1));
+            } else {
+                // Bumpers
+                for(let i=0; i<3; i++) {
+                    seg.push(new Bumper(Math.random() * (w - 100) + 50, yOffset + Math.random() * 300 + 50, 15));
+                }
+            }
+            return seg;
+        }
+
+        function initWorld() {
+            segments = [];
+            for (let i = 0; i < NUM_SEGMENTS; i++) {
+                segments.push(generateSegment(i * SEGMENT_HEIGHT));
+            }
+        }
+
+        function rebuildWorld() {
+            // Remove bottom, add top
+            segments.shift();
+            segments.push(generateSegment((segments.length) * SEGMENT_HEIGHT));
+        }
+
+        function spawnMarble() {
+            if (marbles.length > 300) return; // Cap performance
+            
+            const x = Math.random() * (width - 100) + 50;
+            const y = Math.random() * SEGMENT_HEIGHT - SEGMENT_HEIGHT; // Spawn just above view
+            
+            marbles.push({
+                x: x,
+                y: y,
+                vx: (Math.random() - 0.5) * 2,
+                vy: Math.random() * 2,
+                r: 6,
+                color: `hsl(${Math.random() * 360}, 70%, 60%)`,
+                trail: []
+            });
+        }
+
+        // Physics Engine
+        function resolveCollision(m, p1, p2) {
+            const vLine = Vec2.sub(p2, p1);
+            const vPoint = Vec2.sub({x: m.x, y: m.y}, p1);
+            
+            const lineLen = Vec2.mag(vLine);
+            const vLineNorm = Vec2.norm(vLine);
+            
+            // Project point onto line
+            let proj = Vec2.dot(vPoint, vLineNorm);
+            
+            // Clamp to segment
+            if (proj < 0) proj = 0;
+            if (proj > lineLen) proj = lineLen;
+            
+            const closest = Vec2.add(p1, Vec2.scale(vLineNorm, proj));
+            const distVec = Vec2.sub({x: m.x, y: m.y}, closest);
+            const dist = Vec2.mag(distVec);
+            
+            if (dist < m.r && dist > 0) {
+                const normal = Vec2.norm(distVec);
+                
+                // Push out
+                const overlap = m.r - dist;
+                m.x += normal.x * overlap;
+                m.y += normal.y * overlap;
+                
+                // Reflect velocity
+                // v' = v - 2(v . n)n
+                const dot = Vec2.dot({x: m.vx, y: m.vy}, normal);
+                m.vx = (m.vx - 2 * dot * normal.x) * BOUNCE;
+                m.vy = (m.vy - 2 * dot * normal.y) * BOUNCE;
+                
+                // Add friction/tangential force
+                const tangent = { x: -normal.y, y: normal.x };
+                const tangentVel = Vec2.dot({x: m.vx, y: m.vy}, tangent);
+                m.vx -= tangentVel * 0.1 * tangent.x;
+                m.vy -= tangentVel * 0.1 * tangent.y;
+            }
+        }
+
+        function update() {
+            frameCount++;
+
+            // Rebuild logic
+            if (frameCount - lastSegmentRebuild > 1800) { // 30 seconds at 60fps
+                rebuildWorld();
+                lastSegmentRebuild = frameCount;
+            }
+
+            // Update Spinners
+            segments.forEach(seg => {
+                seg.forEach(obj => {
+                    if (obj instanceof Spinner) obj.update();
+                });
+            });
+
+            // Spawn logic
+            if (frameCount % SPAWN_RATE === 0) spawnMarble();
+
+            // Update Marbles
+            for (let i = marbles.length - 1; i >= 0; i--) {
+                const m = marbles[i];
+                
+                // Physics
+                m.vy += GRAVITY;
+                m.vx *= FRICTION;
+                m.vy *= FRICTION;
+                
+                m.x += m.vx;
+                m.y += m.vy;
+
+                // Trail logic
+                m.trail.push({x: m.x, y: m.y});
+                if (m.trail.length > 5) m.trail.shift();
+
+                // World Bounds (Horizontal)
+                if (m.x < m.r) { m.x = m.r; m.vx *= -1; }
+                if (m.x > width - m.r) { m.x = width - m.r; m.vx *= -1; }
+
+                // Segment Collisions
+                for (let seg of segments) {
+                    for (let obj of seg) {
+                        if (obj instanceof Ramp) {
+                            obj.getSegments().forEach(s => {
+                                resolveCollision(m, {x: s.x1, y: s.y1}, {x: s.x2, y: s.y2});
+                            });
+                        } else if (obj instanceof Funnel) {
+                            obj.getSegments().forEach(s => {
+                                resolveCollision(m, {x: s.x1, y: s.y1}, {x: s.x2, y: s.y2});
+                            });
+                        } else if (obj instanceof Spinner) {
+                            const {p1, p2} = obj.getSegments();
+                            resolveCollision(m, p1, p2);
+                            
+                            // Add angular velocity transfer
+                            const distFromCenter = Math.sqrt((m.x-obj.x)**2 + (m.y-obj.y)**2);
+                            if (distFromCenter < obj.len + m.r) {
+                                const tangent = { x: -Math.sin(obj.angle), y: Math.cos(obj.angle) };
+                                m.vx += tangent.x * 0.5;
+                                m.vy += tangent.y * 0.5;
+                            }
+                        } else if (obj instanceof Bumper) {
+                            const dx = m.x - obj.x;
+                            const dy = m.y - obj.y;
+                            const dist = Math.sqrt(dx*dx + dy*dy);
+                            if (dist < m.r + obj.r) {
+                                const n = { x: dx/dist, y: dy/dist };
+                                const dot = m.vx * n.x + m.vy * n.y;
+                                m.vx = (m.vx - 2 * dot * n.x) * BOUNCE;
+                                m.vy = (m.vy - 2 * dot * n.y) * BOUNCE;
+                                m.x = obj.x + n.x * (m.r + obj.r);
+                                m.y = obj.y + n.y * (m.r + obj.r);
+                            }
+                        }
+                    }
+                }
+
+                // Teleport Loop
+                if (m.y > segments.length * SEGMENT_HEIGHT) {
+                    m.y = Math.random() * SEGMENT_HEIGHT - SEGMENT_HEIGHT;
+                    m.x = Math.random() * (width - 100) + 50;
+                    m.vy = Math.random() * 2;
+                    m.trail = [];
+                }
+            }
+
+            // Camera Follow
+            // Find average marble position
+            let avgX = 0, avgY = 0;
+            if (marbles.length > 0) {
+                marbles.forEach(m => { avgX += m.x; avgY += m.y; });
+                avgX /= marbles.length;
+                avgY /= marbles.length;
+            } else {
+                // Idle camera drift
+                avgY = Math.sin(frameCount * 0.01) * 200;
+            }
+            
+            // Smooth camera
+            const targetX = width/2 - avgX;
+            const targetY = height/2 - avgY + 100; // Offset slightly to look down
+            
+            camera.x += (targetX - camera.x) * 0.05;
+            camera.y += (targetY - camera.y) * 0.05;
+        }
+
+        function draw() {
+            // Clear background
+            ctx.fillStyle = '#111';
+            ctx.fillRect(0, 0, width, height);
+
+            ctx.save();
+            ctx.translate(camera.x, camera.y);
+
+            // Draw Segments
+            segments.forEach(seg => {
+                seg.forEach(obj => {
+                    // Cull off-screen objects roughly
+                    if (obj.y > camera.y + height + 100 || obj.y + 200 < camera.y - 100) return;
+                    obj.draw(ctx);
+                });
+            });
+
+            // Draw Marbles
+            marbles.forEach(m => {
+                // Motion Blur Trail
+                if (m.trail.length > 1) {
+                    ctx.beginPath();
+                    ctx.moveTo(m.trail[0].x, m.trail[0].y);
+                    for(let j=1; j<m.trail.length; j++) {
+                        ctx.lineTo(m.trail[j].x, m.trail[j].y);
+                    }
+                    ctx.lineTo(m.x, m.y);
+                    ctx.strokeStyle = m.color;
+                    ctx.globalAlpha = 0.3;
+                    ctx.lineWidth = m.r;
+                    ctx.lineCap = 'round';
+                    ctx.lineJoin = 'round';
+                    ctx.stroke();
+                    ctx.globalAlpha = 1.0;
+                }
+
+                // Marble Body
+                ctx.fillStyle = m.color;
+                ctx.beginPath();
+                ctx.arc(m.x, m.y, m.r, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Shine
+                ctx.fillStyle = 'rgba(255,255,255,0.5)';
+                ctx.beginPath();
+                ctx.arc(m.x - m.r*0.3, m.y - m.r*0.3, m.r*0.3, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+            ctx.restore();
+            requestAnimationFrame(loop);
+        }
+
+        function loop() {
+            update();
+            draw();
+        }
+
+        initWorld();
+        loop();
+
+    </script>
+</body>
+</html>

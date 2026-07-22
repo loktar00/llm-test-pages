@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width=device-width, initial-scale=1.0">
+    <title>Slime Mold Simulation</title>
+    <style>
+        body, html, body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #000;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="simCanvas"></canvas>
+    <script>
+        'use strict';
+
+        // --- Configuration ---
+        const CONFIG = {
+            AGENT_COUNT: 3000,
+            SENSOR_COUNT: 3,
+            SENSOR_ANGLE: Math.PI / 4,
+            SENSOR_DIST: 20,
+            TURN_SPEED: 0.2,
+            SPEED: 2,
+            DEP_RATE: 0.8,
+            DECAY: 0.985,
+            EVAP: 0.99,
+            FOOD_COUNT: 4,
+            FOOD_MOVE_DIST: 2,
+            FOOD_MOVE_CHANCE: 0.01,
+            TRAIL_WIDTH: 1024,
+            TRAIL_HEIGHT: 600
+        };
+
+        // --- Globals ---
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d');
+        let width, height, trailWidth, trailHeight;
+        let trailMap; // Float32Array
+        let trailImageData; // Uint8ClampedArray
+        let agents = [];
+        let foods = [];
+
+        // --- Initialization ---
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+
+            // Create trail map centered on screen
+            trailWidth = CONFIG.TRAIL_WIDTH;
+            trailHeight = CONFIG.TRAIL_HEIGHT;
+            trailMap = new Float32Array(trailWidth * trailHeight);
+            trailImageData = ctx.createImageData(width, height);
+
+            initAgents();
+            initFoods();
+        }
+
+        function initAgents() {
+            agents = [];
+            for (let i = 0; i < CONFIG.AGENT_COUNT; i++) {
+                agents.push({
+                    x: Math.random() * trailWidth,
+                    y: Math.random() * trailHeight,
+                    angle: Math.random() * 2 * Math.PI
+                });
+            }
+        }
+
+        function initFoods() {
+            foods = [];
+            for (let i = 0; i < CONFIG.FOOD_COUNT; i++) {
+                foods.push({
+                    x: Math.random() * trailWidth,
+                    y: Math.random() * trailHeight
+                });
+            }
+        }
+
+        // --- Simulation Logic ---
+
+        function updateFoods() {
+            for (const food of foods) {
+                if (Math.random() < CONFIG.FOOD_MOVE_CHANCE) {
+                    food.x += (Math.random() - 0.5) * CONFIG.FOOD_MOVE_DIST * 2;
+                    food.y += (Math.random() - 0.5) * CONFIG.FOOD_MOVE_DIST * 2;
+                    // Clamp to bounds
+                    food.x = Math.max(0, Math.min(trailWidth - 1, food.x));
+                    food.y = Math.max(0, Math.min(trailHeight - 1, food.y));
+                }
+            }
+        }
+
+        function depositOnTrail(agent) {
+            const ix = Math.floor(agent.x);
+            const iy = Math.floor(agent.y);
+            if (ix >= 0 && ix < trailWidth && iy >= 0 && iy < trailHeight) {
+                const idx = iy * trailWidth + ix;
+                trailMap[idx] += CONFIG.DEP_RATE;
+                // Cap value to prevent overflow/visual clipping
+                if (trailMap[idx] > 255) trailMap[idx] = 255;
+            }
+        }
+
+        function getSensorReading(agent, angleOffset) {
+            const sensorAngle = agent.angle + angleOffset;
+            const sx = agent.x + Math.cos(sensorAngle) * CONFIG.SENSOR_DIST;
+            const sy = agent.y + Math.sin(sensorAngle) * CONFIG.SENSOR_DIST;
+
+            const ix = Math.floor(sx);
+            const iy = Math.floor(sy);
+
+            if (ix < 0 || ix >= trailWidth || iy < 0 || iy >= trailHeight) {
+                return 0;
+            }
+            return trailMap[iy * trailWidth + ix];
+        }
+
+        function updateAgents() {
+            for (const agent of agents) {
+                // 1. Sense
+                const left = getSensorReading(agent, -CONFIG.SENSOR_ANGLE);
+                const center = getSensorReading(agent, 0);
+                const right = getSensorReading(agent, CONFIG.SENSOR_ANGLE);
+
+                // 2. Steer
+                if (center > left && center > right) {
+                    // Go straight
+                } else if (center < left && center < right) {
+                    agent.angle += (Math.random() - 0.5) * 2 * CONFIG.TURN_SPEED;
+                } else if (left > right) {
+                    agent.angle -= CONFIG.TURN_SPEED;
+                } else if (right > left) {
+                    agent.angle += CONFIG.TURN_SPEED;
+                }
+
+                // 3. Move
+                agent.x += Math.cos(agent.angle) * CONFIG.SPEED;
+                agent.y += Math.sin(agent.angle) * CONFIG.SPEED;
+
+                // 4. Wrap / Bounds
+                if (agent.x < 0) agent.x += trailWidth;
+                if (agent.x >= trailWidth) agent.x -= trailWidth;
+                if (agent.y < 0) agent.y += trailHeight;
+                if (agent.y >= trailHeight) agent.y -= trailHeight;
+
+                // 5. Deposit
+                depositOnTrail(agent);
+            }
+        }
+
+        function updateTrailMap() {
+            // Diffusion and Decay
+            const newTrail = new Float32Array(trailWidth * trailHeight);
+            
+            // Simple diffusion kernel
+            for (let y = 1; y < trailHeight - 1; y++) {
+                for (let x = 1; x < trailWidth - 1; x++) {
+                    const idx = y * trailWidth + x;
+                    const val = trailMap[idx];
+                    
+                    // Diffusion
+                    const avg = (
+                        trailMap[idx - 1] + // Left
+                        trailMap[idx + 1] + // Right
+                        trailMap[idx - trailWidth] + // Up
+                        trailMap[idx + trailWidth]    // Down
+                    ) / 4;
+                    
+                    // Blend current value with average (diffusion) then decay
+                    const nextVal = (val + avg) / 2 * CONFIG.DECAY;
+                    
+                    if (nextVal > 0) {
+                        newTrail[idx] = nextVal;
+                    }
+                }
+            }
+            
+            trailMap = newTrail;
+        }
+
+        // --- Rendering ---
+
+        // Precompute color lookup table for performance
+        const colorLUT = new Uint8Array(256 * 4); 
+        for (let i = 0; i < 256; i++) {
+            // Two-tone palette: Cyan/Teal (Agents) -> Magenta/Purple (Food)
+            // Cyan: 0, 255, 255, 255
+            // Magenta: 255, 0, 255, 255
+            // Mix based on intensity
+            const t = i / 255;
+            // Cyan base
+            colorLUT[i * 4] = 0;
+            colorLUT[i * 4 + 1] = Math.floor(255 * t);
+            colorLUT[i * 4 + 2] = Math.floor(255 * t);
+            colorLUT[i * 4 + 3] = 255;
+        }
+        
+        // Food LUT (Magenta)
+        const foodLUT = new Uint8Array(256 * 4);
+        for (let i = 0; i < 256; i++) {
+            const t = i / 255;
+            // Magenta base
+            foodLUT[i * 4] = Math.floor(255 * t);
+            foodLUT[i * 4 + 1] = 0;
+            foodLUT[i * 4 + 2] = Math.floor(255 * t);
+            foodLUT[i * 4 + 3] = 255;
+        }
+
+        function render() {
+            const data = trailImageData.data;
+            
+            // Clear canvas (fill black)
+            // We iterate over the full screen, but only draw the trail map area
+            // To handle scaling correctly, we map screen coords to trail coords
+            
+            const scaleX = trailWidth / width;
+            const scaleY = trailHeight / height;
+            
+            // Offset to center the trail map
+            const offsetX = (width - trailWidth) / 2;
+            const offsetY = (height - trailHeight) / 2;
+
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    const idx = (y * width + x) * 4;
+                    
+                    // Check if within trail map bounds
+                    if (x >= offsetX && x < offsetX + trailWidth &&
+                        y >= offsetY && y < offsetY + trailHeight) {
+                        
+                        const tx = Math.floor((x - offsetX) * scaleX);
+                        const ty = Math.floor((y - offsetY) * scaleY);
+                        const tIdx = ty * trailWidth + tx;
+                        
+                        const val = trailMap[tIdx];
+                        
+                        if (val > 0) {
+                            // Check if near food for magenta tint
+                            let isNearFood = false;
+                            for (const food of foods) {
+                                const dx = tx - food.x;
+                                const dy = ty - food.y;
+                                if (dx * dx + dy * dy < 400) { // 20px radius
+                                    isNearFood = true;
+                                    break;
+                                }
+                            }
+                            
+                            if (isNearFood) {
+                                data[idx] = foodLUT[tIdx * 4];
+                                data[idx + 1] = foodLUT[tIdx * 4 + 1];
+                                data[idx + 2] = foodLUT[tIdx * 4 + 2];
+                                data[idx + 3] = foodLUT[tIdx * 4 + 3];
+                            } else {
+                                data[idx] = colorLUT[tIdx * 4];
+                                data[idx + 1] = colorLUT[tIdx * 4 + 1];
+                                data[idx + 2] = colorLUT[tIdx * 4 + 2];
+                                data[idx + 3] = colorLUT[tIdx * 4 + 3];
+                            }
+                        } else {
+                            data[idx] = 0;
+                            data[idx + 1] = 0;
+                            data[idx + 2] = 0;
+                            data[idx + 3] = 255;
+                        }
+                    } else {
+                        data[idx] = 0;
+                        data[idx + 1] = 0;
+                        data[idx + 2] = 0;
+                        data[idx + 3] = 255;
+                    }
+                }
+            }
+            
+            ctx.putImageData(trailImageData, 0, 0);
+        }
+
+        // --- Main Loop ---
+        function loop() {
+            updateFoods();
+            updateAgents();
+            updateTrailMap();
+            render();
+            requestAnimationFrame(loop);
+        }
+
+        window.addEventListener('resize', resize);
+        resize();
+        loop();
+
+    </script>
+</body>
+</html>

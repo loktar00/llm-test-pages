@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Dungeon Generator</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #050505;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        canvas {
+            box-shadow: 0 0 50px rgba(0, 0, 0, 0.8);
+        }
+    </style>
+</head>
+<body>
+    <canvas id="dungeon"></canvas>
+    <script>
+        const canvas = document.getElementById('dungeon');
+        const ctx = canvas.getContext('2d');
+
+        // Configuration
+        const TILE_SIZE = 16; // Size of grid tiles
+        const MAP_WIDTH = 50; // Grid width
+        const MAP_HEIGHT = 35; // Grid height
+        
+        // Colors
+        const COLOR_BG = '#050505';
+        const COLOR_WALL = '#1a1a1a';
+        const COLOR_WALL_LIGHT = '#2a2a2a';
+        const COLOR_FLOOR = '#0a0a0a';
+        const COLOR_FLOOR_LIGHT = '#252525';
+        const COLOR_TORCH_FLAME = '#ffaa00';
+        const COLOR_TORCH_FLAME_CORE = '#fff';
+        const COLOR_EXPLORER = '#00ffff';
+
+        // State
+        let grid = [];
+        let torches = [];
+        let explorer = { x: 0, y: 0, vx: 0, vy: 0, moveTimer: 0 };
+        let generationProgress = 0; // 0 to 1 (percentage of map revealed)
+        let currentRoom = null;
+        let rooms = [];
+        let corridors = [];
+        let isGenerating = true;
+        let isFading = false;
+        let fadeAlpha = 0;
+        let transitionTimer = 0;
+
+        // Initialize Canvas Size
+        function resize() {
+            canvas.width = MAP_WIDTH * TILE_SIZE;
+            canvas.height = MAP_HEIGHT * TILE_SIZE;
+        }
+        resize();
+
+        // Grid Helpers
+        function createGrid() {
+            grid = [];
+            for (let y = 0; y < MAP_HEIGHT; y++) {
+                let row = [];
+                for (let x = 0; x < MAP_WIDTH; x++) {
+                    row.push({ type: 'wall', revealed: false });
+                }
+                grid.push(row);
+            }
+        }
+
+        function carveRoom(x, y, w, h) {
+            for (let ry = y; ry < y + h; ry++) {
+                for (let rx = x; rx < x + w; rx++) {
+                    if (ry >= 0 && ry < MAP_HEIGHT && rx >= 0 && rx < MAP_WIDTH) {
+                        grid[ry][rx].type = 'floor';
+                    }
+                }
+            }
+        }
+
+        function carveCorridor(x1, y1, x2, y2) {
+            let x = x1;
+            let y = y1;
+            while (x !== x2 || y !== y2) {
+                if (x >= 0 && x < MAP_WIDTH && y >= 0 && y < MAP_HEIGHT) {
+                    grid[y][x].type = 'floor';
+                }
+                if (x < x2) x++;
+                else if (x > x2) x--;
+                else if (y < y2) y++;
+                else if (y > y2) y--;
+            }
+        }
+
+        // Dungeon Generation (BSP-like room placement)
+        function generateDungeon() {
+            createGrid();
+            rooms = [];
+            corridors = [];
+            torches = [];
+            generationProgress = 0;
+            isGenerating = true;
+            isFading = false;
+            fadeAlpha = 0;
+
+            // Place rooms
+            let attempts = 0;
+            while (rooms.length < 12 && attempts < 100) {
+                let w = 4 + Math.floor(Math.random() * 6);
+                let h = 4 + Math.floor(Math.random() * 6);
+                let x = 1 + Math.floor(Math.random() * (MAP_WIDTH - w - 2));
+                let y = 1 + Math.floor(Math.random() * (MAP_HEIGHT - h - 2));
+
+                let overlap = false;
+                for (let r of rooms) {
+                    if (x < r.x + r.w + 2 && x + w + 2 > r.x &&
+                        y < r.y + r.h + 2 && y + h + 2 > r.y) {
+                        overlap = true;
+                        break;
+                    }
+                }
+                if (!overlap) {
+                    rooms.push({ x, y, w, h });
+                    carveRoom(x, y, w, h);
+                }
+                attempts++;
+            }
+
+            // Connect rooms
+            for (let i = 1; i < rooms.length; i++) {
+                let r1 = rooms[i - 1];
+                let r2 = rooms[i];
+                let x1 = Math.floor(r1.x + r1.w / 2);
+                let y1 = Math.floor(r1.y + r1.h / 2);
+                let x2 = Math.floor(r2.x + r2.w / 2);
+                let y2 = Math.floor(r2.y + r2.h / 2);
+                corridors.push({ x1, y1, x2, y2 });
+                carveCorridor(x1, y1, x2, y2);
+            }
+
+            // Add random torches
+            for (let i = 0; i < rooms.length; i++) {
+                let r = rooms[i];
+                let tx = r.x + Math.floor(Math.random() * r.w);
+                let ty = r.y + Math.floor(Math.random() * r.h);
+                torches.push({ x: tx, y: ty, flickerOffset: Math.random() * 100 });
+            }
+
+            // Place Explorer in the first room
+            let startRoom = rooms[0];
+            explorer.x = Math.floor(startRoom.x + startRoom.w / 2);
+            explorer.y = Math.floor(startRoom.y + startRoom.h / 2);
+            explorer.moveTimer = 0;
+        }
+
+        // Reveal mechanism
+        function revealAround(x, y, radius) {
+            for (let dy = -radius; dy <= radius; dy++) {
+                for (let dx = -radius; dx <= radius; dx++) {
+                    let nx = x + dx;
+                    let ny = y + dy;
+                    if (nx >= 0 && nx < MAP_WIDTH && ny >= 0 && ny < MAP_HEIGHT) {
+                        if (dx * dx + dy * dy <= radius * radius) {
+                            grid[ny][nx].revealed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Explorer AI
+        function updateExplorer() {
+            explorer.moveTimer++;
+            if (explorer.moveTimer > 10) { // Move every 10 frames
+                explorer.moveTimer = 0;
+                
+                let possibleMoves = [];
+                let dirs = [{x:0, y:-1}, {x:0, y:1}, {x:-1, y:0}, {x:1, y:0}];
+                
+                // Shuffle directions for randomness
+                dirs.sort(() => Math.random() - 0.5);
+
+                for (let d of dirs) {
+                    let nx = explorer.x + d.x;
+                    let ny = explorer.y + d.y;
+                    if (nx >= 0 && nx < MAP_WIDTH && ny >= 0 && ny < MAP_HEIGHT) {
+                        if (grid[ny][nx].type === 'floor') {
+                            // Prefer unvisited
+                            if (!grid[ny][nx].revealed) {
+                                possibleMoves.unshift({x: nx, y: ny}); // High priority
+                            } else {
+                                possibleMoves.push({x: nx, y: ny}); // Low priority
+                            }
+                        }
+                    }
+                }
+
+                if (possibleMoves.length > 0) {
+                    let move = possibleMoves[Math.floor(Math.random() * possibleMoves.length)];
+                    explorer.x = move.x;
+                    explorer.y = move.y;
+                }
+            }
+            revealAround(explorer.x, explorer.y, 3);
+        }
+
+        // Rendering
+        function draw() {
+            // Clear screen
+            ctx.fillStyle = COLOR_BG;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw Map
+            for (let y = 0; y < MAP_HEIGHT; y++) {
+                for (let x = 0; x < MAP_WIDTH; x++) {
+                    let cell = grid[y][x];
+                    let px = x * TILE_SIZE;
+                    let py = y * TILE_SIZE;
+
+                    if (!cell.revealed) {
+                        ctx.fillStyle = COLOR_BG;
+                        ctx.fillRect(px, py, TILE_SIZE, TILE_SIZE);
+                        continue;
+                    }
+
+                    // Draw Floor/Wall
+                    if (cell.type === 'floor') {
+                        ctx.fillStyle = COLOR_FLOOR;
+                        ctx.fillRect(px, py, TILE_SIZE, TILE_SIZE);
+                        // Tile detail
+                        ctx.fillStyle = '#0f0f0f';
+                        ctx.fillRect(px + 2, py + 2, TILE_SIZE - 4, TILE_SIZE - 4);
+                    } else {
+                        ctx.fillStyle = COLOR_WALL;
+                        ctx.fillRect(px, py, TILE_SIZE, TILE_SIZE);
+                        // Wall detail
+                        ctx.fillStyle = COLOR_WALL_LIGHT;
+                        ctx.fillRect(px, py, TILE_SIZE, 2);
+                        ctx.fillRect(px, py, 2, TILE_SIZE);
+                    }
+
+                    // Torch Light Pools
+                    for (let t of torches) {
+                        if (t.x === x && t.y === y) {
+                            let flicker = Math.sin(Date.now() * 0.01 + t.flickerOffset) * 2;
+                            let radius = (TILE_SIZE * 4) + flicker;
+                            
+                            let gradient = ctx.createRadialGradient(
+                                px + TILE_SIZE/2, py + TILE_SIZE/2, 0,
+                                px + TILE_SIZE/2, py + TILE_SIZE/2, radius
+                            );
+                            gradient.addColorStop(0, 'rgba(255, 170, 0, 0.15)');
+                            gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+
+                            ctx.fillStyle = gradient;
+                            ctx.fillRect(px - radius, py - radius, radius * 2, radius * 2);
+                            
+                            // Flame
+                            ctx.fillStyle = COLOR_TORCH_FLAME;
+                            ctx.beginPath();
+                            ctx.arc(px + TILE_SIZE/2, py + TILE_SIZE/2 - 2, 2 + flicker/2, 0, Math.PI * 2);
+                            ctx.fill();
+                        }
+                    }
+                }
+            }
+
+            // Draw Explorer
+            ctx.fillStyle = COLOR_EXPLORER;
+            ctx.beginPath();
+            ctx.arc(
+                explorer.x * TILE_SIZE + TILE_SIZE/2, 
+                explorer.y * TILE_SIZE + TILE_SIZE/2, 
+                3, 0, Math.PI * 2
+            );
+            ctx.fill();
+            
+            // Explorer Glow
+            let eGrad = ctx.createRadialGradient(
+                explorer.x * TILE_SIZE + TILE_SIZE/2, 
+                explorer.y * TILE_SIZE + TILE_SIZE/2, 0,
+                explorer.x * TILE_SIZE + TILE_SIZE/2, 
+                explorer.y * TILE_SIZE + TILE_SIZE/2, 
+                TILE_SIZE * 2
+            );
+            eGrad.addColorStop(0, 'rgba(0, 255, 255, 0.2)');
+            eGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+            ctx.fillStyle = eGrad;
+            ctx.fillRect(
+                explorer.x * TILE_SIZE - TILE_SIZE * 2, 
+                explorer.y * TILE_SIZE - TILE_SIZE * 2, 
+                TILE_SIZE * 5, 
+                TILE_SIZE * 5
+            );
+
+            // Fade Transition
+            if (isFading) {
+                ctx.fillStyle = `rgba(5, 5, 5, ${fadeAlpha})`;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+            }
+        }
+
+        // Main Loop
+        function loop() {
+            if (isFading) {
+                fadeAlpha += 0.02;
+                if (fadeAlpha >= 1) {
+                    generateDungeon();
+                    isFading = false;
+                    fadeAlpha = 0;
+                }
+            } else {
+                updateExplorer();
+                
+                // Check completion
+                let allRevealed = true;
+                for(let y=0; y<MAP_HEIGHT; y++) {
+                    for(let x=0; x<MAP_WIDTH; x++) {
+                        if(grid[y][x].type === 'floor' && !grid[y][x].revealed) {
+                            allRevealed = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (allRevealed) {
+                    isFading = true;
+                }
+            }
+
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        // Start
+        generateDungeon();
+        loop();
+
+    </script>
+</body>
+</html>

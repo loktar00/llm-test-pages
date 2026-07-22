@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Clockwork Machine</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #1a1815;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        // --- Configuration ---
+        const PALETTE = {
+            brass: ['#b5a642', '#d4af37', '#f9e588', '#8e7d26'],
+            iron: ['#4a4a4a', '#2c2c2c', '#1a1a1a', '#5e5e5e'],
+            bg: '#1a1815'
+        };
+
+        let width, height;
+        let time = 0;
+        let globalSpeed = 0.02;
+
+        // --- Utilities ---
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            initMachine();
+        }
+        window.addEventListener('resize', resize);
+
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function dist(x1, y1, x2, y2) { return Math.sqrt((x2-x1)**2 + (y2-y1)**2); }
+        function randomRange(min, max) { return Math.random() * (max - min) + min; }
+        function randomColor(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+
+        // --- Drawing Helpers ---
+        function drawGear(x, y, teeth, radius, rotation, colorScale = 0) {
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(rotation);
+            
+            const toothHeight = radius * 0.2;
+            const innerRadius = radius - toothHeight;
+            const outerRadius = radius + toothHeight * 0.5;
+            
+            ctx.beginPath();
+            for (let i = 0; i < teeth; i++) {
+                const angle = (i / teeth) * Math.PI * 2;
+                const nextAngle = ((i + 0.5) / teeth) * Math.PI * 2;
+                const endAngle = ((i + 1) / teeth) * Math.PI * 2;
+                
+                // Gear tooth shape
+                ctx.lineTo(Math.cos(angle - 0.1) * innerRadius, Math.sin(angle - 0.1) * innerRadius);
+                ctx.lineTo(Math.cos(angle) * outerRadius, Math.sin(angle) * outerRadius);
+                ctx.lineTo(Math.cos(angle + 0.1) * outerRadius, Math.sin(angle + 0.1) * outerRadius);
+                ctx.lineTo(Math.cos(angle + 0.2) * innerRadius, Math.sin(angle + 0.2) * innerRadius);
+            }
+            ctx.closePath();
+            
+            // Styling
+            const grad = ctx.createRadialGradient(0, 0, innerRadius * 0.2, 0, 0, outerRadius);
+            const baseColor = PALETTE.brass[colorScale % PALETTE.brass.length];
+            grad.addColorStop(0, '#fff8db');
+            grad.addColorStop(0.2, baseColor);
+            grad.addColorStop(1, '#3d3510');
+            
+            ctx.fillStyle = grad;
+            ctx.fill();
+            ctx.strokeStyle = '#2a2a2a';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Spokes
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            for (let i = 0; i < 4; i++) {
+                ctx.rotate(Math.PI / 2);
+                ctx.lineTo(innerRadius * 0.8, 0);
+                ctx.lineTo(innerRadius * 0.6, -10);
+                ctx.lineTo(0, 0);
+            }
+            ctx.fillStyle = '#222';
+            ctx.fill();
+
+            // Center hole
+            ctx.beginPath();
+            ctx.arc(0, 0, radius * 0.25, 0, Math.PI * 2);
+            ctx.fillStyle = '#111';
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.restore();
+        }
+
+        function drawPiston(x, y, angle, strokeLen) {
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(angle);
+            
+            // Cylinder
+            ctx.fillStyle = PALETTE.iron[1];
+            ctx.fillRect(-20, -20, 40, 40);
+            
+            // Piston rod
+            const offset = Math.sin(time * 5) * (strokeLen / 2);
+            ctx.fillStyle = PALETTE.iron[3];
+            ctx.fillRect(-5, 20 + offset, 10, strokeLen);
+            
+            // Piston head
+            ctx.fillStyle = PALETTE.iron[0];
+            ctx.fillRect(-10, 20 + offset + strokeLen, 20, 10);
+            
+            ctx.restore();
+        }
+
+        function drawBird(x, y, flapState) {
+            ctx.save();
+            ctx.translate(x, y);
+            
+            // Body
+            ctx.fillStyle = '#d4af37';
+            ctx.beginPath();
+            ctx.ellipse(0, 0, 15, 20, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+
+            // Head
+            ctx.beginPath();
+            ctx.arc(0, -25, 12, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+
+            // Beak
+            ctx.fillStyle = '#ff8800';
+            ctx.beginPath();
+            ctx.moveTo(5, -25);
+            ctx.lineTo(15, -22);
+            ctx.lineTo(5, -19);
+            ctx.fill();
+
+            // Eye
+            ctx.fillStyle = '#000';
+            ctx.beginPath();
+            ctx.arc(4, -28, 2, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Wings
+            ctx.fillStyle = '#b5a642';
+            ctx.save();
+            ctx.translate(5, -5);
+            ctx.rotate(-0.5 + flapState * 0.8);
+            ctx.beginPath();
+            ctx.ellipse(0, 0, 25, 8, 0.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+            ctx.restore();
+
+            ctx.save();
+            ctx.translate(-5, -5);
+            ctx.rotate(0.5 - flapState * 0.8);
+            ctx.beginPath();
+            ctx.ellipse(0, 0, 25, 8, -0.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+            ctx.restore();
+
+            ctx.restore();
+        }
+
+        // --- Classes ---
+
+        class Gear {
+            constructor(x, y, teeth, radius, speed) {
+                this.x = x;
+                this.y = y;
+                this.teeth = teeth;
+                this.radius = radius;
+                this.speed = speed;
+                this.angle = 0;
+                this.colorIdx = Math.floor(Math.random() * PALETTE.brass.length);
+                this.isLoose = false;
+                this.vx = 0;
+                this.vy = 0;
+                this.anchored = true;
+            }
+
+            update() {
+                if (this.isLoose) {
+                    this.x += this.vx;
+                    this.y += this.vy;
+                    this.vy += 0.2; // gravity
+                    this.angle += this.speed * 0.5;
+                    
+                    // Floor collision
+                    if (this.y > height - this.radius) {
+                        this.y = height - this.radius;
+                        this.vy *= -0.6;
+                        this.vx *= 0.9;
+                    }
+                    // Wall collision
+                    if (this.x < this.radius || this.x > width - this.radius) {
+                        this.vx *= -0.8;
+                        this.x = Math.max(this.radius, Math.min(width - this.radius, this.x));
+                    }
+                } else {
+                    this.angle += this.speed;
+                }
+            }
+
+            draw() {
+                drawGear(this.x, this.y, this.teeth, this.radius, this.angle, this.colorIdx);
+            }
+        }
+
+        class Sprocket {
+            constructor(x, y, radius) {
+                this.x = x;
+                this.y = y;
+                this.radius = radius;
+                this.angle = 0;
+            }
+            update(speed) {
+                this.angle += speed;
+            }
+            draw() {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.angle);
+                ctx.fillStyle = PALETTE.iron[1];
+                ctx.beginPath();
+                ctx.arc(0, 0, this.radius, 0, Math.PI*2);
+                ctx.fill();
+                // Teeth
+                for(let i=0; i<12; i++) {
+                    ctx.rotate(Math.PI/6);
+                    ctx.fillRect(-5, -this.radius-5, 10, 10);
+                }
+                ctx.restore();
+            }
+        }
+
+        class Chain {
+            constructor(s1, s2, tension) {
+                this.s1 = s1;
+                this.s2 = s2;
+                this.tension = tension;
+                this.offset = 0;
+            }
+            update() {
+                this.offset -= 2; // Chain movement
+            }
+            draw() {
+                ctx.save();
+                ctx.strokeStyle = PALETTE.iron[0];
+                ctx.lineWidth = 6;
+                ctx.setLineDash([8, 4]);
+                ctx.lineDashOffset = this.offset;
+                ctx.beginPath();
+                // Simplified chain path (tangents)
+                const dx = this.s2.x - this.s1.x;
+                const dy = this.s2.y - this.s1.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                const angle = Math.atan2(dy, dx);
+                
+                // Draw straight segments
+                const r = this.s1.radius;
+                const perpX = -Math.sin(angle) * r;
+                const perpY = Math.cos(angle) * r;
+
+                // Top run
+                ctx.beginPath();
+                ctx.moveTo(this.s1.x + perpX, this.s1.y + perpY);
+                ctx.lineTo(this.s2.x + perpX, this.s2.y + perpY);
+                ctx.stroke();
+
+                // Bottom run
+                ctx.beginPath();
+                ctx.moveTo(this.s1.x - perpX, this.s1.y - perpY);
+                ctx.lineTo(this.s2.x - perpX, this.s2.y - perpY);
+                ctx.stroke();
+
+                ctx.setLineDash([]);
+                ctx.restore();
+            }
+        }
+
+        class Automaton {
+            constructor(x, y) {
+                this.x = x;
+                this.baseY = y;
+                this.y = y + 100; // hidden
+                this.state = 'idle'; // idle, emerging, flapping, retreating
+                this.timer = 0;
+                this.flapTimer = 0;
+                this.activeDuration = 300; // frames
+            }
+
+            update() {
+                this.timer++;
+                if (this.timer > this.activeDuration + 300) { // Cycle: active + wait
+                    this.timer = 0;
+                }
+
+                if (this.timer < 60) {
+                    // Emerging
+                    this.state = 'emerging';
+                    this.y = lerp(this.baseY + 100, this.baseY, this.timer / 60);
+                } else if (this.timer < this.activeDuration) {
+                    // Flapping
+                    this.state = 'flapping';
+                    this.y = this.baseY + Math.sin(time * 10) * 5;
+                    this.flapTimer += 0.5;
+                } else if (this.timer < this.activeDuration + 60) {
+                    // Retreating
+                    this.state = 'retreating';
+                    this.y = lerp(this.baseY, this.baseY + 100, (this.timer - this.activeDuration) / 60);
+                }
+            }
+
+            draw() {
+                if (this.y > this.baseY + 90) return; // Don't draw if fully hidden
+                let flap = 0;
+                if (this.state === 'flapping') flap = Math.sin(this.flapTimer);
+                drawBird(this.x, this.y, flap);
+            }
+        }
+
+        class RepairArm {
+            constructor(x, y, targetGear) {
+                this.originX = x;
+                this.originY = y;
+                this.targetGear = targetGear;
+                this.angle = -Math.PI / 4;
+                this.length = 150;
+                this.state = 'waiting'; // waiting, reaching, fixing, retracting
+                this.timer = 0;
+            }
+
+            update() {
+                this.timer++;
+                
+                if (this.state === 'waiting') {
+                    if (this.targetGear.isLoose && this.targetGear.vy > -0.1 && this.targetGear.vy < 0.1) {
+                        this.state = 'reaching';
+                        this.timer = 0;
+                    }
+                } else if (this.state === 'reaching') {
+                    const dx = this.targetGear.x - this.originX;
+                    const dy = this.targetGear.y - this.originY;
+                    const targetAngle = Math.atan2(dy, dx);
+                    this.angle = lerp(this.angle, targetAngle, 0.1);
+                    
+                    if (Math.abs(this.angle - targetAngle) < 0.05) {
+                        this.state = 'fixing';
+                        this.timer = 0;
+                    }
+                } else if (this.state === 'fixing') {
+                    if (this.timer > 60) {
+                        // Fix gear
+                        this.targetGear.isLoose = false;
+                        this.targetGear.vx = 0;
+                        this.targetGear.vy = 0;
+                        this.state = 'retracting';
+                        this.timer = 0;
+                    }
+                } else if (this.state === 'retracting') {
+                    this.angle = lerp(this.angle, -Math.PI/4, 0.05);
+                    if (this.angle > -Math.PI/4 - 0.1) {
+                        this.state = 'waiting';
+                        this.timer = 0;
+                    }
+                }
+            }
+
+            draw() {
+                ctx.save();
+                ctx.translate(this.originX, this.originY);
+                ctx.rotate(this.angle);
+                
+                // Base
+                ctx.fillStyle = PALETTE.iron[1];
+                ctx.fillRect(-20, -20, 40, 40);
+                
+                // Arm
+                ctx.strokeStyle = PALETTE.iron[2];
+                ctx.lineWidth = 15;
+                ctx.beginPath();
+                ctx.moveTo(0, 0);
+                ctx.lineTo(this.length, 0);
+                ctx.stroke();
+                
+                // Claw
+                ctx.fillStyle = PALETTE.iron[0];
+                ctx.fillRect(this.length - 10, -15, 20, 30);
+                
+                ctx.restore();
+            }
+        }
+
+        // --- Main Logic ---
+        let gears = [];
+        let chains = [];
+        let bird;
+        let repairArm;
+        let looseEventTimer = 0;
+
+        function initMachine() {
+            gears = [];
+            chains = [];
+            
+            // Main drive train
+            const cx = width / 2;
+            const cy = height / 2;
+
+            // Big gear
+            gears.push(new Gear(cx, cy, 24, 80, globalSpeed));
+            
+            // Meshed gears
+            const g0 = gears[0];
+            
+            // Top Right
+            const r1 = 40;
+            const t1 = 12;
+            const angle1 = -Math.PI/4;
+            const dist1 = (g0.radius + r1) * 0.9; // slight overlap for visual mesh
+            gears.push(new Gear(cx + Math.cos(angle1)*dist1, cy + Math.sin(angle1)*dist1, t1, r1, -globalSpeed * (g0.teeth/t1)));
+
+            // Bottom Left
+            const r2 = 60;
+            const t2 = 18;
+            const angle2 = Math.PI/4;
+            const dist2 = (g0.radius + r2) * 0.9;
+            gears.push(new Gear(cx + Math.cos(angle2)*dist2, cy + Math.sin(angle2)*dist2, t2, r2, -globalSpeed * (g0.teeth/t2)));
+
+            // Sprockets for chain
+            const s1 = new Sprocket(cx - 150, cy - 100, 30);
+            const s2 = new Sprocket(cx - 250, cy + 50, 30);
+            gears.push(s1, s2); // Add to gears array for updates but treat specially
+            chains.push(new Chain(s1, s2));
+
+            // Piston
+            // Handled in draw loop directly attached to a gear
+            
+            // Automaton
+            bird = new Automaton(cx + 100, cy - 150);
+
+            // Repair Arm (Bottom Right)
+            repairArm = new RepairArm(width - 100, height - 100, gears[1]); // Target the small gear
+        }
+
+        function triggerLooseEvent() {
+            if (!repairArm.targetGear.isLoose) {
+                const g = repairArm.targetGear;
+                g.isLoose = true;
+                g.vx = randomRange(-2, 2);
+                g.vy = randomRange(-5, -2);
+            }
+        }
+
+        function drawBackground() {
+            // Vignette
+            const grad = ctx.createRadialGradient(width/2, height/2, height/3, width/2, height/2, height);
+            grad.addColorStop(0, '#2a2520');
+            grad.addColorStop(1, '#0a0805');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, width, height);
+            
+            // Grid lines (blueprint style)
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.03)';
+            ctx.lineWidth = 1;
+            for(let i=0; i<width; i+=50) {
+                ctx.beginPath(); ctx.moveTo(i,0); ctx.lineTo(i,height); ctx.stroke();
+            }
+            for(let i=0; i<height; i+=50) {
+                ctx.beginPath(); ctx.moveTo(0,i); ctx.lineTo(width,i); ctx.stroke();
+            }
+        }
+
+        function animate() {
+            ctx.clearRect(0, 0, width, height);
+            drawBackground();
+
+            time += 0.01;
+
+            // Update and Draw Gears
+            gears.forEach(g => {
+                if (g instanceof Sprocket) {
+                    g.update(globalSpeed);
+                } else {
+                    g.update();
+                }
+                g.draw();
+            });
+
+            // Draw Chains
+            chains.forEach(c => {
+                c.update();
+                c.draw();
+            });
+
+            // Draw Piston (attached to big gear visually)
+            // Simulate piston motion based on big gear rotation
+            const pistonX = width/2 + 150;
+            const pistonY = height/2;
+            const stroke = 40;
+            const pistonOffset = Math.sin(time * 2) * stroke;
+            
+            ctx.save();
+            ctx.translate(pistonX, pistonY);
+            ctx.fillStyle = PALETTE.iron[1];
+            ctx.fillRect(-10, -10, 20, 20); // Base
+            ctx.fillStyle = PALETTE.iron[3];
+            ctx.fillRect(-5, 10, 10, 60 + pistonOffset); // Rod
+            ctx.fillStyle = PALETTE.iron[0];
+            ctx.fillRect(-15, 70 + pistonOffset, 30, 15); // Head
+            ctx.restore();
+
+            // Automaton
+            bird.update();
+            bird.draw();
+
+            // Repair Arm
+            repairArm.update();
+            repairArm.draw();
+
+            // Loose Gear Logic
+            looseEventTimer++;
+            if (looseEventTimer > 600 && !repairArm.targetGear.isLoose) { // Every ~10 seconds
+                triggerLooseEvent();
+                looseEventTimer = 0;
+            }
+
+            requestAnimationFrame(animate);
+        }
+
+        resize();
+        animate();
+
+    </script>
+</body>
+</html>

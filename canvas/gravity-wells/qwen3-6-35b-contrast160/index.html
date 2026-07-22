@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width=device-width, initial-scale=1.0">
+    <title>Gravity Painting</title>
+    <style>
+        body, html, body {
+            margin: 0;
+            padding: 0;
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+            background-color: #000;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="c"></canvas>
+    <script>
+        const canvas = document.getElementById('c');
+        const ctx = canvas.getContext('2d');
+        
+        let width, height;
+        let particles = [];
+        let wells = [];
+        const MAX_PARTICLES = 3000;
+        const SPAWN_RATE = 5;
+        const WELL_COUNT = 4;
+        const WELL_MASS = 8000;
+        const DRAG = 0.998;
+        const FADE_SPEED = 0.03;
+
+        // HSLA color generator
+        let hueOffset = 0;
+        function getColor() {
+            hueOffset = (hueOffset + 0.05) % 360;
+            return `hsla(${hueOffset}, 100%, 60%, 1)`;
+        }
+
+        // Resize handling
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // Gravity Well Class
+        class Well {
+            constructor(x, y) {
+                this.x = x || Math.random() * width;
+                this.y = y || Math.random() * height;
+                this.vx = (Math.random() - 0.5) * 0.5;
+                this.vy = (Math.random() - 0.5) * 0.5;
+                this.mass = WELL_MASS;
+                this.radius = 20;
+            }
+
+            update() {
+                // Wander
+                this.vx += (Math.random() - 0.5) * 0.05;
+                this.vy += (Math.random() - 0.5) * 0.05;
+                
+                // Dampen velocity to keep it wandering slowly
+                this.vx *= 0.99;
+                this.vy *= 0.99;
+
+                this.x += this.vx;
+                this.y += this.vy;
+
+                // Bounce off walls
+                if (this.x < 0 || this.x > width) this.vx *= -1;
+                if (this.y < 0 || this.y > height) this.vy *= -1;
+                
+                // Keep in bounds
+                this.x = Math.max(0, Math.min(width, this.x));
+                this.y = Math.max(0, Math.min(height, this.y));
+            }
+
+            draw() {
+                // Visualize wells (optional, very subtle)
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+                ctx.stroke();
+            }
+        }
+
+        // Particle Class
+        class Particle {
+            constructor() {
+                this.reset();
+            }
+
+            reset() {
+                // Spawn from edges
+                const edge = Math.floor(Math.random() * 4);
+                if (edge === 0) { this.x = Math.random() * width; this.y = 0; }
+                else if (edge === 1) { this.x = width; this.y = Math.random() * height; }
+                else if (edge === 2) { this.x = Math.random() * width; this.y = height; }
+                else { this.x = 0; this.y = Math.random() * height; }
+
+                // Initial velocity towards center-ish
+                this.vx = (Math.random() - 0.5) * 2;
+                this.vy = (Math.random() - 0.5) * 2;
+                
+                this.life = 1.0;
+                this.decay = 0.001 + Math.random() * 0.002;
+                this.color = getColor();
+                this.size = 1 + Math.random() * 1.5;
+            }
+
+            update() {
+                // Apply gravity from wells
+                for (let w of wells) {
+                    const dx = w.x - this.x;
+                    const dy = w.y - this.y;
+                    const distSq = dx * dx + dy * dy;
+                    const dist = Math.sqrt(distSq);
+                    
+                    if (dist > 10) { // Avoid singularity
+                        const force = (w.mass * 0.05) / distSq;
+                        this.vx += (dx / dist) * force;
+                        this.vy += (dy / dist) * force;
+                    }
+                }
+
+                this.vx *= DRAG;
+                this.vy *= DRAG;
+
+                this.x += this.vx;
+                this.y += this.vy;
+
+                this.life -= this.decay;
+
+                // Remove if off screen or old
+                if (this.x < -50 || this.x > width + 50 || 
+                    this.y < -50 || this.y > height + 50 || 
+                    this.life <= 0) {
+                    this.reset();
+                }
+            }
+
+            draw() {
+                ctx.fillStyle = this.color;
+                ctx.globalAlpha = this.life;
+                ctx.fillRect(this.x, this.y, this.size, this.size);
+                ctx.globalAlpha = 1.0;
+            }
+        }
+
+        // Well Logic: Merge or Split
+        function handleWellInteractions() {
+            if (wells.length < 2) return;
+
+            for (let i = 0; i < wells.length; i++) {
+                for (let j = i + 1; j < wells.length; j++) {
+                    const w1 = wells[i];
+                    const w2 = wells[j];
+                    const dx = w1.x - w2.x;
+                    const dy = w1.y - w2.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+
+                    if (dist < 40) {
+                        // Merge: Keep one, delete the other
+                        // Move w1 to midpoint
+                        w1.x = (w1.x + w2.x) / 2;
+                        w1.y = (w1.y + w2.y) / 2;
+                        w1.mass += w2.mass; // Gain mass
+                        wells.splice(j, 1);
+                        // Add new well elsewhere to maintain count
+                        if (wells.length < WELL_COUNT) {
+                            wells.push(new Well(Math.random() * width, Math.random() * height));
+                        }
+                        return; // Break loop to avoid index issues
+                    }
+                }
+            }
+        }
+
+        // Init
+        for (let i = 0; i < WELL_COUNT; i++) {
+            wells.push(new Well());
+        }
+        for (let i = 0; i < MAX_PARTICLES; i++) {
+            particles.push(new Particle());
+        }
+
+        // Animation Loop
+        function animate() {
+            // Fade effect
+            ctx.fillStyle = `rgba(0, 0, 0, ${FADE_SPEED})`;
+            ctx.fillRect(0, 0, width, height);
+
+            // Composite operation for glowing trails
+            ctx.globalCompositeOperation = 'lighter';
+
+            // Update and Draw Wells
+            wells.forEach(w => {
+                w.update();
+                w.draw();
+            });
+
+            // Particle Physics and Draw
+            particles.forEach(p => {
+                p.update();
+                p.draw();
+            });
+
+            // Handle well logic occasionally
+            if (Math.random() < 0.01) {
+                handleWellInteractions();
+            }
+
+            // Reset composite operation for fade rect
+            ctx.globalCompositeOperation = 'source-over';
+
+            requestAnimationFrame(animate);
+        }
+
+        animate();
+    </script>
+</body>
+</html>

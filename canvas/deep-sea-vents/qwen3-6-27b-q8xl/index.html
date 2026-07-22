@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deep Sea Vents</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #000510; /* Deep ocean black-blue */
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+
+    let width, height;
+
+    // Resize handling
+    function resize() {
+        width = canvas.width = window.innerWidth;
+        height = canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // Utility
+    const rand = (min, max) => Math.random() * (max - min) + min;
+    const dist = (x1, y1, x2, y2) => Math.hypot(x2 - x1, y2 - y1);
+
+    // --- Classes ---
+
+    class Particle {
+        constructor(x, y, type) {
+            this.x = x;
+            this.y = y;
+            this.type = type; // 'smoke', 'snow'
+            this.life = 1.0;
+            
+            if (type === 'smoke') {
+                this.vx = rand(-0.5, 0.5);
+                this.vy = rand(-2, -4);
+                this.size = rand(2, 6);
+                this.decay = rand(0.002, 0.005);
+                this.color = `rgba(100, 100, 100,`;
+            } else if (type === 'snow') {
+                this.vx = rand(-0.2, 0.2);
+                this.vy = rand(0.1, 0.5);
+                this.size = rand(0.5, 2);
+                this.decay = 0.001; // Very slow decay, recycled
+                this.color = `rgba(200, 220, 255,`;
+            }
+        }
+
+        update() {
+            this.x += this.vx;
+            this.y += this.vy;
+            this.life -= this.decay;
+
+            if (this.type === 'smoke') {
+                this.size += 0.1; // Smoke expands
+            } else {
+                // Ocean current drift for snow
+                this.x += Math.sin(Date.now() * 0.001 + this.y * 0.01) * 0.2;
+            }
+        }
+
+        draw(ctx, lightIntensity) {
+            if (this.life <= 0) return;
+            
+            let alpha = this.life;
+            let colorBase = this.type === 'smoke' ? [100, 100, 100] : [200, 220, 255];
+            
+            // Lighting effect: particles get brighter near light
+            if (lightIntensity > 0) {
+                alpha = Math.min(1, alpha * (1 + lightIntensity * 2));
+                colorBase[0] += lightIntensity * 100;
+                colorBase[1] += lightIntensity * 100;
+                colorBase[2] += lightIntensity * 100;
+            }
+
+            ctx.fillStyle = `rgba(${colorBase[0]}, ${colorBase[1]}, ${colorBase[2]}, ${alpha})`;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    class SmokeVent {
+        constructor(x, y) {
+            this.x = x;
+            this.y = y;
+            this.height = rand(100, 200);
+            this.width = rand(40, 80);
+            this.color = '#1a1a1a';
+        }
+
+        draw(ctx) {
+            ctx.fillStyle = this.color;
+            ctx.beginPath();
+            ctx.moveTo(this.x - this.width/2, height);
+            ctx.lineTo(this.x - this.width/4, this.y);
+            ctx.lineTo(this.x + this.width/4, this.y);
+            ctx.lineTo(this.x + this.width/2, height);
+            ctx.fill();
+            
+            // Chimney rim
+            ctx.fillStyle = '#000';
+            ctx.beginPath();
+            ctx.ellipse(this.x, this.y, this.width/4, 10, 0, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    class TubeWorm {
+        constructor(x, y) {
+            this.x = x;
+            this.y = y;
+            this.height = rand(30, 60);
+            this.angle = 0;
+            this.speed = rand(0.02, 0.05);
+            this.phase = rand(0, Math.PI * 2);
+        }
+
+        draw(ctx, lightIntensity) {
+            this.angle = Math.sin(Date.now() * 0.002 + this.phase) * 0.2;
+            
+            ctx.save();
+            ctx.translate(this.x, this.y);
+            ctx.rotate(this.angle);
+
+            // Tube
+            ctx.fillStyle = '#333';
+            ctx.fillRect(-3, -this.height, 6, this.height);
+
+            // Plume (Red/Pink) - Revealed by light
+            let r = 200;
+            let g = 20 + lightIntensity * 100;
+            let b = 20 + lightIntensity * 50;
+            
+            ctx.fillStyle = `rgb(${r},${g},${b})`;
+            ctx.beginPath();
+            // Feathered top
+            for(let i=0; i<5; i++) {
+                ctx.lineTo(-5 + Math.random()*10, -this.height - rand(5, 15));
+            }
+            ctx.lineTo(0, -this.height - 10);
+            ctx.fill();
+
+            ctx.restore();
+        }
+    }
+
+    class Shrimp {
+        constructor(x, y) {
+            this.x = x;
+            this.y = y;
+            this.targetX = x;
+            this.targetY = y;
+            this.speed = rand(0.5, 1.5);
+            this.size = rand(3, 6);
+            this.color = `rgba(255, 200, 200, 0.8)`;
+            this.changeDirTimer = 0;
+        }
+
+        update() {
+            this.changeDirTimer--;
+            if (this.changeDirTimer <= 0) {
+                // Pick new spot near vent walls
+                this.targetX = this.x + rand(-50, 50);
+                this.targetY = this.y + rand(-50, 50);
+                this.changeDirTimer = rand(50, 150);
+            }
+
+            let dx = this.targetX - this.x;
+            let dy = this.targetY - this.y;
+            let d = Math.hypot(dx, dy);
+            
+            if (d > 1) {
+                this.x += (dx / d) * this.speed;
+                this.y += (dy / d) * this.speed;
+            }
+        }
+
+        draw(ctx, lightIntensity) {
+            ctx.fillStyle = this.color;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    class Siphonophore {
+        constructor() {
+            this.x = -100;
+            this.y = rand(height * 0.2, height * 0.6);
+            this.vx = rand(0.5, 1.5);
+            this.segments = [];
+            this.segCount = 15;
+            this.segLen = 10;
+            
+            for(let i=0; i<this.segCount; i++) {
+                this.segments.push({x: 0, y: 0});
+            }
+        }
+
+        update() {
+            this.x += this.vx;
+            if (this.x > width + 200) {
+                this.x = -200;
+                this.y = rand(height * 0.2, height * 0.6);
+            }
+
+            // Head
+            this.segments[0].x = this.x;
+            this.segments[0].y = this.y + Math.sin(Date.now() * 0.002) * 20;
+
+            // Body physics (simple follow)
+            for(let i=1; i<this.segCount; i++) {
+                let prev = this.segments[i-1];
+                let curr = this.segments[i];
+                
+                let dx = curr.x - prev.x;
+                let dy = curr.y - prev.y;
+                let d = Math.hypot(dx, dy);
+                
+                if (d > this.segLen) {
+                    let angle = Math.atan2(dy, dx);
+                    curr.x = prev.x + Math.cos(angle) * this.segLen;
+                    curr.y = prev.y + Math.sin(angle) * this.segLen;
+                }
+                
+                // Gentle sine wave drift for body parts
+                curr.y += Math.sin(Date.now() * 0.003 + i * 0.5) * 0.5;
+            }
+        }
+
+        draw(ctx, lightIntensity) {
+            ctx.save();
+            // Bioluminescence
+            let glow = 0.3 + lightIntensity * 0.7;
+            
+            for(let i=0; i<this.segCount; i++) {
+                let s = this.segments[i];
+                let alpha = (1 - i/this.segCount) * glow;
+                
+                ctx.fillStyle = `rgba(0, 255, 255, ${alpha})`;
+                ctx.beginPath();
+                ctx.arc(s.x, s.y, 3, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Connecting strand
+                if (i < this.segCount - 1) {
+                    ctx.strokeStyle = `rgba(0, 255, 255, ${alpha * 0.5})`;
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.moveTo(s.x, s.y);
+                    ctx.lineTo(this.segments[i+1].x, this.segments[i+1].y);
+                    ctx.stroke();
+                }
+            }
+            ctx.restore();
+        }
+    }
+
+    class ROV {
+        constructor() {
+            this.x = width / 2;
+            this.y = height / 2;
+            this.vx = 1.5;
+            this.vy = 0.5;
+            this.width = 60;
+            this.height = 40;
+            this.lightRadius = 250;
+            this.lightAngle = Math.PI / 3; // 60 degrees spread
+        }
+
+        update() {
+            // Simple patrol
+            this.x += this.vx;
+            this.y += this.vy + Math.sin(Date.now() * 0.001) * 0.5;
+
+            if (this.x > width - 100) this.vx = -1.5;
+            if (this.x < 100) this.vx = 1.5;
+            
+            if (this.y > height * 0.8) this.vy = -0.5;
+            if (this.y < height * 0.2) this.vy = 0.5;
+        }
+
+        draw(ctx) {
+            ctx.save();
+            ctx.translate(this.x, this.y);
+            // Face direction of travel
+            if (this.vx < 0) ctx.scale(-1, 1);
+
+            // Body
+            ctx.fillStyle = '#554400'; // Yellow rust
+            ctx.fillRect(-30, -20, 60, 40);
+            
+            // Frame
+            ctx.strokeStyle = '#222';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(-35, -25, 70, 50);
+
+            // Camera/Light housing
+            ctx.fillStyle = '#333';
+            ctx.fillRect(20, -10, 10, 20);
+
+            ctx.restore();
+
+            // Draw Lights (Lighting Logic)
+            // We use a radial gradient to simulate the cone of light
+            // The gradient is centered on the light source, pointing in direction
+            
+            let angle = this.vx > 0 ? 0 : Math.PI;
+            let lightX = this.x + (this.vx > 0 ? 35 : -35);
+            let lightY = this.y;
+
+            // Create a gradient that simulates a cone
+            // Note: Radial gradients are circles/ellipses, so we approximate the cone
+            // by creating a gradient that fades out quickly to the sides (handled by context clipping usually, 
+            // but here we just use a soft radial glow that gets masked by darkness later).
+            
+            // Actually, simpler approach for "Darkness":
+            // 1. Draw scene normally.
+            // 2. Draw "Darkness" layer over everything with 'destination-out' or 'multiply'.
+            // 3. Cut holes in darkness for lights.
+            
+            // Let's store the light position for the post-processing step
+            this.lights = [
+                { x: lightX, y: lightY - 10, radius: this.lightRadius },
+                { x: lightX, y: lightY + 10, radius: this.lightRadius }
+            ];
+        }
+    }
+
+    // --- Initialization ---
+
+    const vents = [];
+    const worms = [];
+    const shrimps = [];
+    const particles = [];
+    const siphonophore = new Siphonophore();
+    const rov = new ROV();
+
+    // Setup Scene
+    for (let i = 0; i < 3; i++) {
+        let v = new SmokeVent(rand(100, width - 100), height - rand(50, 150));
+        vents.push(v);
+        
+        // Add worms around vents
+        for(let j=0; j<10; j++) {
+            worms.push(new TubeWorm(v.x + rand(-100, 100), height - rand(10, 50)));
+        }
+        
+        // Add shrimp
+        for(let j=0; j<15; j++) {
+            shrimps.push(new Shrimp(v.x + rand(-80, 80), v.y + rand(20, 100)));
+        }
+    }
+
+    // --- Main Loop ---
+
+    function animate() {
+        // 1. Clear Screen
+        ctx.fillStyle = '#000510';
+        ctx.fillRect(0, 0, width, height);
+
+        // 2. Update & Draw Background Elements (Vents, Worms)
+        vents.forEach(v => v.draw(ctx));
+        worms.forEach(w => w.draw(ctx, 0)); // No light yet
+
+        // 3. Update & Draw Particles (Smoke/Snow)
+        // Generate Smoke
+        vents.forEach(v => {
+            if (Math.random() < 0.3) {
+                particles.push(new Particle(v.x + rand(-10, 10), v.y, 'smoke'));
+            }
+        });
+        // Generate Snow
+        if (Math.random() < 0.1) {
+            particles.push(new Particle(rand(0, width), -10, 'snow'));
+        }
+
+        // Update Particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+            let p = particles[i];
+            p.update();
+            if (p.life <= 0 || p.y > height) {
+                particles.splice(i, 1);
+            }
+        }
+
+        // 4. Draw Creatures (Shrimp, Siphonophore)
+        shrimps.forEach(s => {
+            s.update();
+            s.draw(ctx, 0);
+        });
+        
+        siphonophore.update();
+        siphonophore.draw(ctx, 0);
+
+        // 5. Draw ROV
+        rov.update();
+        rov.draw(ctx);
+
+        // 6. LIGHTING PASS (The "Darkness" Layer)
+        // We draw a giant black rectangle over everything
+        // Then we use 'destination-out' to "erase" the blackness where the lights are.
+        // This reveals the colorful scene underneath.
+        
+        ctx.save();
+        // The darkness color. Not pure black, but deep blue-black.
+        ctx.fillStyle = 'rgba(0, 5, 15, 0.92)'; 
+        ctx.fillRect(0, 0, width, height);
+
+        // Cut holes for lights
+        ctx.globalCompositeOperation = 'destination-out';
+        
+        rov.lights.forEach(light => {
+            let grad = ctx.createRadialGradient(light.x, light.y, 10, light.x, light.y, light.radius);
+            grad.addColorStop(0, 'rgba(0,0,0,1)'); // Fully transparent (erased)
+            grad.addColorStop(0.2, 'rgba(0,0,0,0.8)');
+            grad.addColorStop(1, 'rgba(0,0,0,0)'); // Fully opaque (darkness remains)
+            
+            ctx.fillStyle = grad;
+            
+            // To make a cone shape, we can't just use a circle.
+            // We draw a large circle, but the darkness layer logic works best if we 
+            // assume the darkness is the default state.
+            // The gradient above creates a soft edge.
+            
+            ctx.beginPath();
+            ctx.arc(light.x, light.y, light.radius, 0, Math.PI * 2);
+            ctx.fill();
+        });
+
+        // Also cut a small hole for the Siphonophore's bioluminescence
+        // We need to know where it is.
+        ctx.beginPath();
+        let s = siphonophore.segments[0]; // Head
+        let grad = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, 100);
+        grad.addColorStop(0, 'rgba(0,0,0,0.5)');
+        grad.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = grad;
+        ctx.arc(s.x, s.y, 100, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
+
+        // 7. Draw Particles AGAIN (Top layer)
+        // We need to draw smoke/snow again because the darkness layer covered them.
+        // But we want them to be affected by light.
+        // Since we can't easily calculate light intensity per pixel in JS 2D canvas without shaders,
+        // we approximate. We draw them with a slight glow.
+        
+        // Actually, the smoke is dark, so it shows up against the deep blue.
+        // The snow is white, so it shows up.
+        // To make it look like they are illuminated, we just draw them normally.
+        // The darkness layer (rgba 0,5,15) acts as a filter.
+        
+        ctx.globalCompositeOperation = 'source-over';
+        
+        particles.forEach(p => {
+            // Simple heuristic: if close to ROV lights, draw brighter
+            let d = dist(p.x, p.y, rov.x, rov.y);
+            let intensity = Math.max(0, 1 - d / 300);
+            p.draw(ctx, intensity);
+        });
+
+        requestAnimationFrame(animate);
+    }
+
+    animate();
+
+</script>
+</body>
+</html>

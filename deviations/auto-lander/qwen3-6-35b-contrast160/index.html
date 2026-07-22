@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Lunar Lander</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;overflow:hidden;font-family:'Courier New',monospace}
+canvas{display:block}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const C=document.getElementById('c');
+const X=C.getContext('2d');
+let W,H;
+function resize(){W=C.width=innerWidth;H=C.height=innerHeight}
+resize();addEventListener('resize',resize);
+
+// --- Constants ---
+const GRAVITY=120;
+const THRUST_POWER=280;
+const LIFT_POWER=350;
+const THRUST_BURN=18;
+const LIFT_BURN=22;
+const LANDING_SPEED=45;
+const LANDING_ANGLE=0.15;
+const HORIZON_Y_RATIO=0.45;
+const PAD_WIDTH=160;
+const PAD_HEIGHT=4;
+const TERRAIN_SEGMENTS=200;
+const CYCLE_DURATION=38;
+const LIFT_DURATION=10;
+const LANDING_DURATION=12;
+const LANDING_START=4;
+const LANDING_END=16;
+const LIFT_START=26;
+const LIFT_END=36;
+const THRUST_TOLERANCE=0.08;
+const MIN_FUEL=5;
+
+// --- State ---
+let state='DESCEND';
+let lander={x:0,y:0,vx:0,vy:0,angle:0,angVel:0};
+let fuel=100;
+let cycleTime=0;
+let terrainPoints=[];
+let pads=[];
+let particles=[];
+let stars=[];
+let landingPadIndex=-1;
+let landedFrame=0;
+let landed=false;
+let hardLanding=false;
+let hardLandingTimer=0;
+let dustParticles=[];
+let shakeAmount=0;
+let cycleCount=0;
+let landingMessage='';
+let landingMessageTimer=0;
+let lastLandingSuccess=false;
+
+// --- Stars ---
+function initStars(){
+    stars=[];
+    for(let i=0;i<300;i++){
+        stars.push({
+            x:Math.random()*W,
+            y:Math.random()*H*HORIZON_Y_RATIO*1.2,
+            size:Math.random()*2+0.5,
+            brightness:Math.random()*0.5+0.5,
+            twinkleSpeed:Math.random()*3+1
+        });
+    }
+}
+
+// --- Terrain Generation ---
+function generateTerrain(){
+    terrainPoints=[];
+    pads=[];
+    
+    const segments=TERRAIN_SEGMENTS;
+    const segWidth=W/segments;
+    
+    // Generate base terrain with noise
+    const heights=[];
+    let y=H*HORIZON_Y_RATIO;
+    let slope=0;
+    
+    for(let i=0;i<=segments;i++){
+        slope+=(Math.random()-0.5)*0.8;
+        slope*=0.95;
+        slope=Math.max(-2,Math.min(2,slope));
+        y+=slope;
+        y=Math.max(H*0.2,Math.min(H*0.85,y));
+        heights.push(y);
+    }
+    
+    // Smooth
+    const smoothed=[];
+    for(let i=0;i<=segments;i++){
+        let sum=0,count=0;
+        for(let j=Math.max(0,i-3);j<=Math.min(segments,i+3);j++){
+            sum+=heights[j];
+            count++;
+        }
+        smoothed.push(sum/count);
+    }
+    
+    for(let i=0;i<=segments;i++){
+        terrainPoints.push({x:i*segWidth,y:smoothed[i]});
+    }
+    
+    // Create landing pad
+    const padSegment=Math.floor(segments*(0.3+Math.random()*0.4));
+    const padX=terrainPoints[padSegment].x;
+    const padY=terrainPoints[padSegment].y;
+    
+    pads.push({
+        x:padX-PAD_WIDTH/2,
+        y:padY,
+        width:PAD_WIDTH,
+        height:PAD_HEIGHT,
+        index:padSegment
+    });
+    
+    // Place lander above pad
+    lander.x=padX;
+    lander.y=padY-250-Math.random()*150;
+    lander.vx=0;
+    lander.vy=0;
+    lander.angle=0;
+    lander.angVel=0;
+    
+    landingPadIndex=0;
+    landed=false;
+    hardLanding=false;
+    hardLandingTimer=0;
+    shakeAmount=0;
+}
+
+// --- Particles ---
+function addParticle(x,y,vx,vy,life,size,color,alpha){
+    particles.push({x,y,vx,vy,life,maxLife:life,size,color,alpha});
+}
+
+function addDustParticle(x,y,vx,vy,life,size){
+    dustParticles.push({x,y,vx,vy,life,maxLife:life,size,gravity:GRAVITY*0.3});
+}
+
+function updateParticles(dt){
+    for(let i=particles.length-1;i>=0;i--){
+        const p=particles[i];
+        p.x+=p.vx*dt;
+        p.y+=p.vy*dt;
+        p.life-=dt;
+        if(p.life<=0)particles.splice(i,1);
+    }
+    for(let i=dustParticles.length-1;i>=0;i--){
+        const p=dustParticles[i];
+        p.vy+=p.gravity*dt;
+        p.x+=p.vx*dt;
+        p.y+=p.vy*dt;
+        p.life-=dt;
+        if(p.life<=0)dustParticles.splice(i,1);
+    }
+}
+
+// --- Physics ---
+function getTerrainAt(x){
+    for(let i=0;i<terrainPoints.length-1;i++){
+        if(x>=terrainPoints[i].x&&x<terrainPoints[i+1].x){
+            const t=(x-terrainPoints[i].x)/(terrainPoints[i+1].x-terrainPoints[i].x);
+            return terrainPoints[i].y+t*(terrainPoints[i+1].y-terrainPoints[i].y);
+        }
+    }
+    return H*HORIZON_Y_RATIO;
+}
+
+function isOnPad(x){
+    for(let p of pads){
+        if(x>=p.x&&x<=p.x+p.width){
+            return p;
+        }
+    }
+    return null;
+}
+
+function updatePhysics(dt){
+    const now=cycleTime;
+    
+    if(state==='DESCEND'){
+        // Gravity
+        lander.vy+=GRAVITY*dt;
+        
+        // Thrust toward pad
+        const pad=pads[landingPadIndex];
+        const targetX=pad.x+pad.width/2;
+        const targetY=pad.y;
+        
+        const dx=targetX-lander.x;
+        const dy=targetY-lander.y;
+        const dist=Math.sqrt(dx*dx+dy*dy);
+        
+        if(dist>0){
+            const nx=dx/dist;
+            const ny=dy/dist;
+            
+            // Calculate required thrust to slow down
+            const currentSpeed=Math.sqrt(lander.vx*lander.vx+lander.vy*lander.vy);
+            const approachAngle=Math.atan2(dy,dx);
+            
+            // Ideal thrust direction: toward landing pad
+            const idealAngle=approachAngle;
+            
+            // Proportional thrust based on distance and speed
+            const speedFactor=Math.min(1,currentSpeed/LANDING_SPEED);
+            const distFactor=Math.min(1,dist/300);
+            
+            let thrustAmount=speedFactor*distFactor*0.8+0.1;
+            
+            // Occasional misjudgment
+            if(Math.random()<0.003){
+                thrustAmount=0.1+Math.random()*0.3;
+            }
+            
+            thrustAmount=Math.max(0,Math.min(1,thrustAmount));
+            
+            // Apply thrust
+            lander.vx+=nx*THRUST_POWER*thrustAmount*dt;
+            lander.vy+=ny*THRUST_POWER*thrustAmount*dt-GRAVITY*dt;
+            
+            // Consume fuel
+            fuel-=THRUST_BURN*thrustAmount*dt;
+            fuel=Math.max(0,fuel);
+            
+            // Generate thruster particles
+            if(thrustAmount>0.1){
+                const baseAngle=idealAngle+Math.PI;
+                const spread=0.4;
+                const numParticles=Math.floor(thrustAmount*3)+1;
+                for(let i=0;i<numParticles;i++){
+                    const angle=baseAngle+(Math.random()-0.5)*spread;
+                    const speed=100+Math.random()*150*thrustAmount;
+                    const px=lander.x+Math.cos(angle)*10;
+                    const py=lander.y+Math.sin(angle)*10;
+                    addParticle(px,py,
+                        Math.cos(angle)*speed,
+                        Math.sin(angle)*speed,
+                        0.3+Math.random()*0.3,
+                        2+Math.random()*4,
+                        `hsl(${Math.random()*30+10},100%,${50+Math.random()*40}%)`,
+                        0.8+Math.random()*0.2
+                    );
+                }
+            }
+            
+            // Slight angle correction
+            const currentAngle=Math.atan2(lander.vx,-lander.vy);
+            lander.angle+=(idealAngle-lander.angle)*0.05;
+        }
+        
+        // Check landing
+        if(lander.y>=targetY-2){
+            const speed=Math.sqrt(lander.vx*lander.vx+lander.vy*lander.vy);
+            const angle=Math.abs(lander.angle);
+            
+            if(speed<LANDING_SPEED&&angle<LANDING_ANGLE&&fuel>0){
+                // Successful landing
+                state='LANDED';
+                landedFrame=0;
+                landed=true;
+                lander.y=targetY-2;
+                lander.vx=0;
+                lander.vy=0;
+                lander.angle=0;
+                lander.angVel=0;
+                landingMessage='✓ SAFE TOUCHDOWN';
+                landingMessageTimer=3;
+                lastLandingSuccess=true;
+                
+                // Landing dust
+                for(let i=0;i<15;i++){
+                    addDustParticle(lander.x+(Math.random()-0.5)*40,targetY,
+                        (Math.random()-0.5)*50,
+                        -Math.random()*30-10,
+                        1+Math.random(),
+                        2+Math.random()*3
+                    );
+                }
+            } else {
+                // Hard landing
+                state='LANDED';
+                landedFrame=0;
+                landed=true;
+                hardLanding=true;
+                hardLandingTimer=3;
+                lander.y=targetY-2;
+                lander.vx=0;
+                lander.vy=0;
+                lander.angle=0;
+                lander.angVel=0;
+                shakeAmount=15;
+                landingMessage='✌ HARD IMPACT';
+                landingMessageTimer=3;
+                lastLandingSuccess=false;
+                
+                // Explosion of dust
+                for(let i=0;i<40;i++){
+                    const angle=Math.random()*Math.PI*2;
+                    const speed=50+Math.random()*150;
+                    addDustParticle(lander.x+(Math.random()-0.5)*20,targetY,
+                        Math.cos(angle)*speed,
+                        -Math.abs(Math.sin(angle)*speed)-20,
+                        1+Math.random()*2,
+                        3+Math.random()*5
+                    );
+                }
+            }
+        }
+        
+        // Fuel check
+        if(fuel<=0){
+            fuel=0;
+            state='LANDED';
+            landed=true;
+            hardLanding=true;
+            hardLandingTimer=3;
+            lander.y=getTerrainAt(lander.x)-2;
+            lander.vx=0;
+            lander.vy=0;
+            lander.angle=0;
+            lander.angVel=0;
+            shakeAmount=10;
+            landingMessage='FUEL DEPLETED';
+            landingMessageTimer=3;
+            lastLandingSuccess=false;
+            
+            for(let i=0;i<20;i++){
+                addDustParticle(lander.x+(Math.random()-0.5)*20,getTerrainAt(lander.x),
+                    (Math.random()-0.5)*40,
+                    -Math.random()*20-5,
+                    1+Math.random(),
+                    2+Math.random()*3
+                );
+            }
+        }
+        
+    } else if(state==='LANDED'){
+        landedFrame++;
+        
+        if(hardLanding){
+            hardLandingTimer-=dt;
+            if(hardLandingTimer<=0)hardLanding=false;
+        }
+        
+        // After pause, lift off
+        if(landedFrame>90){
+            state='LIFT';
+            landedFrame=0;
+        }
+    } else if(state==='LIFT'){
+        // Thrust upward
+        lander.vy-=LIFT_POWER*dt;
+        fuel-=LIFT_BURN*dt;
+        fuel=Math.max(0,fuel);
+        
+        // Generate lift particles
+        const numParticles=Math.floor(Math.random()*2)+1;
+        for(let i=0;i<numParticles;i++){
+            const angle=Math.PI/2+(Math.random()-0.5)*0.5;
+            const speed=80+Math.random()*100;
+            addParticle(lander.x+Math.cos(angle)*10,lander.y+Math.sin(angle)*10,
+                Math.cos(angle)*speed,
+                Math.sin(angle)*speed,
+                0.3+Math.random()*0.2,
+                2+Math.random()*3,
+                `hsl(${Math.random()*30+10},100%,${50+Math.random()*40}%)`,
+                0.8+Math.random()*0.2
+            );
+        }
+        
+        if(landedFrame>300){
+            // Generate new terrain and cycle
+            cycleTime=0;
+            cycleCount++;
+            generateTerrain();
+            fuel=Math.min(100,fuel+30);
+            state='DESCEND';
+        }
+    }
+}
+
+// --- Drawing ---
+function drawStars(time){
+    for(let s of stars){
+        const twinkle=Math.sin(time*s.twinkleSpeed)*0.3+0.7;
+        const alpha=s.brightness*twinkle;
+        X.fillStyle=`rgba(255,255,255,${alpha})`;
+        X.beginPath();
+        X.arc(s.x,s.y,s.size,0,Math.PI*2);
+        X.fill();
+    }
+}
+
+function drawTerrain(){
+    // Terrain fill
+    X.beginPath();
+    X.moveTo(0,H);
+    for(let p of terrainPoints){
+        X.lineTo(p.x,p.y);
+    }
+    X.lineTo(W,H);
+    X.closePath();
+    
+    // Gradient fill
+    const grad=X.createLinearGradient(0,H*0.3,0,H);
+    grad.addColorStop(0,'#3a3530');
+    grad.addColorStop(0.3,'#2a2520');
+    grad.addColorStop(1,'#1a1510');
+    X.fillStyle=grad;
+    X.fill();
+    
+    // Terrain outline
+    X.beginPath();
+    X.moveTo(terrainPoints[0].x,terrainPoints[0].y);
+    for(let i=1;i<terrainPoints.length;i++){
+        X.lineTo(terrainPoints[i].x,terrainPoints[i].y);
+    }
+    X.strokeStyle='#5a5540';
+    X.lineWidth=2;
+    X.stroke();
+    
+    // Draw pads
+    for(let p of pads){
+        // Pad glow
+        X.fillStyle='rgba(100,200,100,0.3)';
+        X.fillRect(p.x-5,p.y-p.height-5,p.width+10,p.height+10);
+        
+        // Pad surface
+        X.fillStyle='#4a8a4a';
+        X.fillRect(p.x,p.y-p.height,p.width,p.height);
+        
+        // Pad highlight
+        X.fillStyle='#6aaa6a';
+        X.fillRect(p.x,p.y-p.height,p.width,1);
+        
+        // Pad markers
+        X.strokeStyle='rgba(100,200,100,0.5)';
+        X.lineWidth=1;
+        X.setLineDash([5,5]);
+        X.beginPath();
+        X.moveTo(p.x+p.width/2,p.y-p.height-10);
+        X.lineTo(p.x+p.width/2,p.y-p.height);
+        X.stroke();
+        X.setLineDash([]);
+    }
+}
+
+function drawParticles(){
+    for(let p of particles){
+        const alpha=p.life/p.maxLife;
+        X.globalAlpha=alpha;
+        X.fillStyle=p.color;
+        X.beginPath();
+        X.arc(p.x,p.y,p.size*alpha,0,Math.PI*2);
+        X.fill();
+    }
+    X.globalAlpha=1;
+    
+    for(let p of dustParticles){
+        const alpha=p.life/p.maxLife;
+        X.fillStyle=`rgba(150,140,120,${alpha*0.6})`;
+        X.beginPath();
+        X.arc(p.x,p.y,p.size*(1-alpha*0.5),0,Math.PI*2);
+        X.fill();
+    }
+}
+
+function drawLander(time){
+    X.save();
+    X.translate(lander.x,lander.y);
+    X.rotate(lander.angle);
+    
+    // Landing gear
+    X.strokeStyle='#888';
+    X.lineWidth=2;
+    X.beginPath();
+    X.moveTo(-8,0);
+    X.lineTo(-12,8);
+    X.lineTo(-16,8);
+    X.moveTo(8,0);
+    X.lineTo(12,8);
+    X.lineTo(16,8);
+    X.stroke();
+    
+    // Footpads
+    X.fillStyle='#666';
+    X.fillRect(-18,7,6,2);
+    X.fillRect(12,7,6,2);
+    
+    // Body
+    X.fillStyle='#ddd';
+    X.beginPath();
+    X.moveTo(-6,-12);
+    X.lineTo(6,-12);
+    X.lineTo(8,0);
+    X.lineTo(-8,0);
+    X.closePath();
+    X.fill();
+    X.strokeStyle='#999';
+    X.lineWidth=1;
+    X.stroke();
+    
+    // Top
+    X.fillStyle='#bbb';
+    X.beginPath();
+    X.arc(0,-12,6,Math.PI,0);
+    X.fill();
+    
+    // Window
+    X.fillStyle='#4af';
+    X.beginPath();
+    X.arc(0,-10,3,0,Math.PI*2);
+    X.fill();
+    
+    // Antenna
+    X.strokeStyle='#aaa';
+    X.lineWidth=1;
+    X.beginPath();
+    X.moveTo(0,-18);
+    X.lineTo(0,-22);
+    X.stroke();
+    
+    // Blinking light
+    if(Math.sin(time*3)>0){
+        X.fillStyle='#f00';
+        X.beginPath();
+        X.arc(0,-22,1.5,0,Math.PI*2);
+        X.fill();
+    }
+    
+    X.restore();
+}
+
+function drawFuelGauge(){
+    const barX=W-80;
+    const barY=40;
+    const barW=20;
+    const barH=200;
+    
+    // Background
+    X.fillStyle='rgba(0,0,0,0.5)';
+    X.fillRect(barX-5,barY-5,barW+10,barH+10);
+    X.strokeStyle='#555';
+    X.lineWidth=1;
+    X.strokeRect(barX-5,barY-5,barW+10,barH+10);
+    
+    // Fuel level
+    const fuelH=(fuel/100)*barH;
+    const fuelY=barY+barH-fuelH;
+    
+    if(fuel>30){
+        X.fillStyle='#4a4';
+    } else if(fuel>15){
+        X.fillStyle='#aa4';
+    } else {
+        X.fillStyle='#a44';
+    }
+    X.fillRect(barX,fuelY,barW,fuelH);
+    
+    // Fuel segments
+    X.strokeStyle='rgba(0,0,0,0.3)';
+    for(let i=0;i<=10;i++){
+        const y=barY+i*(barH/10);
+        X.beginPath();
+        X.moveTo(barX,y);
+        X.lineTo(barX+barW,y);
+        X.stroke();
+    }
+    
+    // Label
+    X.fillStyle='#fff';
+    X.font='10px Courier New';
+    X.textAlign='center';
+    X.fillText('FUEL',barX+barW/2,barY-10);
+    X.fillText(Math.round(fuel)+'%',barX+barW/2,barY+barH+15);
+}
+
+function drawHUD(time){
+    // State indicator
+    X.fillStyle='#fff';
+    X.font='14px Courier New';
+    X.textAlign='left';
+    
+    let stateText='DESCENDING';
+    if(state==='LANDED'){
+        stateText=hardLanding?'HARD LANDED':'LANDED';
+    } else if(state==='LIFT'){
+        stateText='LIFTING';
+    }
+    X.fillText(stateText,20,30);
+    
+    // Velocity
+    const speed=Math.sqrt(lander.vx*lander.vx+lander.vy*lander.vy);
+    X.fillText(`SPD: ${speed.toFixed(0)} m/s`,20,50);
+    
+    const alt=getTerrainAt(lander.x)-lander.y;
+    X.fillText(`ALT: ${Math.max(0,alt).toFixed(0)} m`,20,70);
+    
+    // Landing message
+    if(landingMessageTimer>0){
+        const alpha=Math.min(1,landingMessageTimer);
+        X.globalAlpha=alpha;
+        X.fillStyle=lastLandingSuccess?'#4f4':'#f44';
+        X.font='bold 20px Courier New';
+        X.textAlign='center';
+        X.fillText(landingMessage,W/2,H/2-50);
+        X.globalAlpha=1;
+        landingMessageTimer-=1/60;
+    }
+    
+    // Cycle counter
+    X.fillStyle='#888';
+    X.font='12px Courier New';
+    X.textAlign='right';
+    X.fillText(`CYCLE: ${cycleCount+1}`,W-20,H-20);
+    
+    // Fuel gauge
+    drawFuelGauge();
+    
+    // Horizon line hint
+    X.strokeStyle='rgba(100,100,100,0.3)';
+    X.lineWidth=1;
+    X.setLineDash([5,10]);
+    X.beginPath();
+    X.moveTo(0,H*HORIZON_Y_RATIO);
+    X.lineTo(W,H*HORIZON_Y_RATIO);
+    X.stroke();
+    X.setLineDash([]);
+}
+
+function drawLightCasts(){
+    // Thruster light cast on terrain
+    for(let p of particles){
+        if(p.life/p.maxLife>0.5){
+            const terrainY=getTerrainAt(p.x);
+            if(p.y<terrainY){
+                const dist=Math.abs(terrainY-p.y);
+                const intensity=Math.max(0,1-dist/200);
+                if(intensity>0.1){
+                    X.fillStyle=`rgba(255,150,50,${intensity*0.1})`;
+                    X.beginPath();
+                    X.arc(p.x,terrainY,30*intensity,0,Math.PI*2);
+                    X.fill();
+                }
+            }
+        }
+    }
+}
+
+// --- Main Loop ---
+let lastTime=0;
+function update(time){
+    const dt=Math.min(1/30,(time-lastTime)/1000);
+    lastTime=time;
+    
+    const gameTime=time/1000;
+    
+    // Update shake
+    if(shakeAmount>0){
+        shakeAmount*=0.9;
+        if(shakeAmount<0.5)shakeAmount=0;
+    }
+    
+    cycleTime+=dt;
+    
+    updatePhysics(dt);
+    updateParticles(dt);
+    
+    // Draw
+    X.fillStyle='#0a0a0f';
+    X.fillRect(0,0,W,H);
+    
+    X.save();
+    if(shakeAmount>0){
+        X.translate(
+            (Math.random()-0.5)*shakeAmount,
+            (Math.random()-0.5)*shakeAmount
+        );
+    }
+    
+    drawStars(gameTime);
+    drawTerrain();
+    drawLightCasts();
+    drawParticles();
+    drawLander(gameTime);
+    drawHUD(gameTime);
+    
+    X.restore();
+    
+    requestAnimationFrame(update);
+}
+
+// --- Init ---
+initStars();
+generateTerrain();
+requestAnimationFrame(update);
+</script>
+</body>
+</html>

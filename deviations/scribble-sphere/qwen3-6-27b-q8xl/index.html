@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Scribble Ball</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #050505;
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        
+        // Configuration
+        const RADIUS = 200;
+        const LINE_LENGTH = 3000; // Number of segments in the scribble
+        const ROTATION_SPEED = 0.005;
+        const CYCLE_DURATION = 5000; // Frames for full unravelling and rebuilding cycle
+        
+        // State
+        let points = [];
+        let angleX = 0;
+        let angleY = 0;
+        let angleZ = 0;
+        let frameCount = 0;
+
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+        }
+
+        window.addEventListener('resize', resize);
+        resize();
+
+        // Initialize the scribble points on a sphere
+        function initPoints() {
+            points = [];
+            let theta = 0;
+            let phi = 0;
+            
+            // Create a chaotic walk on the sphere surface
+            for (let i = 0; i < LINE_LENGTH; i++) {
+                // Random walk step
+                theta += (Math.random() - 0.5) * 0.5;
+                phi += (Math.random() - 0.5) * 0.5;
+
+                // Clamp phi to avoid poles singularity issues and keep distribution somewhat even
+                if (phi < 0.1) phi = 0.1;
+                if (phi > Math.PI - 0.1) phi = Math.PI - 0.1;
+
+                // Spherical to Cartesian
+                const x = RADIUS * Math.sin(phi) * Math.cos(theta);
+                const y = RADIUS * Math.sin(phi) * Math.sin(theta);
+                const z = RADIUS * Math.cos(phi);
+
+                points.push({ x, y, z });
+            }
+        }
+
+        // 3D Math Helpers
+        function rotateX(x, y, z, angle) {
+            const cos = Math.cos(angle);
+            const sin = Math.sin(angle);
+            return {
+                x: x,
+                y: y * cos - z * sin,
+                z: y * sin + z * cos
+            };
+        }
+
+        function rotateY(x, y, z, angle) {
+            const cos = Math.cos(angle);
+            const sin = Math.sin(angle);
+            return {
+                x: x * cos + z * sin,
+                y: y,
+                z: -x * sin + z * cos
+            };
+        }
+
+        function rotateZ(x, y, z, angle) {
+            const cos = Math.cos(angle);
+            const sin = Math.sin(angle);
+            return {
+                x: x * cos - y * sin,
+                y: x * sin + y * cos,
+                z: z
+            };
+        }
+
+        function project(x, y, z) {
+            // Perspective projection
+            const fov = 800;
+            const distance = 400; // Camera distance
+            const scale = fov / (fov + z + distance);
+            return {
+                x: x * scale + width / 2,
+                y: y * scale + height / 2,
+                scale: scale,
+                z: z
+            };
+        }
+
+        function draw() {
+            // Clear screen with a slight fade for motion blur effect (optional, but clean clear is better for this specific style)
+            ctx.fillStyle = '#050505';
+            ctx.fillRect(0, 0, width, height);
+
+            // Update Rotation
+            angleX += ROTATION_SPEED;
+            angleY += ROTATION_SPEED * 0.7;
+            angleZ += ROTATION_SPEED * 0.3;
+
+            // Calculate Cycle Phase (0.0 to 1.0)
+            // The sphere unravels (scales down Y) and reassembles
+            const cyclePhase = (frameCount % CYCLE_DURATION) / CYCLE_DURATION;
+            
+            // Create a sine wave effect for the "unravelling"
+            // 0 = flat line, 1 = full sphere
+            const unravellingFactor = Math.abs(Math.sin(cyclePhase * Math.PI)); 
+
+            // Transform points
+            const projectedPoints = points.map(p => {
+                let tp = { ...p };
+                
+                // Apply unravelling distortion (squash Y axis)
+                tp.y *= unravellingFactor;
+
+                // Rotate
+                tp = rotateX(tp.x, tp.y, tp.z, angleX);
+                tp = rotateY(tp.x, tp.y, tp.z, angleY);
+                tp = rotateZ(tp.x, tp.y, tp.z, angleZ);
+
+                // Project
+                return project(tp.x, tp.y, tp.z);
+            });
+
+            // Draw the continuous line
+            // To handle depth cueing correctly on a continuous line, we technically need to break it into segments
+            // or draw the whole line with a global style. However, to get the "fading" effect where back lines
+            // are darker, we must draw segment by segment.
+            
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+
+            for (let i = 0; i < projectedPoints.length - 1; i++) {
+                const p1 = projectedPoints[i];
+                const p2 = projectedPoints[i+1];
+
+                // Calculate average depth for this segment
+                // z ranges roughly from -RADIUS to +RADIUS. 
+                // We normalize this to 0..1 for alpha calculation.
+                const avgZ = (p1.z + p2.z) / 2;
+                
+                // Map Z to alpha: Closer (negative Z in camera space usually, but here +Z is away based on projection logic)
+                // In our project function: scale = fov / (fov + z + distance). 
+                // If z is negative (towards camera), scale is larger.
+                // Let's assume standard right-handed: +Z is away from camera in our rotation logic?
+                // Let's check: project uses (fov + z + distance). If z is positive, denominator is larger -> smaller scale (further).
+                // So positive Z is far, negative Z is near.
+                
+                // Range Z: -200 to 200. 
+                // Near (-200) -> Alpha 1.0
+                // Far (200) -> Alpha 0.1
+                
+                let alpha = 1 - (avgZ + RADIUS) / (2 * RADIUS);
+                // Clamp alpha
+                alpha = Math.max(0.05, Math.min(1, alpha));
+                
+                // Depth cueing for line width
+                // Near: 2px, Far: 0.5px
+                const lineWidth = 0.5 + (1 - (avgZ + RADIUS) / (2 * RADIUS)) * 2.5;
+
+                ctx.beginPath();
+                ctx.moveTo(p1.x, p1.y);
+                ctx.lineTo(p2.x, p2.y);
+                
+                // Color: Cyan/Blue neon look
+                ctx.strokeStyle = `rgba(0, 255, 255, ${alpha})`;
+                ctx.lineWidth = lineWidth;
+                ctx.stroke();
+            }
+
+            frameCount++;
+            requestAnimationFrame(draw);
+        }
+
+        initPoints();
+        draw();
+
+    </script>
+</body>
+</html>

@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width=device-width, initial-scale=1.0">
+    <title>Ant Colony Simulation</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #050505;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="simCanvas"></canvas>
+    <script>
+        // --- Configuration ---
+        const CONFIG = {
+            antCount: 300,
+            foodCount: 15,
+            foodSize: 12,
+            nestRadius: 25,
+            antSpeed: 2.5,
+            antSenseRadius: 40,
+            antSenseAngle: Math.PI / 4,
+            pheromoneEvaporation: 0.985,
+            foodSpawnRate: 0.03,
+            foodCarryCapacity: 1,
+            trailStrength: 40,
+            turnRate: 0.5,
+            wanderJitter: 0.2
+        };
+
+        // --- Setup ---
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d', { alpha: false });
+        
+        let width, height;
+        let ants = [];
+        let foodPiles = [];
+        let pheromoneGrid = [];
+        let nest = { x: 0, y: 0 };
+
+        // --- Resize Handling ---
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            nest.x = width / 2;
+            nest.y = height / 2;
+            initGrid();
+        }
+        window.addEventListener('resize', resize);
+
+        // --- Initialization ---
+        function initGrid() {
+            // Grid resolution: 1 cell per 4 pixels for performance vs quality balance
+            const scale = 4;
+            const cols = Math.ceil(width / scale);
+            const rows = Math.ceil(height / scale);
+            pheromoneGrid = new Float32Array(cols * rows);
+        }
+
+        function initAnts() {
+            ants = [];
+            for (let i = 0; i < CONFIG.antCount; i++) {
+                ants.push(createAnt());
+            }
+        }
+
+        function createAnt() {
+            return {
+                x: nest.x + (Math.random() - 0.5) * CONFIG.nestRadius,
+                y: nest.y + (Math.random() - 0.5) * CONFIG.nestRadius,
+                angle: Math.random() * Math.PI * 2,
+                hasFood: false,
+                id: Math.random()
+            };
+        }
+
+        function initFood() {
+            foodPiles = [];
+            for (let i = 0; i < CONFIG.foodCount; i++) {
+                spawnFood();
+            }
+        }
+
+        function spawnFood() {
+            // Spawn away from nest if possible, otherwise anywhere
+            let x, y;
+            do {
+                x = Math.random() * width;
+                y = Math.random() * height;
+            } while (Math.hypot(x - nest.x, y - nest.y) < 100);
+
+            foodPiles.push({ x, y, amount: 100 });
+        }
+
+        // --- Simulation Logic ---
+
+        function updateGrid() {
+            const scale = 4;
+            const cols = Math.ceil(width / scale);
+            
+            // Evaporation
+            for (let i = 0; i < pheromoneGrid.length; i++) {
+                pheromoneGrid[i] *= CONFIG.pheromoneEvaporation;
+                // Floor to prevent floating point noise issues
+                if (pheromoneGrid[i] < 0.1) pheromoneGrid[i] = 0;
+            }
+        }
+
+        function depositPheromone(x, y, strength) {
+            const scale = 4;
+            const col = Math.floor(x / scale);
+            const row = Math.floor(y / scale);
+            
+            if (col >= 0 && col < Math.ceil(width/scale) && row >= 0 && row < Math.ceil(height/scale)) {
+                const idx = row * Math.ceil(width/scale) + col;
+                pheromoneGrid[idx] += strength;
+            }
+        }
+
+        function getPheromone(x, y) {
+            const scale = 4;
+            const col = Math.floor(x / scale);
+            const row = Math.floor(y / scale);
+            if (col >= 0 && col < Math.ceil(width/scale) && row >= 0 && row < Math.ceil(height/scale)) {
+                return pheromoneGrid[row * Math.ceil(width/scale) + col];
+            }
+            return 0;
+        }
+
+        function updateAnts() {
+            const senseR = CONFIG.antSenseRadius;
+            const senseA = CONFIG.antSenseAngle;
+            const speed = CONFIG.antSpeed;
+
+            // Cache grid dimensions to avoid division in loop
+            const cols = Math.ceil(width / 4);
+
+            for (let ant of ants) {
+                let sx = ant.x;
+                let sy = ant.y;
+                let ang = ant.angle;
+
+                // --- Sensing ---
+                if (ant.hasFood) {
+                    // Seek Nest
+                    const dx = nest.x - ant.x;
+                    const dy = nest.y - ant.y;
+                    const dist = Math.hypot(dx, dy);
+                    
+                    if (dist < CONFIG.nestRadius) {
+                        // Drop food, change state
+                        ant.hasFood = false;
+                        ant.x = nest.x;
+                        ant.y = nest.y;
+                        // Randomize angle slightly to disperse
+                        ant.angle += (Math.random() - 0.5);
+                        continue;
+                    }
+
+                    // Follow Pheromone Home
+                    // Check 3 sensors ahead
+                    const s1 = getPheromone(sx + Math.cos(ang - senseA) * senseR, sy + Math.sin(ang - senseA) * senseR);
+                    const s2 = getPheromone(sx + Math.cos(ang) * senseR, sy + Math.sin(ang) * senseR);
+                    const s3 = getPheromone(sx + Math.cos(ang + senseA) * senseR, sy + Math.sin(ang + senseA) * senseR);
+
+                    if (s1 > s2 && s1 > s3) ang -= CONFIG.turnRate;
+                    else if (s3 > s2 && s3 > s1) ang += CONFIG.turnRate;
+                    else if (s2 > s1 && s2 > s3) ang += (Math.random() - 0.5) * CONFIG.turnRate;
+                    else {
+                        // No trail, wander towards home
+                        ang += Math.atan2(dy, dx) - ang;
+                        // Normalize angle
+                        while (ang > Math.PI) ang -= Math.PI * 2;
+                        while (ang < -Math.PI) ang += Math.PI * 2;
+                    }
+
+                    // Deposit Trail
+                    depositPheromone(ant.x, ant.y, CONFIG.trailStrength);
+
+                } else {
+                    // Seek Food (Random Wander + Sense Pheromone Home)
+                    // Note: Ants without food are essentially random walkers, 
+                    // they can follow the "Home" trail (pheromone deposited by ants with food)
+                    
+                    const s1 = getPheromone(sx + Math.cos(ang - senseA) * senseR, sy + Math.sin(ang - senseA) * senseR);
+                    const s2 = getPheromone(sx + Math.cos(ang) * senseR, sy + Math.sin(ang) * senseR);
+                    const s3 = getPheromone(sx + Math.cos(ang + senseA) * senseR, sy + Math.sin(ang + senseA) * senseR);
+
+                    if (s1 > s2 && s1 > s3) ang -= CONFIG.turnRate;
+                    else if (s3 > s2 && s3 > s1) ang += CONFIG.turnRate;
+                    else if (s2 > s1 && s2 > s3) ang += (Math.random() - 0.5) * CONFIG.turnRate;
+                    else {
+                        // Wander
+                        ang += (Math.random() - 0.5) * CONFIG.wanderJitter;
+                    }
+
+                    // Check Food Collision
+                    for (let i = foodPiles.length - 1; i >= 0; i--) {
+                        const f = foodPiles[i];
+                        const d = Math.hypot(ant.x - f.x, ant.y - f.y);
+                        if (d < CONFIG.foodSize + 5) {
+                            ant.hasFood = true;
+                            f.amount--;
+                            if (f.amount <= 0) foodPiles.splice(i, 1);
+                            break;
+                        }
+                    }
+                }
+
+                // Move
+                ant.x += Math.cos(ang) * speed;
+                ant.y += Math.sin(ang) * speed;
+                ant.angle = ang;
+
+                // Wrap around screen
+                if (ant.x < 0) ant.x = width;
+                if (ant.x > width) ant.x = 0;
+                if (ant.y < 0) ant.y = height;
+                if (ant.y > height) ant.y = 0;
+            }
+        }
+
+        function updateFood() {
+            // Respawn
+            if (foodPiles.length < CONFIG.foodCount && Math.random() < CONFIG.foodSpawnRate) {
+                spawnFood();
+            }
+        }
+
+        // --- Rendering ---
+
+        function draw() {
+            // Clear Screen
+            ctx.fillStyle = '#050505';
+            ctx.fillRect(0, 0, width, height);
+
+            // Draw Pheromone
+            // We draw small rects for non-zero values for performance
+            const scale = 4;
+            const cols = Math.ceil(width / scale);
+            
+            ctx.fillStyle = '#ff4500'; // Orange/Red heat color
+            
+            for (let y = 0; y < Math.ceil(height / scale); y++) {
+                for (let x = 0; x < cols; x++) {
+                    const val = pheromoneGrid[y * cols + x];
+                    if (val > 1) {
+                        // Opacity based on strength, clamped
+                        const alpha = Math.min(1, val / 100);
+                        ctx.globalAlpha = alpha;
+                        ctx.fillRect(x * scale, y * scale, scale, scale);
+                    }
+                }
+            }
+            ctx.globalAlpha = 1.0;
+
+            // Draw Nest
+            ctx.beginPath();
+            ctx.arc(nest.x, nest.y, CONFIG.nestRadius, 0, Math.PI * 2);
+            ctx.fillStyle = '#1a1a1a';
+            ctx.fill();
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Draw Food
+            ctx.fillStyle = '#00ff00';
+            for (let f of foodPiles) {
+                ctx.beginPath();
+                ctx.arc(f.x, f.y, CONFIG.foodSize, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Draw Ants
+            ctx.fillStyle = '#ffffff';
+            for (let ant of ants) {
+                ctx.fillRect(ant.x - 1, ant.y - 1, 2, 2);
+            }
+        }
+
+        // --- Main Loop ---
+        function loop() {
+            updateGrid();
+            updateAnts();
+            updateFood();
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        // --- Start ---
+        resize();
+        initAnts();
+        initFood();
+        loop();
+
+    </script>
+</body>
+</html>

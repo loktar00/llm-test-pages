@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Paper Planes - Atrium Screensaver</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #1a1a1a;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let particles = [];
+        let planes = [];
+        const NUM_PLANES = 10;
+        const NUM_PARTICLES = 150;
+        
+        // Atrium Geometry & Physics
+        const FLOOR_Y_OFFSET = 100; // Perspective shift
+        const THERMAL_X = 0; // Center of screen
+        const THERMAL_STRENGTH = 0.08;
+        const GRAVITY = 0.02;
+        const DRAG = 0.99;
+        
+        // Colors
+        const COLORS = {
+            sky: '#fdfbf7',
+            sun: '#fff9e6',
+            floor: '#e8e4d9',
+            shadow: 'rgba(100, 100, 100, 0.15)',
+            plane: '#ffffff',
+            planeShadow: 'rgba(0,0,0,0.08)',
+            dust: 'rgba(255, 240, 200, 0.6)'
+        };
+
+        // Resize handling
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // Utility
+        const rand = (min, max) => Math.random() * (max - min) + min;
+        const lerp = (a, b, t) => a + (b - a) * t;
+
+        // --- Classes ---
+
+        class Dust {
+            constructor() {
+                this.init();
+            }
+
+            init() {
+                this.x = rand(0, width);
+                this.y = rand(0, height);
+                this.z = rand(0.1, 1); // Depth
+                this.vx = rand(-0.2, 0.2);
+                this.vy = rand(-0.1, -0.3); // Drifting up
+                this.size = rand(1, 3);
+                this.alpha = rand(0.1, 0.5);
+            }
+
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+
+                // Reset if out of bounds
+                if (this.y < -10 || this.x < -10 || this.x > width + 10) {
+                    this.init();
+                    this.y = height + 10;
+                }
+            }
+
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size * this.z, 0, Math.PI * 2);
+                ctx.fillStyle = COLORS.dust;
+                ctx.globalAlpha = this.alpha * this.z;
+                ctx.fill();
+                ctx.globalAlpha = 1.0;
+            }
+        }
+
+        class Plane {
+            constructor() {
+                this.reset(true);
+            }
+
+            reset(initial = false) {
+                // Launch from sides (balconies)
+                const side = Math.random() > 0.5 ? 1 : -1;
+                
+                this.x = side === 1 ? width + 50 : -50;
+                this.y = rand(height * 0.2, height * 0.5);
+                this.z = rand(0.2, 1.0); // Scale/Depth factor
+                
+                this.vx = side * rand(2, 4);
+                this.vy = rand(-1, 1);
+                this.vz = 0;
+
+                // Orientation
+                this.angle = side === 1 ? Math.PI : 0; // Facing center
+                this.bank = 0;
+                this.pitch = 0;
+                
+                // State
+                this.state = 'flying'; // flying, landing, relaunching
+                this.landingY = height - FLOOR_Y_OFFSET;
+                this.opacity = 0;
+                this.flash = 0;
+            }
+
+            update() {
+                // State Machine
+                if (this.state === 'flying') {
+                    this.updateFlight();
+                    this.checkLanding();
+                } else if (this.state === 'landing') {
+                    this.updateLanding();
+                } else if (this.state === 'relaunching') {
+                    this.updateRelaunch();
+                }
+
+                // Flash effect decay
+                if (this.flash > 0) this.flash -= 0.05;
+            }
+
+            updateFlight() {
+                // 1. Aerodynamics & Gravity
+                this.vy += GRAVITY * 0.5;
+                
+                // 2. Thermal Lift
+                const distToCenter = Math.abs(this.x - width / 2);
+                if (distToCenter < 300) {
+                    // Stronger lift in center
+                    const lift = THERMAL_STRENGTH * (1 - distToCenter / 300) * (1.5 - this.z); 
+                    this.vy -= lift;
+                    
+                    // Spiral tendency
+                    this.vx += (width/2 - this.x) * 0.0005;
+                }
+
+                // 3. Drag
+                this.vx *= DRAG;
+                this.vy *= DRAG;
+
+                // 4. Position Update
+                this.x += this.vx * (1 + this.z); // Move faster if closer
+                this.y += this.vy;
+
+                // 5. Orientation Calculation
+                // Target angle based on velocity vector
+                const targetAngle = Math.atan2(this.vy, this.vx);
+                
+                // Banking: Turn into the curve
+                // Calculate curvature roughly
+                const turnRate = targetAngle - this.angle;
+                this.bank = lerp(this.bank, turnRate * 5, 0.1);
+                this.bank = Math.max(-1.2, Math.min(1.2, this.bank)); // Cap banking
+
+                // Smoothly rotate plane to velocity vector
+                this.angle = lerp(this.angle, targetAngle, 0.05);
+                
+                // Pitch: Nose up if going up, nose down if going down
+                this.pitch = -this.vy * 0.2;
+            }
+
+            checkLanding() {
+                // If plane gets too low or too slow
+                if (this.y > this.landingY - 20 || (Math.abs(this.vx) < 0.5 && this.y > height * 0.6)) {
+                    this.state = 'landing';
+                    this.landingTimer = 0;
+                }
+                // Screen bounds check for reset
+                if (this.x < -200 || this.x > width + 200) {
+                    this.reset();
+                }
+            }
+
+            updateLanding() {
+                this.landingTimer++;
+                
+                // Slide to stop
+                this.vx *= 0.9;
+                this.x += this.vx;
+                this.y = this.landingY; // Snap to floor
+                
+                // Flatten
+                this.bank = 0;
+                this.angle = Math.atan2(0, this.vx);
+                this.pitch = 0;
+                this.opacity = 1;
+
+                if (this.landingTimer > 60) {
+                    this.flash = 1; // Flash white
+                    this.state = 'relaunching';
+                    this.relaunchTimer = 0;
+                }
+            }
+
+            updateRelaunch() {
+                this.relaunchTimer++;
+                
+                // Fade out
+                this.opacity = Math.max(0, 1 - (this.relaunchTimer / 30));
+
+                if (this.relaunchTimer > 30) {
+                    this.reset();
+                    this.opacity = 0; // Fade in handled in draw
+                }
+            }
+
+            draw() {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                
+                // Fade in/out handling
+                if (this.state === 'flying' && this.opacity < 1) {
+                    this.opacity += 0.05;
+                }
+                if (this.opacity <= 0) { ctx.restore(); return; }
+
+                ctx.globalAlpha = this.opacity;
+
+                // Apply 3D-ish transforms
+                // Scale based on Z
+                const scale = this.z * 2;
+                ctx.scale(scale, scale);
+
+                // Banking rotation (around X axis in 3D, simulated here by skew/rotate)
+                // Since we are 2D, we rotate the context for the plane's heading
+                ctx.rotate(this.angle);
+
+                // Simulate banking by flattening the Y axis
+                const bankScale = Math.cos(this.bank);
+                const skew = Math.sin(this.bank);
+                
+                ctx.transform(1, 0, skew, bankScale, 0, 0);
+
+                // Pitch simulation (move wings slightly up/down relative to body)
+                // Handled inside drawShape
+
+                // Draw Shadow
+                // Shadow is projected "down" and "right" based on light source (top-leftish)
+                // Since we are on the floor, shadow is just below
+                ctx.save();
+                ctx.translate(0, 40 / this.z); // Offset down
+                ctx.rotate(-this.angle); // Counter rotate for perspective
+                ctx.scale(1, 0.5); // Flatten shadow
+                ctx.fillStyle = COLORS.shadow;
+                ctx.beginPath();
+                ctx.moveTo(15, 0);
+                ctx.lineTo(-10, 8);
+                ctx.lineTo(-10, -8);
+                ctx.fill();
+                ctx.restore();
+
+                // Draw Plane
+                this.drawShape();
+
+                // Flash effect
+                if (this.flash > 0) {
+                    ctx.fillStyle = `rgba(255, 255, 255, ${this.flash})`;
+                    ctx.beginPath();
+                    ctx.arc(0, 0, 20, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+
+                ctx.restore();
+            }
+
+            drawShape() {
+                ctx.fillStyle = COLORS.plane;
+                ctx.strokeStyle = '#ccc';
+                ctx.lineWidth = 0.5;
+                
+                // Simple dart shape
+                ctx.beginPath();
+                ctx.moveTo(15, 0); // Nose
+                ctx.lineTo(-10, 6); // Right wing tip
+                ctx.lineTo(-5, 0); // Center fold
+                ctx.lineTo(-10, -6); // Left wing tip
+                ctx.closePath();
+                
+                // Shading
+                ctx.fill();
+                ctx.stroke();
+
+                // Wing shading based on bank
+                if (this.bank > 0) {
+                    // Right wing down
+                    ctx.fillStyle = 'rgba(0,0,0,0.1)';
+                    ctx.beginPath();
+                    ctx.moveTo(0,0);
+                    ctx.lineTo(-10, 6);
+                    ctx.lineTo(-5, 0);
+                    ctx.fill();
+                } else {
+                    // Left wing down
+                    ctx.fillStyle = 'rgba(0,0,0,0.1)';
+                    ctx.beginPath();
+                    ctx.moveTo(0,0);
+                    ctx.lineTo(-10, -6);
+                    ctx.lineTo(-5, 0);
+                    ctx.fill();
+                }
+            }
+        }
+
+        // --- Initialization ---
+
+        for (let i = 0; i < NUM_PARTICLES; i++) {
+            particles.push(new Dust());
+        }
+
+        for (let i = 0; i < NUM_PLANES; i++) {
+            planes.push(new Plane());
+        }
+
+        // --- Main Loop ---
+
+        function drawBackground() {
+            // Sun gradient
+            const grd = ctx.createRadialGradient(width * 0.2, height * 0.2, 100, width * 0.5, height * 0.5, width);
+            grd.addColorStop(0, '#fffbe3');
+            grd.addColorStop(0.4, '#f0e6d2');
+            grd.addColorStop(1, '#d8d0c1');
+            
+            ctx.fillStyle = grd;
+            ctx.fillRect(0, 0, width, height);
+
+            // Floor Perspective
+            ctx.fillStyle = COLORS.floor;
+            ctx.beginPath();
+            ctx.moveTo(0, height - FLOOR_Y_OFFSET);
+            ctx.lineTo(width, height - FLOOR_Y_OFFSET);
+            ctx.lineTo(width, height);
+            ctx.lineTo(0, height);
+            ctx.fill();
+            
+            // Floor Grid lines (Perspective)
+            ctx.strokeStyle = 'rgba(200, 190, 170, 0.3)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            // Horizon line
+            ctx.moveTo(0, height - FLOOR_Y_OFFSET);
+            ctx.lineTo(width, height - FLOOR_Y_OFFSET);
+            
+            // Radiating lines
+            const centerX = width / 2;
+            for (let i = -10; i <= 10; i++) {
+                ctx.moveTo(centerX + i * 100, height - FLOOR_Y_OFFSET);
+                ctx.lineTo(centerX + i * 400, height);
+            }
+            ctx.stroke();
+        }
+
+        function animate() {
+            ctx.clearRect(0, 0, width, height);
+
+            drawBackground();
+
+            // Sort planes by Z for correct depth rendering
+            planes.sort((a, b) => a.z - b.z);
+
+            // Draw Dust (Background layer)
+            particles.forEach(p => {
+                p.update();
+                p.draw();
+            });
+
+            // Draw Planes
+            planes.forEach(plane => {
+                plane.update();
+                plane.draw();
+            });
+
+            // Vignette / Atmosphere
+            const vignette = ctx.createRadialGradient(width/2, height/2, height/3, width/2, height/2, height);
+            vignette.addColorStop(0, 'rgba(0,0,0,0)');
+            vignette.addColorStop(1, 'rgba(0,0,0,0.2)');
+            ctx.fillStyle = vignette;
+            ctx.fillRect(0, 0, width, height);
+
+            requestAnimationFrame(animate);
+        }
+
+        animate();
+
+    </script>
+</body>
+</html>

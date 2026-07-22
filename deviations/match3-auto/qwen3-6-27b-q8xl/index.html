@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Autoplay Match-3</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #1a1a2e;
+            overflow: hidden;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: #fff;
+        }
+        canvas {
+            display: block;
+        }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 0;
+            width: 100%;
+            text-align: center;
+            pointer-events: none;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.5);
+        }
+        #score-label {
+            font-size: 1.2rem;
+            opacity: 0.7;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+        #score {
+            font-size: 3rem;
+            font-weight: bold;
+        }
+        #combo {
+            font-size: 1.5rem;
+            color: #ffd700;
+            opacity: 0;
+            transition: opacity 0.3s;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <div id="score-label">Score</div>
+        <div id="score">0</div>
+        <div id="combo">COMBO x1</div>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+<script>
+/**
+ * Configuration & Constants
+ */
+const COLS = 8;
+const ROWS = 8;
+const GEM_TYPES = 6;
+const ANIM_SPEED = 0.15; // Speed of movement (0-1)
+const POP_DURATION = 200; // ms
+const STATE_TICK = 1000; // ms between AI moves
+const GRAVITY = 0.8;
+
+const COLORS = [
+    '#FF4D4D', // Red
+    '#4DFF4D', // Green
+    '#4D4DFF', // Blue
+    '#FFFF4D', // Yellow
+    '#FF4DFF', // Magenta
+    '#4DFFFF'  // Cyan
+];
+
+// Game States
+const STATE_IDLE = 0;
+const STATE_SWAPPING = 1;
+const STATE_POPPING = 2;
+const STATE_FALLING = 3;
+
+/**
+ * Game Classes
+ */
+
+class Gem {
+    constructor(col, row, type) {
+        this.col = col;
+        this.row = row;
+        this.type = type;
+        this.x = col; // Normalized coordinates
+        this.y = row;
+        this.targetX = col;
+        this.targetY = row;
+        this.scale = 1;
+        this.alpha = 1;
+        this.isMatch = false;
+        this.isNew = false;
+        this.spawnY = -2; // Start above screen
+    }
+
+    update() {
+        // Smooth movement
+        const dx = this.targetX - this.x;
+        const dy = this.targetY - this.y;
+        
+        if (Math.abs(dx) > 0.001) this.x += dx * ANIM_SPEED;
+        else this.x = this.targetX;
+
+        if (Math.abs(dy) > 0.001) {
+            // Add slight bounce/easing for falling
+            this.y += dy * ANIM_SPEED;
+        } else {
+            this.y = this.targetY;
+        }
+
+        // Scale animation for popping
+        if (this.isMatch) {
+            this.scale -= 0.15;
+            this.alpha -= 0.1;
+        } else {
+            this.scale += (1 - this.scale) * 0.2;
+            this.alpha += (1 - this.alpha) * 0.2;
+        }
+    }
+}
+
+class Particle {
+    constructor(x, y, color) {
+        this.x = x;
+        this.y = y;
+        this.color = color;
+        const angle = Math.random() * Math.PI * 2;
+        const speed = Math.random() * 0.1 + 0.05;
+        this.vx = Math.cos(angle) * speed;
+        this.vy = Math.sin(angle) * speed;
+        this.life = 1.0;
+        this.decay = Math.random() * 0.03 + 0.02;
+        this.size = Math.random() * 0.3 + 0.1;
+    }
+
+    update() {
+        this.x += this.vx;
+        this.y += this.vy;
+        this.vy += 0.002; // Gravity
+        this.life -= this.decay;
+    }
+}
+
+class Match3Game {
+    constructor() {
+        this.canvas = document.getElementById('gameCanvas');
+        this.ctx = this.canvas.getContext('2d');
+        this.scoreEl = document.getElementById('score');
+        this.comboEl = document.getElementById('combo');
+        
+        this.grid = [];
+        this.particles = [];
+        this.score = 0;
+        this.combo = 0;
+        
+        this.state = STATE_IDLE;
+        this.lastTick = 0;
+        this.swapPair = null; // {g1, g2}
+        
+        this.resize();
+        window.addEventListener('resize', () => this.resize());
+        
+        this.initGrid();
+        this.loop = this.loop.bind(this);
+        requestAnimationFrame(this.loop);
+    }
+
+    resize() {
+        this.canvas.width = window.innerWidth;
+        this.canvas.height = window.innerHeight;
+        
+        // Calculate cell size based on screen dimensions
+        const w = this.canvas.width;
+        const h = this.canvas.height;
+        this.cellSize = Math.min(w / (COLS + 2), h / (ROWS + 2));
+        this.offsetX = (w - (this.cellSize * COLS)) / 2;
+        this.offsetY = (h - (this.cellSize * ROWS)) / 2;
+    }
+
+    initGrid() {
+        this.grid = [];
+        for (let c = 0; c < COLS; c++) {
+            this.grid[c] = [];
+            for (let r = 0; r < ROWS; r++) {
+                this.grid[c][r] = this.createGem(c, r);
+            }
+        }
+        // Ensure no initial matches
+        while (this.findMatches().length > 0) {
+            this.resolveInstantMatches();
+        }
+    }
+
+    createGem(c, r) {
+        let type;
+        // Smart generation to prevent instant 3-matches
+        do {
+            type = Math.floor(Math.random() * GEM_TYPES);
+        } while (
+            (c >= 2 && this.grid[c-1][r] && this.grid[c-1][r].type === type && this.grid[c-2][r] && this.grid[c-2][r].type === type) ||
+            (r >= 2 && this.grid[c][r-1] && this.grid[c][r-1].type === type && this.grid[c][r-2] && this.grid[c][r-2].type === type)
+        );
+        
+        const gem = new Gem(c, r, type);
+        gem.spawnY = r; // No fall-in animation on init
+        gem.y = r;
+        return gem;
+    }
+
+    // --- Logic: Match Finding & Resolution ---
+
+    findMatches() {
+        let matches = new Set();
+        
+        // Horizontal
+        for (let r = 0; r < ROWS; r++) {
+            for (let c = 0; c < COLS - 2; c++) {
+                let t = this.grid[c][r].type;
+                if (this.grid[c+1][r].type === t && this.grid[c+2][r].type === t) {
+                    matches.add(this.grid[c][r]);
+                    matches.add(this.grid[c+1][r]);
+                    matches.add(this.grid[c+2][r]);
+                    // Check for >3
+                    let k = c + 3;
+                    while (k < COLS && this.grid[k][r].type === t) {
+                        matches.add(this.grid[k][r]);
+                        k++;
+                    }
+                }
+            }
+        }
+
+        // Vertical
+        for (let c = 0; c < COLS; c++) {
+            for (let r = 0; r < ROWS - 2; r++) {
+                let t = this.grid[c][r].type;
+                if (this.grid[c][r+1].type === t && this.grid[c][r+2].type === t) {
+                    matches.add(this.grid[c][r]);
+                    matches.add(this.grid[c][r+1]);
+                    matches.add(this.grid[c][r+2]);
+                    let k = r + 3;
+                    while (k < ROWS && this.grid[c][k].type === t) {
+                        matches.add(this.grid[c][k]);
+                        k++;
+                    }
+                }
+            }
+        }
+        return Array.from(matches);
+    }
+
+    resolveInstantMatches() {
+        const matches = this.findMatches();
+        matches.forEach(g => {
+            g.type = Math.floor(Math.random() * GEM_TYPES);
+        });
+    }
+
+    // --- Logic: AI Controller ---
+
+    aiTick() {
+        if (this.state !== STATE_IDLE) return;
+
+        // 1. Find a valid move
+        let moveFound = false;
+        let attempts = 0;
+        
+        while (!moveFound && attempts < 100) {
+            const c = Math.floor(Math.random() * COLS);
+            const r = Math.floor(Math.random() * ROWS);
+            
+            // Try swapping right or down
+            const dir = Math.random() > 0.5 ? 1 : 0; // 1 = right, 0 = down
+            const c2 = c + (dir === 1 ? 1 : 0);
+            const r2 = r + (dir === 0 ? 1 : 0);
+
+            if (c2 < COLS && r2 < ROWS) {
+                // Simulate swap
+                const g1 = this.grid[c][r];
+                const g2 = this.grid[c2][r2];
+                
+                // Temp swap
+                this.grid[c][r] = g2;
+                this.grid[c2][r2] = g1;
+                
+                if (this.findMatches().length > 0) {
+                    // Valid move found!
+                    moveFound = true;
+                    this.swapPair = { g1, g2, c1: c, r1: r, c2, r2 };
+                    
+                    // Restore grid logic for the animation phase to handle it
+                    this.grid[c][r] = g1;
+                    this.grid[c2][r2] = g2;
+                    
+                    // Actually perform swap logic for coordinates
+                    g1.col = c2; g1.row = r2;
+                    g2.col = c; g2.row = r;
+                    
+                    this.state = STATE_SWAPPING;
+                } else {
+                    // Undo
+                    this.grid[c][r] = g1;
+                    this.grid[c2][r2] = g2;
+                }
+            }
+            attempts++;
+        }
+
+        // If no moves found, shuffle board
+        if (!moveFound) {
+            this.shuffleBoard();
+        }
+    }
+
+    shuffleBoard() {
+        // Flatten, shuffle, refill
+        let gems = [];
+        for(let c=0; c<COLS; c++) 
+            for(let r=0; r<ROWS; r++) 
+                gems.push(this.grid[c][r]);
+        
+        for (let i = gems.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [gems[i], gems[j]] = [gems[j], gems[i]];
+        }
+
+        let idx = 0;
+        for(let c=0; c<COLS; c++) {
+            for(let r=0; r<ROWS; r++) {
+                const g = gems[idx++];
+                g.col = c;
+                g.row = r;
+                g.targetX = c;
+                g.targetY = r;
+                this.grid[c][r] = g;
+            }
+        }
+        // Remove any existing matches immediately without points
+        this.resolveInstantMatches();
+    }
+
+    // --- Logic: Game Loop ---
+
+    updateLogic() {
+        switch (this.state) {
+            case STATE_IDLE:
+                // Wait for timer
+                break;
+            
+            case STATE_SWAPPING:
+                // Check if gems reached destination
+                const g1 = this.swapPair.g1;
+                const g2 = this.swapPair.g2;
+                
+                if (Math.abs(g1.x - g1.targetX) < 0.1 && Math.abs(g1.y - g1.targetY) < 0.1 &&
+                    Math.abs(g2.x - g2.targetX) < 0.1 && Math.abs(g2.y - g2.targetY) < 0.1) {
+                    
+                    // Snap to grid
+                    g1.x = g1.targetX; g1.y = g1.targetY;
+                    g2.x = g2.targetX; g2.y = g2.targetY;
+                    
+                    // Check matches
+                    const matches = this.findMatches();
+                    if (matches.length > 0) {
+                        this.state = STATE_POPPING;
+                        this.combo = 1;
+                        matches.forEach(g => g.isMatch = true);
+                    } else {
+                        // Invalid swap, swap back
+                        this.grid[this.swapPair.c1][this.swapPair.r1] = g1;
+                        this.grid[this.swapPair.c2][this.swapPair.r2] = g2;
+                        g1.col = this.swapPair.c1; g1.row = this.swapPair.r1;
+                        g2.col = this.swapPair.c2; g2.row = this.swapPair.r2;
+                        g1.targetX = g1.col; g1.targetY = g1.row;
+                        g2.targetX = g2.col; g2.targetY = g2.row;
+                        this.state = STATE_IDLE;
+                    }
+                    this.swapPair = null;
+                }
+                break;
+
+            case STATE_POPPING:
+                // Wait for animation to finish
+                let allGone = true;
+                for (let c = 0; c < COLS; c++) {
+                    for (let r = 0; r < ROWS; r++) {
+                        if (this.grid[c][r] && this.grid[c][r].isMatch && this.grid[c][r].alpha > 0) {
+                            allGone = false;
+                        }
+                    }
+                }
+                
+                if (allGone) {
+                    // Remove gems and spawn particles
+                    for (let c = 0; c < COLS; c++) {
+                        for (let r = 0; r < ROWS; r++) {
+                            if (this.grid[c][r] && this.grid[c][r].isMatch) {
+                                this.spawnParticles(c, r, this.grid[c][r].type);
+                                this.grid[c][r] = null;
+                            }
+                        }
+                    }
+                    this.state = STATE_FALLING;
+                }
+                break;
+
+            case STATE_FALLING:
+                // Apply Gravity
+                let moved = false;
+                for (let c = 0; c < COLS; c++) {
+                    let writeRow = ROWS - 1;
+                    for (let r = ROWS - 1; r >= 0; r--) {
+                        if (this.grid[c][r] !== null) {
+                            if (r !== writeRow) {
+                                this.grid[c][writeRow] = this.grid[c][r];
+                                this.grid[c][writeRow].row = writeRow;
+                                this.grid[c][writeRow].targetY = writeRow;
+                                this.grid[c][r] = null;
+                                moved = true;
+                            }
+                            writeRow--;
+                        }
+                    }
+                    // Refill top
+                    while (writeRow >= 0) {
+                        const type = Math.floor(Math.random() * GEM_TYPES);
+                        const gem = new Gem(c, writeRow, type);
+                        gem.spawnY = writeRow - (ROWS - writeRow); // Start from above
+                        gem.y = gem.spawnY;
+                        this.grid[c][writeRow] = gem;
+                        writeRow--;
+                        moved = true;
+                    }
+                }
+
+                // Check if everything settled
+                let settled = true;
+                for (let c = 0; c < COLS; c++) {
+                    for (let r = 0; r < ROWS; r++) {
+                        const g = this.grid[c][r];
+                        if (g && Math.abs(g.y - g.targetY) > 0.05) settled = false;
+                    }
+                }
+
+                if (settled) {
+                    this.state = STATE_IDLE;
+                    // Check for chain reactions
+                    const matches = this.findMatches();
+                    if (matches.length > 0) {
+                        this.combo++;
+                        this.state = STATE_POPPING;
+                        matches.forEach(g => g.isMatch = true);
+                    }
+                }
+                break;
+        }
+    }
+
+    spawnParticles(c, r, type) {
+        const x = c * this.cellSize + this.cellSize/2 + this.offsetX;
+        const y = r * this.cellSize + this.cellSize/2 + this.offsetY;
+        const color = COLORS[type];
+        for (let i = 0; i < 8; i++) {
+            this.particles.push(new Particle(x, y, color));
+        }
+    }
+
+    updateUI() {
+        if (this.state === STATE_POPPING) {
+            this.scoreEl.innerText = this.score;
+        }
+        
+        if (this.combo > 1) {
+            this.comboEl.innerText = `COMBO x${this.combo}!`;
+            this.comboEl.style.opacity = 1;
+            this.comboEl.style.transform = `scale(${1 + this.combo * 0.1})`;
+        } else {
+            this.comboEl.style.opacity = 0;
+        }
+    }
+
+    loop(timestamp) {
+        // AI Tick
+        if (this.state === STATE_IDLE && timestamp - this.lastTick > STATE_TICK) {
+            this.aiTick();
+            this.lastTick = timestamp;
+        }
+
+        this.updateLogic();
+
+        // Render
+        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+
+        // Draw Gems
+        for (let c = 0; c < COLS; c++) {
+            for (let r = 0; r < ROWS; r++) {
+                const g = this.grid[c][r];
+                if (g) {
+                    g.update();
+                    this.drawGem(g);
+                }
+            }
+        }
+
+        // Draw Particles
+        for (let i = this.particles.length - 1; i >= 0; i--) {
+            const p = this.particles[i];
+            p.update();
+            this.ctx.globalAlpha = p.life;
+            this.ctx.fillStyle = p.color;
+            this.ctx.beginPath();
+            this.ctx.arc(
+                p.x, 
+                p.y, 
+                p.size * this.cellSize, 
+                0, Math.PI * 2
+            );
+            this.ctx.fill();
+            this.ctx.globalAlpha = 1;
+            if (p.life <= 0) this.particles.splice(i, 1);
+        }
+
+        this.updateUI();
+        requestAnimationFrame(this.loop);
+    }
+
+    drawGem(g) {
+        const x = g.x * this.cellSize + this.offsetX;
+        const y = g.y * this.cellSize + this.offsetY;
+        const size = this.cellSize * 0.8 * g.scale;
+        const color = COLORS[g.type];
+
+        this.ctx.globalAlpha = g.alpha;
+        this.ctx.fillStyle = color;
+        
+        // Draw rounded rect / circle
+        this.ctx.beginPath();
+        this.ctx.roundRect(x + (this.cellSize - size)/2, y + (this.cellSize - size)/2, size, size, size/4);
+        this.ctx.fill();
+
+        // Shine effect
+        this.ctx.fillStyle = 'rgba(255,255,255,0.3)';
+        this.ctx.beginPath();
+        this.ctx.arc(x + size*0.3, y + size*0.3, size*0.15, 0, Math.PI*2);
+        this.ctx.fill();
+
+        this.ctx.globalAlpha = 1;
+    }
+}
+
+// Start Game
+window.onload = () => {
+    const game = new Match3Game();
+};
+
+</script>
+</body>
+</html>

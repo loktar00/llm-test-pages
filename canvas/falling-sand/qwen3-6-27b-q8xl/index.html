@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Falling Sand Simulation</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #111;
+        }
+        canvas {
+            display: block;
+            image-rendering: pixelated; /* Essential for chunky aesthetic */
+            width: 100%;
+            height: 100%;
+        }
+        #ui {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: rgba(255, 255, 255, 0.5);
+            font-family: monospace;
+            pointer-events: none;
+            user-select: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="ui">AUTOMATED EMITTER ACTIVE</div>
+    <canvas id="simCanvas"></canvas>
+
+<script>
+/**
+ * FALLING SAND SIMULATION
+ * 
+ * Grid-based Eulerian simulation.
+ * 0: Empty
+ * 1: Sand
+ * 2: Water
+ * 3: Fire
+ * 4: Stone (Eroding)
+ * 5: Wood (Burnable)
+ */
+
+const canvas = document.getElementById('simCanvas');
+const ctx = canvas.getContext('2d', { alpha: false });
+
+// Simulation Resolution (Coarse grid for performance and aesthetic)
+const WIDTH = 200;
+const HEIGHT = 150;
+const SCALE = 4; // Visual scale factor
+
+// Grid State
+let grid = new Uint8Array(WIDTH * HEIGHT);
+// Color variation buffer (to make sand/stone look textured)
+let colorVar = new Uint8Array(WIDTH * HEIGHT);
+
+// Emitter State
+let emitterX = 0;
+let emitterDir = 1;
+let emitterTimer = 0;
+let emitterType = 0; // 0: Sand, 1: Water, 2: Fire
+
+// Configuration
+const UPDATE_RATE = 1; // Run every frame
+const FIRE_LIFE = 50;
+const WOOD_REGEN_RATE = 0.002;
+
+// Colors
+const COLORS = {
+    0: '#111111', // Empty
+    1: '#E6C229', // Sand
+    2: '#3498db', // Water
+    3: '#e74c3c', // Fire
+    4: '#555555', // Stone
+    5: '#8B4513'  // Wood
+};
+
+function init() {
+    // Resize canvas to fit window while maintaining aspect ratio logic
+    resize();
+    window.addEventListener('resize', resize);
+
+    // Initialize some static stone at the bottom
+    for (let y = HEIGHT - 20; y < HEIGHT; y++) {
+        for (let x = 0; x < WIDTH; x++) {
+            grid[y * WIDTH + x] = 4;
+            colorVar[y * WIDTH + x] = Math.random();
+        }
+    }
+
+    // Initialize some wooden platforms
+    createPlatform(50, 100);
+    createPlatform(140, 80);
+
+    requestAnimationFrame(loop);
+}
+
+function resize() {
+    canvas.width = WIDTH;
+    canvas.height = HEIGHT;
+    // CSS handles the stretching, but we set internal buffer to low res
+}
+
+function createPlatform(x, y) {
+    for (let i = -10; i <= 10; i++) {
+        if (x + i >= 0 && x + i < WIDTH && y >= 0 && y < HEIGHT) {
+            grid[y * WIDTH + (x + i)] = 5;
+            colorVar[y * WIDTH + (x + i)] = Math.random();
+        }
+    }
+}
+
+function idx(x, y) {
+    return y * WIDTH + x;
+}
+
+function isEmpty(x, y) {
+    return grid[idx(x, y)] === 0;
+}
+
+function isWater(x, y) {
+    return grid[idx(x, y)] === 2;
+}
+
+function isFire(x, y) {
+    return grid[idx(x, y)] === 3;
+}
+
+function setCell(x, y, type, life = 0) {
+    if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return;
+    const i = idx(x, y);
+    grid[i] = type;
+    // Randomize color variation slightly for texture
+    colorVar[i] = Math.random();
+}
+
+function update() {
+    // 1. Emitter Logic
+    emitterTimer++;
+    if (emitterTimer > 10) {
+        emitterTimer = 0;
+        // Move emitter
+        emitterX += emitterDir;
+        if (emitterX > WIDTH - 20) emitterDir = -1;
+        if (emitterX < 10) emitterDir = 1;
+
+        // Drop particles
+        const dropY = 2;
+        
+        // 70% Sand, 20% Water, 10% Fire
+        const r = Math.random();
+        if (r < 0.7) {
+            if (isEmpty(emitterX, dropY)) setCell(emitterX, dropY, 1);
+        } else if (r < 0.9) {
+            if (isEmpty(emitterX, dropY)) setCell(emitterX, dropY, 2);
+        } else {
+            if (isEmpty(emitterX, dropY)) setCell(emitterX, dropY, 3);
+        }
+    }
+
+    // Iterate bottom-up for falling particles to prevent teleporting
+    // We use a separate array or careful iteration to avoid updating same particle twice per frame
+    // For simple sand, bottom-up left-right is usually fine.
+    
+    for (let y = HEIGHT - 2; y >= 0; y--) {
+        // Randomize x direction to prevent bias
+        const leftToRight = Math.random() > 0.5;
+        const startX = leftToRight ? 0 : WIDTH - 1;
+        const endX = leftToRight ? WIDTH : -1;
+        const stepX = leftToRight ? 1 : -1;
+
+        for (let x = startX; x !== endX; x += stepX) {
+            const i = idx(x, y);
+            const type = grid[i];
+
+            if (type === 0) continue;
+
+            if (type === 1) { // Sand
+                // Fall down
+                if (y + 1 < HEIGHT && isEmpty(x, y + 1)) {
+                    setCell(x, y + 1, 1);
+                    setCell(x, y, 0);
+                } 
+                // Slide down-left or down-right
+                else if (y + 1 < HEIGHT) {
+                    const dir = Math.random() > 0.5 ? 1 : -1;
+                    if (x + dir >= 0 && x + dir < WIDTH && isEmpty(x + dir, y + 1)) {
+                        setCell(x + dir, y + 1, 1);
+                        setCell(x, y, 0);
+                    } else if (x - dir >= 0 && x - dir < WIDTH && isEmpty(x - dir, y + 1)) {
+                        setCell(x - dir, y + 1, 1);
+                        setCell(x, y, 0);
+                    }
+                }
+            } 
+            else if (type === 2) { // Water
+                // Fall down
+                if (y + 1 < HEIGHT && isEmpty(x, y + 1)) {
+                    setCell(x, y + 1, 2);
+                    setCell(x, y, 0);
+                }
+                // Flow sideways
+                else if (y + 1 < HEIGHT) {
+                    // Check diagonal first (water piles slightly)
+                    const dir = Math.random() > 0.5 ? 1 : -1;
+                    if (x + dir >= 0 && x + dir < WIDTH && isEmpty(x + dir, y + 1)) {
+                        setCell(x + dir, y + 1, 2);
+                        setCell(x, y, 0);
+                    } else if (x - dir >= 0 && x - dir < WIDTH && isEmpty(x - dir, y + 1)) {
+                        setCell(x - dir, y + 1, 2);
+                        setCell(x, y, 0);
+                    } else {
+                        // Just flow flat
+                        if (x + dir >= 0 && x + dir < WIDTH && isEmpty(x + dir, y)) {
+                            setCell(x + dir, y, 2);
+                            setCell(x, y, 0);
+                        } else if (x - dir >= 0 && x - dir < WIDTH && isEmpty(x - dir, y)) {
+                            setCell(x - dir, y, 2);
+                            setCell(x, y, 0);
+                        }
+                    }
+                }
+            }
+            else if (type === 3) { // Fire
+                // Fire moves up randomly
+                if (Math.random() < 0.2) {
+                    const dir = Math.floor(Math.random() * 3) - 1; // -1, 0, 1
+                    const ny = y - 1;
+                    const nx = x + dir;
+                    if (ny >= 0 && nx >= 0 && nx < WIDTH) {
+                        if (isEmpty(nx, ny)) {
+                            setCell(nx, ny, 3);
+                            setCell(x, y, 0);
+                        } else if (grid[idx(nx, ny)] === 5) {
+                            // Burn wood
+                            setCell(nx, ny, 3); // Ignite wood cell
+                            setCell(x, y, 0);
+                        }
+                    }
+                }
+                
+                // Interactions
+                // Quench by water
+                if (y + 1 < HEIGHT && isWater(x, y + 1)) {
+                    setCell(x, y, 0); // Fire dies
+                    // setCell(x, y+1, 0); // Optional: consume water
+                }
+                for (let dx = -1; dx <= 1; dx++) {
+                    if (x+dx >= 0 && x+dx < WIDTH && isWater(x+dx, y)) {
+                        setCell(x, y, 0);
+                    }
+                }
+
+                // Chance to die out
+                if (Math.random() < 0.05) setCell(x, y, 0);
+            }
+            else if (type === 5) { // Wood
+                // If on fire, turn to fire or vanish
+                let burning = false;
+                // Check neighbors for fire
+                for(let dy=-1; dy<=1; dy++){
+                    for(let dx=-1; dx<=1; dx++){
+                        if(x+dx >=0 && x+dx < WIDTH && y+dy >=0 && y+dy < HEIGHT) {
+                            if(isFire(x+dx, y+dy)) burning = true;
+                        }
+                    }
+                }
+
+                if (burning && Math.random() < 0.1) {
+                    setCell(x, y, 3); // Turn into fire
+                }
+            }
+            else if (type === 4) { // Stone
+                // Erosion: Water slowly erodes stone
+                if (y + 1 < HEIGHT && isWater(x, y + 1)) {
+                    if (Math.random() < 0.001) {
+                        setCell(x, y, 0); // Stone falls away
+                    }
+                }
+            }
+        }
+    }
+
+    // Regeneration Logic (Keep scene dynamic)
+    // Slowly regenerate wood platforms if they are gone or low
+    if (Math.random() < WOOD_REGEN_RATE) {
+        // Randomly pick a spot in the middle area to try and regrow wood
+        // This simulates "nature" or a machine rebuilding
+        const rx = Math.floor(Math.random() * WIDTH);
+        const ry = Math.floor(Math.random() * (HEIGHT - 50)) + 50;
+        if (isEmpty(rx, ry)) {
+            // Only regrow if near existing stone or wood to keep it grounded
+            let grounded = false;
+            if (ry + 1 < HEIGHT && grid[idx(rx, ry+1)] === 4) grounded = true;
+            if (rx > 0 && grid[idx(rx-1, ry)] === 5) grounded = true;
+            if (rx < WIDTH-1 && grid[idx(rx+1, ry)] === 5) grounded = true;
+
+            if (grounded) setCell(rx, ry, 5);
+        }
+    }
+    
+    // Regenerate bottom stone floor if eroded
+    if (Math.random() < 0.01) {
+        const rx = Math.floor(Math.random() * WIDTH);
+        if (isEmpty(rx, HEIGHT - 1)) setCell(rx, HEIGHT - 1, 4);
+    }
+}
+
+function draw() {
+    // Create ImageData buffer
+    const imgData = ctx.createImageData(WIDTH, HEIGHT);
+    const data = imgData.data;
+
+    for (let i = 0; i < grid.length; i++) {
+        const type = grid[i];
+        const pixelIndex = i * 4;
+        const variance = colorVar[i]; // 0 to 1
+
+        let r, g, b, a;
+
+        if (type === 0) {
+            r = 17; g = 17; b = 17; // Background
+        } 
+        else if (type === 1) { // Sand
+            // Vary yellow/brown
+            const v = Math.floor(variance * 40);
+            r = 230 - v; g = 194 - v; b = 41 - v;
+        } 
+        else if (type === 2) { // Water
+            // Vary blue
+            const v = Math.floor(variance * 50);
+            r = 52 - v; g = 152 - v; b = 219 + v;
+        } 
+        else if (type === 3) { // Fire
+            // Flicker orange/red/yellow
+            const flicker = Math.random();
+            r = 231 * flicker + 255 * (1-flicker);
+            g = 76 * flicker + 100 * (1-flicker);
+            b = 60 * flicker;
+        }
+        else if (type === 4) { // Stone
+            const v = Math.floor(variance * 60);
+            r = 85 - v; g = 85 - v; b = 85 - v;
+        }
+        else if (type === 5) { // Wood
+            const v = Math.floor(variance * 40);
+            r = 139 - v; g = 69 - v; b = 19 - v;
+        }
+
+        data[pixelIndex] = r;
+        data[pixelIndex + 1] = g;
+        data[pixelIndex + 2] = b;
+        data[pixelIndex + 3] = 255; // Alpha
+    }
+
+    ctx.putImageData(imgData, 0, 0);
+}
+
+function loop() {
+    update();
+    draw();
+    requestAnimationFrame(loop);
+}
+
+// Start
+init();
+
+</script>
+</body>
+</html>

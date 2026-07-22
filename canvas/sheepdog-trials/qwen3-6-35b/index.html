@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sheepdog Trials</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #2e3b28; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        canvas { display: block; }
+        #ui { position: absolute; top: 20px; left: 20px; color: rgba(255,255,255,0.8); pointer-events: none; text-shadow: 1px 1px 2px black; }
+        h1 { margin: 0; font-size: 24px; letter-spacing: 2px; text-transform: uppercase; }
+        p { margin: 5px 0; font-size: 14px; }
+        #status { font-weight: bold; color: #ffd700; font-size: 18px; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <h1>Sheepdog Trials</h1>
+        <p>Autonomous Herding Simulation</p>
+        <div id="status">Phase: Searching</div>
+    </div>
+    <canvas id="sim"></canvas>
+
+<script>
+/**
+ * SHEEPDOG TRIALS SIMULATION
+ * 
+ * Core Systems:
+ * 1. Entities: Sheep (Boids + Fear), Dog (State Machine), Gates/Pen (Static).
+ * 2. Physics: Vector math, collision resolution, friction.
+ * 3. AI: Boids algorithm (Separation, Alignment, Cohesion) + Fear Response.
+ * 4. Dog Logic: State machine (Circle -> Press -> Split -> Herd -> Return).
+ */
+
+// --- Vector Utility Class ---
+class Vec2 {
+    constructor(x, y) { this.x = x; this.y = y; }
+    add(v) { return new Vec2(this.x + v.x, this.y + v.y); }
+    sub(v) { return new Vec2(this.x - v.x, this.y - v.y); }
+    mult(n) { return new Vec2(this.x * n, this.y * n); }
+    div(n) { return new Vec2(this.x / n, this.y / n); }
+    mag() { return Math.sqrt(this.x * this.x + this.y * this.y); }
+    normalize() {
+        let m = this.mag();
+        return m === 0 ? new Vec2(0, 0) : this.div(m);
+    }
+    limit(max) {
+        if (this.mag() > max) return this.normalize().mult(max);
+        return this;
+    }
+    dist(v) { return Math.sqrt((this.x - v.x)**2 + (this.y - v.y)**2); }
+    copy() { return new Vec2(this.x, this.y); }
+}
+
+// --- Configuration ---
+const CONFIG = {
+    sheepCount: 40,
+    sheepRadius: 6,
+    sheepSpeed: 2.5,
+    fearRadius: 150,
+    fearForce: 0.8,
+    boidSeparation: 25,
+    boidCohesion: 0.01,
+    boidAlignment: 0.03,
+    stragglerThreshold: 100, // distance from flock center to trigger panic
+    dogRadius: 10,
+    dogSpeed: 4.5,
+    dogForce: 0.4,
+    gateWidth: 120,
+    penSize: 160,
+    grassColor: '#4a6b3a',
+    pathColor: '#5d7a4a'
+};
+
+// --- Game State ---
+const canvas = document.getElementById('sim');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+
+let width, height;
+let sheep = [];
+let dog;
+let gates = [];
+let pen;
+let particles = []; // For grass detail
+let paths = []; // Worn paths
+let gameState = 'IDLE'; // IDLE, SEARCHING, CIRCLE, PRESS, SPLIT, HERD, PENNED, RESET
+let phaseTimer = 0;
+
+// --- Initialization ---
+
+function resize() {
+    width = canvas.width = window.innerWidth;
+    height = canvas.height = window.innerHeight;
+    initCourse();
+}
+
+function initCourse() {
+    // Create a simple course: Start -> Gate 1 -> Gate 2 -> Pen
+    // Pen is usually at the bottom center
+    pen = {
+        x: width / 2,
+        y: height - 100,
+        w: CONFIG.penSize,
+        h: CONFIG.penSize,
+        open: true
+    };
+
+    // Generate Gates dynamically based on screen size
+    // Gate 1: Top Left
+    gates = [
+        { x: width * 0.2, y: height * 0.3, w: CONFIG.gateWidth, h: 20, active: false, passed: false },
+        { x: width * 0.8, y: height * 0.3, w: CONFIG.gateWidth, h: 20, active: false, passed: false }
+    ];
+
+    // Generate static grass particles
+    particles = [];
+    for(let i=0; i<300; i++) {
+        particles.push({
+            x: Math.random() * width,
+            y: Math.random() * height,
+            size: Math.random() * 3 + 1,
+            color: Math.random() > 0.5 ? '#5c8048' : '#3e5c2e'
+        });
+    }
+}
+
+class Sheep {
+    constructor(x, y) {
+        this.pos = new Vec2(x, y);
+        this.vel = new Vec2(Math.random()*2-1, Math.random()*2-1);
+        this.acc = new Vec2(0, 0);
+        this.maxSpeed = CONFIG.sheepSpeed;
+        this.maxForce = 0.2;
+        this.panic = false;
+        this.straggled = false;
+    }
+
+    update() {
+        // Apply forces
+        this.vel = this.vel.add(this.acc);
+        this.vel = this.vel.limit(this.maxSpeed);
+        this.pos = this.pos.add(this.vel);
+        this.acc = this.acc.mult(0); // Reset acc
+
+        // Boundaries (soft walls)
+        if (this.pos.x < 0) this.vel.x += 0.5;
+        if (this.pos.x > width) this.vel.x -= 0.5;
+        if (this.pos.y < 0) this.vel.y += 0.5;
+        if (this.pos.y > height) this.vel.y -= 0.5;
+
+        // Friction
+        this.vel = this.vel.mult(0.98);
+    }
+
+    flock(sheepList, dogPos) {
+        let separation = new Vec2(0,0);
+        let alignment = new Vec2(0,0);
+        let cohesion = new Vec2(0,0);
+        let fear = new Vec2(0,0);
+        
+        let neighbors = 0;
+        let panicCount = 0;
+
+        for (let other of sheepList) {
+            let d = this.pos.dist(other.pos);
+            
+            // Separation
+            if (other !== this && d < CONFIG.boidSeparation) {
+                let diff = this.pos.sub(other.pos).normalize().div(d);
+                separation = separation.add(diff);
+            }
+
+            // Flocking
+            if (d < 50) {
+                alignment = alignment.add(other.vel);
+                cohesion = cohesion.add(other.pos);
+                neighbors++;
+                if (other.panic) panicCount++;
+            }
+        }
+
+        // Boids Logic
+        if (neighbors > 0) {
+            alignment = alignment.div(neighbors).normalize().mult(this.maxSpeed).sub(this.vel).limit(this.maxForce);
+            cohesion = cohesion.div(neighbors).sub(this.pos).normalize().mult(this.maxSpeed).sub(this.vel).limit(this.maxForce);
+        }
+        separation = separation.div(Math.max(1, neighbors)).limit(this.maxForce);
+
+        // Fear Response (Dog)
+        let dDog = this.pos.dist(dogPos);
+        if (dDog < CONFIG.fearRadius) {
+            let fearDir = this.pos.sub(dogPos).normalize().mult(CONFIG.fearForce);
+            fear = fear.add(fearDir);
+            this.panic = true;
+        } else {
+            // Recover from panic
+            if (this.panic && neighbors > 5) this.panic = false;
+        }
+
+        // Straggler Panic
+        // Calculate center of all sheep
+        let center = new Vec2(0,0);
+        for(let s of sheepList) center = center.add(s.pos);
+        center = center.div(sheepList.length);
+        
+        if (this.pos.dist(center) > CONFIG.stragglerThreshold) {
+            this.straggled = true;
+            // Run towards center
+            let toCenter = center.sub(this.pos).normalize().mult(0.5);
+            this.acc = this.acc.add(toCenter);
+        } else {
+            this.straggled = false;
+        }
+
+        // Apply weights
+        separation = separation.mult(1.5);
+        alignment = alignment.mult(1.0);
+        cohesion = cohesion.mult(1.0);
+        fear = fear.mult(2.0);
+
+        this.acc = this.acc.add(separation).add(alignment).add(cohesion).add(fear);
+    }
+
+    draw() {
+        ctx.fillStyle = this.panic ? '#fff' : '#e0e0e0';
+        if (this.straggled) ctx.strokeStyle = '#ff4444';
+        else ctx.strokeStyle = 'transparent';
+        
+        ctx.beginPath();
+        ctx.arc(this.pos.x, this.pos.y, CONFIG.sheepRadius, 0, Math.PI*2);
+        ctx.fill();
+        ctx.stroke();
+    }
+}
+
+class Dog {
+    constructor() {
+        this.pos = new Vec2(width/2, 100);
+        this.vel = new Vec2(0,0);
+        this.acc = new Vec2(0,0);
+        this.maxSpeed = CONFIG.dogSpeed;
+        this.maxForce = CONFIG.dogForce;
+        this.angle = 0;
+    }
+
+    update() {
+        this.vel = this.vel.add(this.acc);
+        this.vel = this.vel.limit(this.maxSpeed);
+        this.pos = this.pos.add(this.vel);
+        this.acc = this.acc.mult(0);
+        this.vel = this.vel.mult(0.95); // Friction
+
+        // Keep in bounds
+        this.pos.x = Math.max(20, Math.min(width - 20, this.pos.x));
+        this.pos.y = Math.max(20, Math.min(height - 20, this.pos.y));
+
+        // Calculate angle for rendering
+        if (this.vel.mag() > 0.1) {
+            this.angle = Math.atan2(this.vel.y, this.vel.x);
+        }
+    }
+
+    // Steering behaviors
+    seek(target) {
+        let desired = target.sub(this.pos);
+        desired = desired.normalize().mult(this.maxSpeed);
+        let steer = desired.sub(this.vel);
+        steer = steer.limit(this.maxForce);
+        this.acc = this.acc.add(steer);
+    }
+
+    // The core herding logic
+    herdingLogic() {
+        // 1. Find flock center
+        let flockCenter = new Vec2(0,0);
+        for(let s of sheep) flockCenter = flockCenter.add(s.pos);
+        flockCenter = flockCenter.div(sheep.length);
+
+        // 2. Determine state based on flock position relative to gates and pen
+        this.handleGameState(flockCenter);
+    }
+
+    handleGameState(flockCenter) {
+        // State Machine Logic
+        
+        // Check if flock is in pen
+        if (this.isInPen(flockCenter)) {
+            if (gameState !== 'PENNED') {
+                gameState = 'PENNED';
+                statusEl.innerText = "Phase: PENNED!";
+                statusEl.style.color = "#4caf50";
+                phaseTimer = 120; // Celebrate for 2 seconds
+            }
+            this.dance();
+            return;
+        }
+
+        // Check gates
+        let gate1 = gates[0];
+        let gate2 = gates[1];
+
+        // Logic: Try to move flock through Gate 1, then Gate 2, then Pen
+        // We define "targets" for the dog based on the goal
+        
+        let target = null;
+
+        if (gameState === 'SEARCHING') {
+            // Find the flock
+            this.seek(flockCenter);
+            // If close to flock, start circling
+            if (this.pos.dist(flockCenter) < 200) {
+                gameState = 'CIRCLE';
+                statusEl.innerText = "Phase: Circling";
+                statusEl.style.color = "#ffd700";
+            }
+            return;
+        }
+
+        if (gameState === 'CIRCLE') {
+            // Circle around the flock center to gather them
+            // Target is a point offset from flock center
+            let angle = (Date.now() / 1000) * 0.5;
+            let r = 150;
+            let circleTarget = new Vec2(
+                flockCenter.x + Math.cos(angle) * r,
+                flockCenter.y + Math.sin(angle) * r
+            );
+            this.seek(circleTarget);
+
+            // If flock is close enough and moving right, switch to press
+            if (this.pos.dist(flockCenter) < 100) {
+                gameState = 'PRESS';
+                statusEl.innerText = "Phase: Pressing";
+            }
+        }
+
+        if (gameState === 'PRESS') {
+            // Press the flock towards Gate 1
+            // Target is behind the flock relative to Gate 1
+            let toGate1 = gate1.pos.sub(flockCenter).normalize();
+            let behindFlock = flockCenter.sub(toGate1.mult(100));
+            
+            // Dog goes behind sheep to push them
+            this.seek(behindFlock);
+
+            // Check if flock is approaching gate 1
+            if (flockCenter.y > gate1.y - 50 && flockCenter.x > gate1.x - 50 && flockCenter.x < gate1.x + CONFIG.gateWidth + 50) {
+                gameState = 'SPLIT';
+                statusEl.innerText = "Phase: Splitting";
+            }
+        }
+
+        if (gate1.passed && gameState === 'SPLIT') {
+            // Split the flock to get them through Gate 2
+            // Target is between the flock and Gate 2, but slightly behind
+            let toGate2 = gate2.pos.sub(flockCenter).normalize();
+            let behindFlock = flockCenter.sub(toGate2.mult(80));
+            this.seek(behindFlock);
+
+            if (flockCenter.y > gate2.y - 50) {
+                gameState = 'HERD';
+                statusEl.innerText = "Phase: Herding";
+            }
+        }
+
+        if (gameState === 'HERD') {
+            // Move towards Pen
+            let toPen = pen.pos.sub(flockCenter).normalize();
+            let behindFlock = flockCenter.sub(toPen.mult(150));
+            this.seek(behindFlock);
+        }
+    }
+
+    isInPen(center) {
+        return (center.x > pen.x - pen.w/2 && center.x < pen.x + pen.w/2 &&
+                center.y > pen.y - pen.h/2 && center.y < pen.y + pen.h/2);
+    }
+
+    dance() {
+        // Wiggle when done
+        this.pos.x += Math.sin(Date.now() / 50) * 2;
+        this.pos.y += Math.cos(Date.now() / 50) * 2;
+    }
+
+    draw() {
+        ctx.save();
+        ctx.translate(this.pos.x, this.pos.y);
+        ctx.rotate(this.angle);
+        
+        // Dog Body
+        ctx.fillStyle = '#333';
+        ctx.beginPath();
+        ctx.ellipse(0, 0, CONFIG.dogRadius, CONFIG.dogRadius * 0.6, 0, 0, Math.PI*2);
+        ctx.fill();
+
+        // Ears
+        ctx.fillStyle = '#555';
+        ctx.beginPath();
+        ctx.ellipse(-5, -5, 4, 6, 0.5, 0, Math.PI*2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.ellipse(-5, 5, 4, 6, -0.5, 0, Math.PI*2);
+        ctx.fill();
+
+        // Collar
+        ctx.strokeStyle = '#ff0000';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(0, 0, CONFIG.dogRadius * 0.7, 0, Math.PI*2);
+        ctx.stroke();
+
+        ctx.restore();
+    }
+}
+
+// --- Main Loop ---
+
+function init() {
+    resize();
+    window.addEventListener('resize', resize);
+    
+    // Spawn Sheep in a cluster at top
+    for (let i = 0; i < CONFIG.sheepCount; i++) {
+        let x = width/2 + (Math.random() - 0.5) * 200;
+        let y = 100 + (Math.random() - 0.5) * 100;
+        sheep.push(new Sheep(x, y));
+    }
+    
+    dog = new Dog();
+    loop();
+}
+
+function update() {
+    // Phase Timer (for PENNED state)
+    if (gameState === 'PENNED') {
+        phaseTimer--;
+        if (phaseTimer <= 0) {
+            gameState = 'RESET';
+            statusEl.innerText = "Phase: Resetting...";
+            statusEl.style.color = "#aaa";
+        }
+    }
+
+    if (gameState === 'RESET') {
+        // Reset simulation
+        sheep = [];
+        gates.forEach(g => g.passed = false);
+        gates.forEach(g => g.active = false); // Reset gates
+        
+        // Respawn sheep
+        for (let i = 0; i < CONFIG.sheepCount; i++) {
+            let x = width/2 + (Math.random() - 0.5) * 200;
+            let y = 100 + (Math.random() - 0.5) * 100;
+            sheep.push(new Sheep(x, y));
+        }
+        
+        gameState = 'SEARCHING';
+        statusEl.innerText = "Phase: Searching";
+        statusEl.style.color = "#ffd700";
+    }
+
+    // Update Gates
+    let flockCenter = new Vec2(0,0);
+    for(let s of sheep) flockCenter = flockCenter.add(s.pos);
+    flockCenter = flockCenter.div(sheep.length);
+
+    // Check Gate 1
+    if (!gates[0].passed && flockCenter.y > gates[0].y) {
+        gates[0].passed = true;
+        gates[0].active = false; // Close behind
+    }
+    // Check Gate 2
+    if (!gates[1].passed && flockCenter.y > gates[1].y) {
+        gates[1].passed = true;
+        gates[1].active = false;
+    }
+
+    // Update Sheep
+    for (let s of sheep) {
+        s.flock(sheep, dog.pos);
+        s.update();
+    }
+
+    // Update Dog
+    dog.herdingLogic();
+    dog.update();
+}
+
+function draw() {
+    // Clear & Grass
+    ctx.fillStyle = CONFIG.grassColor;
+    ctx.fillRect(0, 0, width, height);
+
+    // Draw Grass Details
+    for(let p of particles) {
+        ctx.fillStyle = p.color;
+        ctx.fillRect(p.x, p.y, p.size, p.size);
+    }
+
+    // Draw Worn Paths (Simple lines connecting gates)
+    ctx.strokeStyle = CONFIG.pathColor;
+    ctx.lineWidth = 40;
+    ctx.lineCap = 'round';
+    
+    ctx.beginPath();
+    ctx.moveTo(width/2, 0); // Start area
+    ctx.lineTo(gates[0].x, gates[0].y);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(gates[0].x, gates[0].y);
+    ctx.lineTo(gates[1].x, gates[1].y);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(gates[1].x, gates[1].y);
+    ctx.lineTo(pen.x, pen.y);
+    ctx.stroke();
+
+    // Draw Gates
+    ctx.fillStyle = '#fff';
+    gates.forEach(g => {
+        if (!g.active) {
+            ctx.globalAlpha = 0.3;
+            // Draw remaining part of gate
+            ctx.fillRect(g.x, g.y, g.w, g.h);
+            ctx.globalAlpha = 1.0;
+        }
+    });
+    // Draw Gate Posts
+    ctx.fillStyle = '#555';
+    gates.forEach(g => {
+        ctx.fillRect(g.x - 10, g.y - 5, 10, g.h + 10);
+        ctx.fillRect(g.x + g.w, g.y - 5, 10, g.h + 10);
+    });
+
+    // Draw Pen
+    ctx.strokeStyle = '#8b4513';
+    ctx.lineWidth = 5;
+    ctx.strokeRect(pen.x - pen.w/2, pen.y - pen.h/2, pen.w, pen.h);
+    ctx.fillStyle = 'rgba(139, 69, 19, 0.1)';
+    ctx.fillRect(pen.x - pen.w/2, pen.y - pen.h/2, pen.w, pen.h);
+
+    // Draw Entities
+    for (let s of sheep) s.draw();
+    dog.draw();
+}
+
+function loop() {
+    update();
+    draw();
+    requestAnimationFrame(loop);
+}
+
+init();
+
+</script>
+</body>
+</html>

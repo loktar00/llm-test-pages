@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Evolving Mazectric Maze</title>
+    <style>
+        body { margin: 0; padding: 0; overflow: hidden; background-color: #050505; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <canvas id="mazeCanvas"></canvas>
+    <script>
+        const canvas = document.getElementById('mazeCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Configuration
+        const SCALE = 4; // Size of one maze cell in pixels
+        const UPDATE_RATE = 2; // CA steps per frame
+        const ANT_SPEED = 1; // Pixels per frame
+        const PHEROMONE_DECAY = 0.02;
+        const RESPAWN_CHANCE = 0.005; // Chance per cell to seed a new ant
+
+        let width, height;
+        let cols, rows;
+        let grid; // 0: Wall, 1: Path
+        let ants = [];
+        let frame = 0;
+
+        // Resize handling
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            
+            cols = Math.ceil(width / SCALE);
+            rows = Math.ceil(height / SCALE);
+            
+            initGrid();
+        }
+
+        function initGrid() {
+            grid = new Array(cols).fill(0).map(() => new Array(rows).fill(0));
+            
+            // Initial Seed: A block in the center
+            const cx = Math.floor(cols / 2);
+            const cy = Math.floor(rows / 2);
+            const radius = Math.min(cols, rows) / 4;
+            
+            for (let i = 0; i < cols; i++) {
+                for (let j = 0; j < rows; j++) {
+                    const dx = i - cx;
+                    const dy = j - cy;
+                    if (dx * dx + dy * dy < radius * radius) {
+                        grid[i][j] = 1;
+                    }
+                }
+            }
+        }
+
+        // Mazectric Rules
+        function updateMaze() {
+            const newGrid = grid.map(row => [...row]);
+
+            for (let x = 1; x < cols - 1; x++) {
+                for (let y = 1; y < rows - 1; y++) {
+                    if (grid[x][y] === 1) continue; // Don't turn walls into paths
+
+                    // Count neighbors
+                    let neighbors = 0;
+                    for (let dx = -1; dx <= 1; dx++) {
+                        for (let dy = -1; dy <= 1; dy++) {
+                            if (dx === 0 && dy === 0) continue;
+                            if (grid[x + dx][y + dy] === 1) neighbors++;
+                        }
+                    }
+
+                    // Rule: If exactly 4 neighbors, become a path (carve corridor)
+                    if (neighbors === 4) {
+                        newGrid[x][y] = 1;
+                    }
+                }
+            }
+            grid = newGrid;
+        }
+
+        // Ant Class
+        class Ant {
+            constructor(x, y) {
+                this.x = x * SCALE + SCALE / 2;
+                this.y = y * SCALE + SCALE / 2;
+                this.color = `hsl(${Math.random() * 60 + 180}, 100%, 50%)`; // Cyan/Blue hues
+                this.pheromone = 1.0;
+                this.directions = [{x:0, y:-1}, {x:0, y:1}, {x:-1, y:0}, {x:1, y:0}];
+            }
+
+            update() {
+                // 1. Drop Pheromone
+                const gx = Math.floor(this.x / SCALE);
+                const gy = Math.floor(this.y / SCALE);
+                if (gx >= 0 && gx < cols && gy >= 0 && gy < rows && grid[gx][gy] === 1) {
+                    // We draw this in the main loop, but we track intensity here
+                    this.pheromone = Math.min(1.0, this.pheromone + 0.1);
+                }
+
+                // 2. Move
+                // Determine current grid cell
+                const currentGX = Math.floor(this.x / SCALE);
+                const currentGY = Math.floor(this.y / SCALE);
+
+                // Check if we are strictly inside a cell or on a border
+                // Simple approach: try to move in current direction, if wall, pick new direction
+                let moved = false;
+
+                // Shuffle directions for randomness when stuck
+                this.directions.sort(() => Math.random() - 0.5);
+
+                // Look ahead
+                const headX = Math.floor((this.x + this.directions[0].x * ANT_SPEED) / SCALE);
+                const headY = Math.floor((this.y + this.directions[0].y * ANT_SPEED) / SCALE);
+
+                if (headX >= 0 && headX < cols && headY >= 0 && headY < rows && grid[headX][headY] === 1) {
+                    this.x += this.directions[0].x * ANT_SPEED;
+                    this.y += this.directions[0].y * ANT_SPEED;
+                    moved = true;
+                } else {
+                    // Try other directions
+                    for (let i = 1; i < this.directions.length; i++) {
+                        const nextX = Math.floor((this.x + this.directions[i].x * ANT_SPEED) / SCALE);
+                        const nextY = Math.floor((this.y + this.directions[i].y * ANT_SPEED) / SCALE);
+                        if (nextX >= 0 && nextX < cols && nextY >= 0 && nextY < rows && grid[nextX][nextY] === 1) {
+                            this.x += this.directions[i].x * ANT_SPEED;
+                            this.y += this.directions[i].y * ANT_SPEED;
+                            // Keep this direction until stuck
+                            this.directions.unshift(this.directions.splice(i, 1)[0]);
+                            moved = true;
+                            break;
+                        }
+                    }
+                }
+
+                // 3. Respawn logic (Seed generation)
+                // If ant is stuck or random chance, spawn a new ant nearby to explore
+                if (!moved && Math.random() < 0.1) {
+                    this.respawn();
+                }
+                
+                // Randomly spawn new ants in open areas to keep maze solving active
+                if (Math.random() < RESPAWN_CHANCE) {
+                    spawnAnt();
+                }
+            }
+
+            respawn() {
+                // Find a random open cell nearby to restart
+                const cx = Math.floor(this.x / SCALE);
+                const cy = Math.floor(this.y / SCALE);
+                const range = 20;
+                
+                for(let i=0; i<10; i++) {
+                    const rx = cx + Math.floor(Math.random() * range * 2) - range;
+                    const ry = cy + Math.floor(Math.random() * range * 2) - range;
+                    if (rx > 0 && rx < cols-1 && ry > 0 && ry < rows-1 && grid[rx][ry] === 1) {
+                        this.x = rx * SCALE + SCALE/2;
+                        this.y = ry * SCALE + SCALE/2;
+                        this.pheromone = 0;
+                        break;
+                    }
+                }
+            }
+
+            draw() {
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, 2, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        function spawnAnt() {
+            // Find a random open spot
+            const x = Math.floor(Math.random() * cols);
+            const y = Math.floor(Math.random() * rows);
+            if (grid[x][y] === 1) {
+                ants.push(new Ant(x, y));
+            }
+        }
+
+        function draw() {
+            // Fade effect for trails
+            ctx.fillStyle = 'rgba(5, 5, 5, 0.15)';
+            ctx.fillRect(0, 0, width, height);
+
+            // Draw Maze Structure (Subtle)
+            // We only draw the walls to define the space
+            ctx.fillStyle = '#111';
+            for (let x = 0; x < cols; x++) {
+                for (let y = 0; y < rows; y++) {
+                    if (grid[x][y] === 0) {
+                        ctx.fillRect(x * SCALE, y * SCALE, SCALE, SCALE);
+                    }
+                }
+            }
+
+            // Draw Pheromone Trails
+            ctx.globalCompositeOperation = 'lighter'; // Additive blending for glow
+            
+            // We can't easily draw pheromone per-pixel without a secondary canvas or heavy DOM operations.
+            // Instead, we rely on the ants leaving trails by drawing semi-transparent paths.
+            // To optimize, we draw the pheromone based on the Ant's position.
+            
+            ants.forEach(ant => {
+                ant.draw();
+                
+                // Draw pheromone trail (a small circle of light where the ant just was)
+                // This is simulated by the ant drawing a trail behind it, but since we 
+                // use the fade technique on the main canvas, we just draw the ant.
+                // To make the trail visible, we draw a slightly larger, fading circle behind the ant.
+                
+                ctx.fillStyle = ant.color;
+                ctx.globalAlpha = 0.2; // Trail persistence
+                ctx.beginPath();
+                ctx.arc(ant.x, ant.y, 3 * ant.pheromone, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.globalAlpha = 1.0;
+            });
+
+            ctx.globalCompositeOperation = 'source-over';
+
+            // Update Logic
+            for (let i = 0; i < UPDATE_RATE; i++) {
+                updateMaze();
+            }
+
+            // Update Ants
+            for (let i = ants.length - 1; i >= 0; i--) {
+                ants[i].update();
+                // Remove ants that wander too far off screen (safety)
+                if (ants[i].x < 0 || ants[i].x > width || ants[i].y < 0 || ants[i].y > height) {
+                    ants.splice(i, 1);
+                }
+            }
+
+            frame++;
+            requestAnimationFrame(draw);
+        }
+
+        // Init
+        window.addEventListener('resize', resize);
+        resize();
+        
+        // Initial burst of ants
+        for(let i=0; i<50; i++) {
+            spawnAnt();
+        }
+
+        draw();
+
+    </script>
+</body>
+</html>

@@ -1,0 +1,732 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Traffic Intersection Simulation</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #1a1a1a;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="simCanvas"></canvas>
+    <script>
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Configuration
+        let width, height;
+        const ROAD_WIDTH = 120;
+        const LANE_WIDTH = ROAD_WIDTH / 2;
+        const HALF_LANE = LANE_WIDTH / 2;
+        const INTERSECTION_SIZE = 140;
+        const CAR_LENGTH = 35;
+        const CAR_WIDTH = 18;
+        const MAX_SPEED = 4;
+        const ACCELERATION = 0.1;
+        const BRAKING = 0.2;
+        const SAFE_DISTANCE = 50; // Distance to start braking
+        const STOP_DISTANCE = 10; // Distance to actually stop
+        
+        // Colors
+        const COLORS = {
+            road: '#333333',
+            roadLine: '#555555',
+            roadMarking: '#aaaaaa',
+            grass: '#1a2e1a',
+            sidewalk: '#555',
+            carColors: ['#e74c3c', '#3498db', '#f1c40f', '#ecf0f1', '#9b59b6', '#e67e22'],
+            bus: '#f39c12',
+            busStripe: '#fff'
+        };
+
+        // State
+        let cars = [];
+        let pedestrians = [];
+        let nextCarTime = 0;
+        let frame = 0;
+
+        // Directions
+        const DIR = {
+            UP: 0,
+            RIGHT: 1,
+            DOWN: 2,
+            LEFT: 3
+        };
+
+        // Lane definitions relative to center (0,0)
+        const LANE_CONFIG = {
+            [DIR.UP]: { x: -HALF_LANE, y: -INTERSECTION_SIZE, dir: DIR.UP, turnType: 'straight', stopY: -INTERSECTION_SIZE },
+            [DIR.UP + 4]: { x: -HALF_LANE - LANE_WIDTH, y: -INTERSECTION_SIZE, dir: DIR.UP, turnType: 'left', stopY: -INTERSECTION_SIZE }, // Left turn lane
+            [DIR.DOWN]: { x: HALF_LANE, y: INTERSECTION_SIZE, dir: DIR.DOWN, turnType: 'straight', stopY: INTERSECTION_SIZE },
+            [DIR.DOWN + 4]: { x: HALF_LANE + LANE_WIDTH, y: INTERSECTION_SIZE, dir: DIR.DOWN, turnType: 'left', stopY: INTERSECTION_SIZE }, // Left turn lane
+            [DIR.RIGHT]: { x: INTERSECTION_SIZE, y: HALF_LANE, dir: DIR.RIGHT, turnType: 'straight', stopX: INTERSECTION_SIZE },
+            [DIR.RIGHT + 4]: { x: INTERSECTION_SIZE, y: HALF_LANE + LANE_WIDTH, dir: DIR.RIGHT, turnType: 'left', stopX: INTERSECTION_SIZE },
+            [DIR.LEFT]: { x: -INTERSECTION_SIZE, y: -HALF_LANE, dir: DIR.LEFT, turnType: 'straight', stopX: -INTERSECTION_SIZE },
+            [DIR.LEFT + 4]: { x: -INTERSECTION_SIZE, y: -HALF_LANE - LANE_WIDTH, dir: DIR.LEFT, turnType: 'left', stopX: -INTERSECTION_SIZE }
+        };
+
+        class TrafficLight {
+            constructor(roadDir) {
+                this.roadDir = roadDir;
+                this.state = 'RED'; // RED, YELLOW, GREEN
+                this.timer = 0;
+                this.queue = 0;
+                this.queueHistory = [];
+            }
+
+            update() {
+                // Count cars in queue
+                let count = 0;
+                cars.forEach(car => {
+                    if (car.roadDir === this.roadDir && car.state === 'WAITING') {
+                        count++;
+                    }
+                });
+                this.queue = count;
+                this.queueHistory.push(count);
+                if (this.queueHistory.length > 60) this.queueHistory.shift();
+            }
+
+            getAverageQueue() {
+                return this.queueHistory.reduce((a, b) => a + b, 0) / this.queueHistory.length;
+            }
+
+            getStateForCar(car) {
+                if (this.state === 'GREEN') return 'GREEN';
+                if (this.state === 'YELLOW') return 'YELLOW';
+                return 'RED';
+            }
+        }
+
+        const lights = [
+            new TrafficLight(DIR.UP),
+            new TrafficLight(DIR.DOWN),
+            new TrafficLight(DIR.RIGHT),
+            new TrafficLight(DIR.LEFT)
+        ];
+
+        // Bus stop logic
+        const busStopZones = [
+            { x: INTERSECTION_SIZE, y: 200, dir: DIR.LEFT, laneOffset: -HALF_LANE }, // Bus coming from right, heading left
+            { x: -INTERSECTION_SIZE, y: -200, dir: DIR.RIGHT, laneOffset: HALF_LANE }, // Bus coming from left, heading right
+            { x: -200, y: INTERSECTION_SIZE, dir: DIR.UP, laneOffset: HALF_LANE }, // Bus coming from bottom, heading up
+            { x: 200, y: -INTERSECTION_SIZE, dir: DIR.DOWN, laneOffset: -HALF_LANE } // Bus coming from top, heading down
+        ];
+
+        class Car {
+            constructor(roadDir, isBus = false) {
+                this.roadDir = roadDir;
+                this.isBus = isBus;
+                this.length = isBus ? 70 : CAR_LENGTH;
+                this.width = isBus ? 24 : CAR_WIDTH;
+                this.color = isBus ? COLORS.bus : COLORS.carColors[Math.floor(Math.random() * COLORS.carColors.length)];
+                
+                // Position setup
+                const config = LANE_CONFIG[roadDir];
+                this.x = config.x;
+                this.y = config.y;
+                
+                // Determine turn target
+                this.targetDir = config.turnType === 'left' ? (roadDir + 1) % 4 : roadDir;
+                
+                // State
+                this.speed = 0;
+                this.state = 'WAITING'; // WAITING, ACCELERATING, BRAKING, TURNING, STOPPED
+                this.turnProgress = 0; // 0 to 1
+                this.stopTimer = 0;
+                this.isStoppedAtBus = false;
+                
+                // Visuals
+                this.headlightsOn = true;
+            }
+
+            update() {
+                const light = lights[this.roadDir];
+                const lightState = light.getStateForCar(this);
+
+                // 1. Handle Bus Stop Logic
+                if (this.isBus && !this.isStoppedAtBus) {
+                    // Check if near bus stop
+                    let nearBusStop = false;
+                    let busStop = null;
+                    
+                    // Simple bounding box check for bus stop zones
+                    for(let bs of busStopZones) {
+                        if (bs.dir === this.roadDir) {
+                            if (this.roadDir === DIR.LEFT && this.x < bs.x - 50 && this.x > bs.x - 300) nearBusStop = true;
+                            if (this.roadDir === DIR.RIGHT && this.x > bs.x + 50 && this.x < bs.x + 300) nearBusStop = true;
+                            if (this.roadDir === DIR.UP && this.y > bs.y + 50 && this.y < bs.y + 300) nearBusStop = true;
+                            if (this.roadDir === DIR.DOWN && this.y < bs.y - 50 && this.y > bs.y - 300) nearBusStop = true;
+                        }
+                    }
+                    
+                    if (nearBusStop && this.speed < 2) {
+                        this.isStoppedAtBus = true;
+                        this.stopTimer = 120; // Stop for 2 seconds
+                    }
+                }
+
+                if (this.isStoppedAtBus) {
+                    this.stopTimer--;
+                    if (this.stopTimer <= 0) {
+                        this.isStoppedAtBus = false;
+                        this.speed = 0;
+                    }
+                    this.x = (this.roadDir === DIR.LEFT) ? this.x : this.x;
+                    this.y = (this.roadDir === DIR.DOWN) ? this.y : this.y;
+                    // Snap position to bus stop
+                    if(this.roadDir === DIR.LEFT) this.x = busStopZones[0].x;
+                    if(this.roadDir === DIR.RIGHT) this.x = busStopZones[1].x;
+                    if(this.roadDir === DIR.UP) this.y = busStopZones[2].y;
+                    if(this.roadDir === DIR.DOWN) this.y = busStopZones[3].y;
+                    return;
+                }
+
+                // 2. Handle Turning
+                if (this.state === 'TURNING') {
+                    this.handleTurning();
+                    return;
+                }
+
+                // 3. Handle Traffic Lights
+                let shouldStop = false;
+                
+                // Stop line calculation
+                let stopLineDist = 0;
+                const config = LANE_CONFIG[this.roadDir];
+                
+                if (this.roadDir === DIR.UP || this.roadDir === DIR.DOWN) {
+                    stopLineDist = Math.abs(this.y - config.stopY);
+                } else {
+                    stopLineDist = Math.abs(this.x - config.stopX);
+                }
+
+                if (lightState === 'RED') {
+                    if (stopLineDist < SAFE_DISTANCE) shouldStop = true;
+                } else if (lightState === 'YELLOW') {
+                    // Late yellow: if close enough to stop safely, stop. Otherwise go.
+                    if (stopLineDist < SAFE_DISTANCE * 0.5) shouldStop = true;
+                }
+
+                // 4. Handle Cars Ahead (Spacing)
+                let carAheadDist = Infinity;
+                cars.forEach(other => {
+                    if (other === this) return;
+                    if (other.roadDir !== this.roadDir) return;
+                    if (other.state === 'TURNING') return; // Don't follow turning cars on straight path logic
+
+                    let dist = Infinity;
+                    if (this.roadDir === DIR.UP) dist = this.y - other.y;
+                    if (this.roadDir === DIR.DOWN) dist = other.y - this.y;
+                    if (this.roadDir === DIR.LEFT) dist = other.x - this.x;
+                    if (this.roadDir === DIR.RIGHT) dist = this.x - other.x;
+
+                    if (dist > 0 && dist < carAheadDist) {
+                        carAheadDist = dist;
+                    }
+                });
+
+                if (carAheadDist < SAFE_DISTANCE) {
+                    shouldStop = true;
+                }
+
+                // Apply physics
+                if (shouldStop) {
+                    this.state = 'BRAKING';
+                    this.speed = Math.max(0, this.speed - BRAKING);
+                    if (this.speed === 0) this.state = 'WAITING';
+                } else {
+                    this.state = 'ACCELERATING';
+                    this.speed = Math.min(MAX_SPEED, this.speed + ACCELERATION);
+                    
+                    // Start turn if intersection entered
+                    if (this.isAtIntersection()) {
+                        this.state = 'TURNING';
+                    }
+                }
+
+                // Move
+                if (this.state !== 'TURNING') {
+                    if (this.roadDir === DIR.UP) this.y -= this.speed;
+                    if (this.roadDir === DIR.DOWN) this.y += this.speed;
+                    if (this.roadDir === DIR.LEFT) this.x -= this.speed;
+                    if (this.roadDir === DIR.RIGHT) this.x += this.speed;
+                }
+            }
+
+            isAtIntersection() {
+                // Check if center of car is roughly in the intersection box
+                const margin = 10;
+                const inBoxX = this.x > -INTERSECTION_SIZE + margin && this.x < INTERSECTION_SIZE - margin;
+                const inBoxY = this.y > -INTERSECTION_SIZE + margin && this.y < INTERSECTION_SIZE - margin;
+                return inBoxX && inBoxY;
+            }
+
+            handleTurning() {
+                if (this.roadDir === DIR.UP) {
+                    if (this.y < 0) {
+                        // Move to center
+                        this.x += (LANE_WIDTH) * 0.1; 
+                        this.y += 2;
+                    } else {
+                        // Turn left
+                        this.x += this.speed;
+                        this.y += this.speed;
+                        if (this.x > 0 && this.y > 0) {
+                            this.roadDir = DIR.RIGHT;
+                            this.state = 'ACCELERATING';
+                        }
+                    }
+                } else if (this.roadDir === DIR.DOWN) {
+                    if (this.y > 0) {
+                        this.x -= (LANE_WIDTH) * 0.1;
+                        this.y -= 2;
+                    } else {
+                        this.x -= this.speed;
+                        this.y -= this.speed;
+                        if (this.x < 0 && this.y < 0) {
+                            this.roadDir = DIR.LEFT;
+                            this.state = 'ACCELERATING';
+                        }
+                    }
+                } else if (this.roadDir === DIR.LEFT) {
+                    if (this.x < 0) {
+                        this.y -= (LANE_WIDTH) * 0.1;
+                        this.x -= 2;
+                    } else {
+                        this.y += this.speed;
+                        this.x += this.speed;
+                        if (this.x > 0 && this.y > 0) {
+                            this.roadDir = DIR.DOWN;
+                            this.state = 'ACCELERATING';
+                        }
+                    }
+                } else if (this.roadDir === DIR.RIGHT) {
+                    if (this.x > 0) {
+                        this.y += (LANE_WIDTH) * 0.1;
+                        this.x += 2;
+                    } else {
+                        this.y -= this.speed;
+                        this.x -= this.speed;
+                        if (this.x < 0 && this.y < 0) {
+                            this.roadDir = DIR.UP;
+                            this.state = 'ACCELERATING';
+                        }
+                    }
+                }
+            }
+
+            draw() {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                
+                // Rotate based on direction
+                let angle = 0;
+                if (this.roadDir === DIR.UP) angle = 0;
+                if (this.roadDir === DIR.RIGHT) angle = Math.PI / 2;
+                if (this.roadDir === DIR.DOWN) angle = Math.PI;
+                if (this.roadDir === DIR.LEFT) angle = -Math.PI / 2;
+                
+                ctx.rotate(angle);
+
+                // Draw Car Body
+                ctx.fillStyle = this.color;
+                ctx.fillRect(-this.length / 2, -this.width / 2, this.length, this.width);
+                
+                // Draw Windshield
+                ctx.fillStyle = '#111';
+                ctx.fillRect(-this.length / 2 + 5, -this.width / 2 + 2, 8, this.width - 4);
+                ctx.fillRect(this.length / 2 - 8, -this.width / 2 + 2, 5, this.width - 4);
+
+                // Draw Headlights
+                if (this.headlightsOn) {
+                    ctx.fillStyle = 'rgba(255, 255, 200, 0.8)';
+                    ctx.beginPath();
+                    ctx.arc(this.length / 2, -this.width / 2 + 3, 3, 0, Math.PI * 2);
+                    ctx.arc(this.length / 2, this.width / 2 - 3, 3, 0, Math.PI * 2);
+                    ctx.fill();
+                    
+                    // Light Beam (Dusk effect)
+                    ctx.globalCompositeOperation = 'screen';
+                    ctx.fillStyle = 'rgba(255, 255, 200, 0.15)';
+                    ctx.beginPath();
+                    ctx.moveTo(this.length / 2, -this.width / 2 + 3);
+                    ctx.lineTo(this.length / 2 + 100, -this.width * 1.5);
+                    ctx.lineTo(this.length / 2 + 100, this.width * 1.5);
+                    ctx.lineTo(this.length / 2, this.width / 2 - 3);
+                    ctx.fill();
+                    ctx.globalCompositeOperation = 'source-over';
+                }
+
+                // Draw Tail lights
+                ctx.fillStyle = '#f00';
+                ctx.fillRect(-this.length / 2, -this.width / 2 + 2, 2, 4);
+                ctx.fillRect(-this.length / 2, this.width / 2 - 6, 2, 4);
+
+                ctx.restore();
+            }
+        }
+
+        class Pedestrian {
+            constructor() {
+                this.reset();
+                this.x = (Math.random() < 0.5 ? -1 : 1) * (INTERSECTION_SIZE + 20);
+                this.y = (Math.random() < 0.5 ? -1 : 1) * (INTERSECTION_SIZE + 20);
+            }
+
+            reset() {
+                // Pick a crosswalk
+                const side = Math.floor(Math.random() * 4);
+                this.crosswalkSide = side;
+                this.waiting = true;
+                this.waitingTime = 0;
+                
+                if (side === 0) { // Bottom, walking up
+                    this.x = (Math.random() < 0.5 ? -1 : 1) * (INTERSECTION_SIZE + 10);
+                    this.y = INTERSECTION_SIZE + 20;
+                    this.targetY = -INTERSECTION_SIZE - 20;
+                    this.targetX = this.x;
+                    this.dir = DIR.UP;
+                } else if (side === 1) { // Right, walking left
+                    this.x = INTERSECTION_SIZE + 20;
+                    this.y = (Math.random() < 0.5 ? -1 : 1) * (INTERSECTION_SIZE + 10);
+                    this.targetX = -INTERSECTION_SIZE - 20;
+                    this.targetY = this.y;
+                    this.dir = DIR.LEFT;
+                } else if (side === 2) { // Top, walking down
+                    this.x = (Math.random() < 0.5 ? -1 : 1) * (INTERSECTION_SIZE + 10);
+                    this.y = -INTERSECTION_SIZE - 20;
+                    this.targetY = INTERSECTION_SIZE + 20;
+                    this.targetX = this.x;
+                    this.dir = DIR.DOWN;
+                } else { // Left, walking right
+                    this.x = -INTERSECTION_SIZE - 20;
+                    this.y = (Math.random() < 0.5 ? -1 : 1) * (INTERSECTION_SIZE + 10);
+                    this.targetX = INTERSECTION_SIZE + 20;
+                    this.targetY = this.y;
+                    this.dir = DIR.RIGHT;
+                }
+                
+                this.speed = 0.5 + Math.random() * 0.5;
+                this.color = '#fff';
+            }
+
+            update() {
+                // Check if corresponding crosswalk light is green
+                // Pedestrians cross parallel to the road that has GREEN
+                let canCross = false;
+                
+                // Map pedestrian side to road direction
+                // Side 0 (Bottom) crosses UP (parallel to Road DOWN)
+                // Side 1 (Right) crosses LEFT (parallel to Road LEFT)
+                // Side 2 (Top) crosses DOWN (parallel to Road UP)
+                // Side 3 (Left) crosses RIGHT (parallel to Road RIGHT)
+                
+                let roadDirForCrosswalk;
+                if (this.crosswalkSide === 0) roadDirForCrosswalk = DIR.DOWN;
+                if (this.crosswalkSide === 1) roadDirForCrosswalk = DIR.LEFT;
+                if (this.crosswalkSide === 2) roadDirForCrosswalk = DIR.UP;
+                if (this.crosswalkSide === 3) roadDirForCrosswalk = DIR.RIGHT;
+
+                if (lights[roadDirForCrosswalk].state === 'GREEN') {
+                    canCross = true;
+                }
+
+                if (this.waiting) {
+                    if (canCross) {
+                        this.waiting = false;
+                    }
+                    this.waitingTime++;
+                    return;
+                }
+
+                // Move
+                if (this.dir === DIR.UP) this.y -= this.speed;
+                if (this.dir === DIR.DOWN) this.y += this.speed;
+                if (this.dir === DIR.LEFT) this.x -= this.speed;
+                if (this.dir === DIR.RIGHT) this.x += this.speed;
+
+                // Check if reached target
+                let reached = false;
+                if (this.dir === DIR.UP && this.y <= this.targetY) reached = true;
+                if (this.dir === DIR.DOWN && this.y >= this.targetY) reached = true;
+                if (this.dir === DIR.LEFT && this.x <= this.targetX) reached = true;
+                if (this.dir === DIR.RIGHT && this.x >= this.targetX) reached = true;
+
+                if (reached) {
+                    this.reset();
+                }
+            }
+
+            draw() {
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, 4, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Shadow
+                ctx.fillStyle = 'rgba(0,0,0,0.3)';
+                ctx.beginPath();
+                ctx.ellipse(this.x, this.y + 4, 4, 2, 0, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        function init() {
+            resize();
+            window.addEventListener('resize', resize);
+            
+            // Create initial pedestrians
+            for(let i=0; i<10; i++) {
+                pedestrians.push(new Pedestrian());
+            }
+            
+            loop();
+        }
+
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+        }
+
+        function spawnCar() {
+            if (frame < nextCarTime) return;
+            
+            // Pick a random direction
+            const dir = Math.floor(Math.random() * 4);
+            
+            // Check if lane is clear
+            const config = LANE_CONFIG[dir];
+            let clear = true;
+            for(let c of cars) {
+                if (c.roadDir === dir && c.state !== 'TURNING') {
+                    let dist = 0;
+                    if (dir === DIR.UP) dist = c.y - config.y;
+                    if (dir === DIR.DOWN) dist = config.y - c.y;
+                    if (dir === DIR.LEFT) dist = c.x - config.x;
+                    if (dir === DIR.RIGHT) dist = config.x - c.x;
+                    
+                    if (dist < 150) clear = false;
+                }
+            }
+
+            if (clear) {
+                // 10% chance of bus
+                const isBus = Math.random() < 0.1;
+                cars.push(new Car(dir, isBus));
+                // Randomize next spawn time
+                nextCarTime = frame + 60 + Math.random() * 120;
+            }
+        }
+
+        function updateLights() {
+            const cycleTime = 300; // Base cycle
+            const yellowTime = 60;
+            
+            // Determine active phase (0: Up/Down, 1: Left/Right)
+            // Simple logic: alternate every cycleTime, but adjust for queues
+            let phase = Math.floor(frame / cycleTime) % 2;
+            let activeRoads = phase === 0 ? [DIR.UP, DIR.DOWN] : [DIR.LEFT, DIR.RIGHT];
+            let inactiveRoads = phase === 0 ? [DIR.LEFT, DIR.RIGHT] : [DIR.UP, DIR.DOWN];
+
+            // Adjust timing based on queue
+            // If a queue is long, extend green
+            let totalQueue = 0;
+            activeRoads.forEach(d => totalQueue += lights[d].getAverageQueue());
+            
+            let modifiedCycle = cycleTime;
+            if (totalQueue > 2) modifiedCycle += totalQueue * 10;
+
+            let currentPhaseTime = frame % modifiedCycle;
+            
+            // Reset lights
+            lights.forEach(l => l.state = 'RED');
+
+            // Handle Yellow transition
+            let yellowStart = modifiedCycle - yellowTime;
+            
+            if (currentPhaseTime < yellowStart) {
+                // Green for active
+                activeRoads.forEach(d => lights[d].state = 'GREEN');
+            } else {
+                // Yellow for active
+                activeRoads.forEach(d => lights[d].state = 'YELLOW');
+            }
+        }
+
+        function drawEnvironment() {
+            // Background (Grass)
+            ctx.fillStyle = COLORS.grass;
+            ctx.fillRect(0, 0, width, height);
+
+            // Roads
+            ctx.fillStyle = COLORS.road;
+            // Vertical
+            ctx.fillRect(width/2 - ROAD_WIDTH/2, 0, ROAD_WIDTH, height);
+            // Horizontal
+            ctx.fillRect(0, height/2 - ROAD_WIDTH/2, width, ROAD_WIDTH);
+
+            // Center Intersection
+            ctx.fillRect(width/2 - INTERSECTION_SIZE/2, height/2 - INTERSECTION_SIZE/2, INTERSECTION_SIZE, INTERSECTION_SIZE);
+
+            // Markings
+            ctx.strokeStyle = COLORS.roadMarking;
+            ctx.setLineDash([20, 20]);
+            ctx.lineWidth = 2;
+
+            // Vertical Center Line
+            ctx.beginPath();
+            ctx.moveTo(width/2, 0);
+            ctx.lineTo(width/2, height/2 - INTERSECTION_SIZE/2);
+            ctx.moveTo(width/2, height/2 + INTERSECTION_SIZE/2);
+            ctx.lineTo(width/2, height);
+            ctx.stroke();
+
+            // Horizontal Center Line
+            ctx.beginPath();
+            ctx.moveTo(0, height/2);
+            ctx.lineTo(width/2 - INTERSECTION_SIZE/2, height/2);
+            ctx.moveTo(width/2 + INTERSECTION_SIZE/2, height/2);
+            ctx.lineTo(width, height/2);
+            ctx.stroke();
+
+            // Stop Lines
+            ctx.setLineDash([]);
+            ctx.lineWidth = 4;
+            const stopOffset = INTERSECTION_SIZE / 2 + 10;
+            
+            // Top
+            ctx.beginPath(); ctx.moveTo(width/2, height/2 - stopOffset); ctx.lineTo(width/2 - ROAD_WIDTH/2, height/2 - stopOffset); ctx.stroke();
+            // Bottom
+            ctx.beginPath(); ctx.moveTo(width/2, height/2 + stopOffset); ctx.lineTo(width/2 + ROAD_WIDTH/2, height/2 + stopOffset); ctx.stroke();
+            // Left
+            ctx.beginPath(); ctx.moveTo(width/2 - stopOffset, height/2); ctx.lineTo(width/2 - stopOffset, height/2 - ROAD_WIDTH/2); ctx.stroke();
+            // Right
+            ctx.beginPath(); ctx.moveTo(width/2 + stopOffset, height/2); ctx.lineTo(width/2 + stopOffset, height/2 + ROAD_WIDTH/2); ctx.stroke();
+
+            // Crosswalks
+            ctx.fillStyle = 'rgba(255,255,255,0.3)';
+            const cwWidth = 10;
+            const cwLength = ROAD_WIDTH;
+            
+            // Top
+            ctx.fillRect(width/2 - cwLength/2, height/2 - INTERSECTION_SIZE/2 - cwWidth, cwLength, cwWidth);
+            // Bottom
+            ctx.fillRect(width/2 - cwLength/2, height/2 + INTERSECTION_SIZE/2, cwLength, cwWidth);
+            // Left
+            ctx.fillRect(width/2 - INTERSECTION_SIZE/2 - cwWidth, height/2 - cwLength/2, cwWidth, cwLength);
+            // Right
+            ctx.fillRect(width/2 + INTERSECTION_SIZE/2, height/2 - cwLength/2, cwWidth, cwLength);
+            
+            // Sidewalks (around intersection)
+            ctx.fillStyle = COLORS.sidewalk;
+            const sw = 20;
+            const halfInt = INTERSECTION_SIZE/2;
+            // Top Right
+            ctx.fillRect(width/2 + halfInt, height/2 - halfInt, width - width/2 - halfInt + halfInt, sw);
+            // Bottom Right
+            ctx.fillRect(width/2 + halfInt, height/2 + halfInt, width - width/2 - halfInt + halfInt, sw);
+            // Top Left
+            ctx.fillRect(width/2 - halfInt - sw, height/2 - halfInt, sw, halfInt + halfInt);
+            // Bottom Left
+            ctx.fillRect(width/2 - halfInt - sw, height/2 + halfInt, sw, halfInt + halfInt);
+        }
+
+        function drawTrafficLights() {
+            const offset = 40;
+            const size = 10;
+
+            const positions = [
+                { x: width/2 - offset, y: height/2 - offset, dir: DIR.DOWN }, // Top Left (facing South)
+                { x: width/2 + offset, y: height/2 + offset, dir: DIR.UP },   // Bottom Right (facing North)
+                { x: width/2 + offset, y: height/2 - offset, dir: DIR.LEFT }, // Top Right (facing West)
+                { x: width/2 - offset, y: height/2 + offset, dir: DIR.RIGHT } // Bottom Left (facing East)
+            ];
+
+            positions.forEach(p => {
+                // Find corresponding light
+                const light = lights[p.dir];
+                
+                // Draw Housing
+                ctx.fillStyle = '#222';
+                ctx.fillRect(p.x - 5, p.y - 15, 10, 30);
+                
+                // Draw Lights
+                const colors = {
+                    'RED': '#ff0000',
+                    'YELLOW': '#ffff00',
+                    'GREEN': '#00ff00'
+                };
+                
+                // Background for off lights
+                ctx.fillStyle = '#333';
+                ctx.beginPath(); ctx.arc(p.x, p.y - 10, 3, 0, Math.PI*2); ctx.fill();
+                ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI*2); ctx.fill();
+                ctx.beginPath(); ctx.arc(p.x, p.y + 10, 3, 0, Math.PI*2); ctx.fill();
+
+                // Active light
+                ctx.shadowBlur = 10;
+                ctx.fillStyle = colors[light.state];
+                ctx.beginPath(); ctx.arc(p.x, p.y - 10, 3, 0, Math.PI*2); ctx.fill(); // Top
+                ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI*2); ctx.fill();     // Middle
+                ctx.beginPath(); ctx.arc(p.x, p.y + 10, 3, 0, Math.PI*2); ctx.fill(); // Bottom
+                ctx.shadowBlur = 0;
+            });
+        }
+
+        function loop() {
+            frame++;
+            
+            // Clear
+            ctx.clearRect(0, 0, width, height);
+
+            // Update Logic
+            updateLights();
+            spawnCar();
+            
+            // Update Cars
+            for (let i = cars.length - 1; i >= 0; i--) {
+                cars[i].update();
+                // Remove cars that are too far off screen
+                if (cars[i].x < -500 || cars[i].x > width + 500 || cars[i].y < -500 || cars[i].y > height + 500) {
+                    cars.splice(i, 1);
+                }
+            }
+
+            // Update Pedestrians
+            pedestrians.forEach(p => p.update());
+
+            // Draw
+            drawEnvironment();
+            
+            // Draw Pedestrians
+            pedestrians.forEach(p => p.draw());
+
+            // Draw Cars
+            cars.forEach(c => c.draw());
+
+            // Draw Traffic Lights (Overlay)
+            drawTrafficLights();
+
+            // Dusk Overlay
+            ctx.fillStyle = 'rgba(0, 0, 20, 0.3)';
+            ctx.fillRect(0, 0, width, height);
+
+            requestAnimationFrame(loop);
+        }
+
+        init();
+    </script>
+</body>
+</html>

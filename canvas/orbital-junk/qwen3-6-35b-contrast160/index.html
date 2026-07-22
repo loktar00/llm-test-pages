@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width-scale=1.0">
+    <title>Orbital Junk</title>
+    <style>
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #050508; }
+        canvas { display: block; width: 100%; height: 100%; }
+    </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(() => {
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    let W, H, CX, CY;
+    
+    // Config
+    const MAX_SATELLITES = 250;
+    const NUM_RINGS = 10;
+    const SATELLITES_PER_RING = 25;
+    const DRONE_COUNT = 3;
+    const FRICTION = 0.998;
+    const COLLISION_SPAWN = 5;
+    
+    // State
+    let satellites = [];
+    let drones = [];
+    let particles = [];
+    let stars = [];
+
+    function resize() {
+        W = canvas.width = window.innerWidth;
+        H = canvas.height = window.innerHeight;
+        CX = W * 0.15;
+        CY = H * 0.85;
+        generateStars();
+    }
+
+    function generateStars() {
+        stars = [];
+        for(let i=0; i<200; i++) {
+            stars.push({
+                x: Math.random() * W,
+                y: Math.random() * H,
+                size: Math.random() * 1.5,
+                alpha: Math.random()
+            });
+        }
+    }
+
+    class Satellite {
+        constructor(ringIndex, isDebris = false) {
+            this.ringIndex = ringIndex;
+            this.isDebris = isDebris;
+            this.alive = true;
+            
+            // Orbital Mechanics
+            // Inner rings (smaller radius) move faster
+            const minR = Math.min(W, H) * 0.1;
+            const maxR = Math.min(W, H) * 0.45;
+            const radius = minR + (maxR - minR) * (ringIndex / NUM_RINGS);
+            
+            this.radius = radius;
+            this.angle = Math.random() * Math.PI * 2;
+            
+            // Kepler-ish: v ~ 1/sqrt(r). Angular velocity w = v/r ~ 1/r^1.5
+            const speedFactor = 0.0005; 
+            this.speed = speedFactor / Math.pow(this.radius, 0.5) * (W/1000); 
+            
+            // Inheritance/Perturbation for debris
+            this.angleOffset = Math.random() * 0.1; // slight deviation
+            this.size = isDebris ? 1.5 + Math.random() * 2 : 2 + Math.random() * 3;
+            this.color = isDebris ? '#aaddff' : '#ffffff';
+            if(!isDebris && Math.random() > 0.8) this.color = '#ffaa55'; // Solar panel glint
+            
+            this.lastX = 0;
+            this.lastY = 0;
+            this.updatePos();
+        }
+
+        updatePos() {
+            this.lastX = this.x;
+            this.lastY = this.y;
+            this.x = CX + Math.cos(this.angle) * this.radius;
+            this.y = CY + Math.sin(this.angle) * this.radius;
+        }
+
+        update() {
+            this.angle += this.speed;
+            this.updatePos();
+        }
+
+        draw() {
+            // Trail
+            ctx.beginPath();
+            ctx.moveTo(this.lastX, this.lastY);
+            ctx.lineTo(this.x, this.y);
+            ctx.strokeStyle = this.color;
+            ctx.lineWidth = 1;
+            ctx.globalAlpha = 0.3;
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+
+            // Sprite
+            ctx.fillStyle = this.color;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.size, 0, Math.PI*2);
+            ctx.fill();
+            
+            // Glint (glint)
+            if (Math.random() > 0.95) {
+                ctx.fillStyle = '#fff';
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size * 2, 0, Math.PI*2);
+                ctx.fill();
+            }
+        }
+    }
+
+    class Drone {
+        constructor() {
+            this.x = Math.random() * W;
+            this.y = Math.random() * H;
+            this.speed = 2.5;
+            this.target = null;
+        }
+
+        update() {
+            // Find nearest debris
+            let minDist = Infinity;
+            this.target = null;
+            
+            // Prioritize debris over normal satellites
+            const targets = satellites.filter(s => s.isDebris || s.size < 2);
+            
+            if (targets.length === 0) return;
+
+            for (let s of targets) {
+                const d = Math.hypot(s.x - this.x, s.y - this.y);
+                if (d < minDist) {
+                    minDist = d;
+                    this.target = s;
+                }
+            }
+
+            if (this.target) {
+                const dx = this.target.x - this.x;
+                const dy = this.target.y - this.y;
+                const dist = Math.hypot(dx, dy);
+                
+                this.x += (dx / dist) * this.speed;
+                this.y += (dy / dist) * this.speed;
+
+                if (dist < 10) {
+                    // Destroy target
+                    createExplosion(this.target.x, this.target.y, this.target.color, 5);
+                    const idx = satellites.indexOf(this.target);
+                    if (idx > -1) satellites.splice(idx, 1);
+                    
+                    // Reset drone
+                    this.x = Math.random() * W;
+                    this.y = Math.random() * H;
+                }
+            } else {
+                // Idle movement
+                this.x += (Math.random() - 0.5) * 2;
+                this.y += (Math.random() - 0.5) * 2;
+            }
+        }
+
+        draw() {
+            ctx.fillStyle = '#00ffaa';
+            ctx.beginPath();
+            ctx.moveTo(this.x + 5, this.y);
+            ctx.lineTo(this.x - 5, this.y - 3);
+            ctx.lineTo(this.x - 5, this.y + 3);
+            ctx.fill();
+            
+            // Engine trail
+            ctx.strokeStyle = 'rgba(0, 255, 170, 0.2)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(this.x, this.y);
+            ctx.lineTo(this.x - (Math.random()*10), this.y - (Math.random()*10));
+            ctx.stroke();
+        }
+    }
+
+    class Particle {
+        constructor(x, y, color) {
+            this.x = x;
+            this.y = y;
+            this.vx = (Math.random() - 0.5) * 4;
+            this.vy = (Math.random() - 0.5) * 4;
+            this.life = 1.0;
+            this.decay = 0.01 + Math.random() * 0.02;
+            this.color = color;
+            this.size = Math.random() * 2;
+        }
+
+        update() {
+            this.x += this.vx;
+            this.y += this.vy;
+            this.life -= this.decay;
+        }
+
+        draw() {
+            ctx.fillStyle = this.color;
+            ctx.globalAlpha = this.life;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.size, 0, Math.PI*2);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+        }
+    }
+
+    function createExplosion(x, y, color, count) {
+        for(let i=0; i<count; i++) {
+            particles.push(new Particle(x, y, color));
+        }
+    }
+
+    function init() {
+        resize();
+        window.addEventListener('resize', resize);
+        
+        // Init Rings
+        for(let i=0; i<NUM_RINGS; i++) {
+            for(let j=0; j<SATELLITES_PER_RING; j++) {
+                satellites.push(new Satellite(i));
+            }
+        }
+        
+        // Init Drones
+        for(let i=0; i<DRONE_COUNT; i++) {
+            drones.push(new Drone());
+        }
+
+        loop();
+    }
+
+    function drawEarth() {
+        // Atmosphere glow
+        const grad = ctx.createRadialGradient(CX, CY, Math.min(W,H)*0.05, CX, CY, Math.min(W,H)*0.15);
+        grad.addColorStop(0, '#00aaff');
+        grad.addColorStop(1, 'rgba(0, 170, 255, 0)');
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(CX, CY, Math.min(W,H)*0.15, 0, Math.PI*2);
+        ctx.fill();
+
+        // Planet Body
+        ctx.fillStyle = '#051020';
+        ctx.beginPath();
+        ctx.arc(CX, CY, Math.min(W,H)*0.08, 0, Math.PI*2);
+        ctx.fill();
+        
+        // Simple continents (abstract)
+        ctx.fillStyle = '#1a4a2a';
+        ctx.beginPath();
+        ctx.arc(CX - 10, CY - 10, 15, 0, Math.PI*2);
+        ctx.arc(CX + 20, CY + 10, 20, 0, Math.PI*2);
+        ctx.fill();
+    }
+
+    function drawOrbits() {
+        const minR = Math.min(W, H) * 0.1;
+        const maxR = Math.min(W, H) * 0.45;
+        
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+        ctx.lineWidth = 1;
+        
+        for(let i=0; i<NUM_RINGS; i++) {
+            const r = minR + (maxR - minR) * (i / NUM_RINGS);
+            ctx.beginPath();
+            ctx.arc(CX, CY, r, 0, Math.PI*2);
+            ctx.stroke();
+        }
+    }
+
+    function loop() {
+        // Clear with trail effect
+        ctx.fillStyle = 'rgba(5, 5, 8, 0.3)';
+        ctx.fillRect(0, 0, W, H);
+
+        // Draw Stars
+        ctx.fillStyle = '#fff';
+        stars.forEach(s => {
+            ctx.globalAlpha = s.alpha * Math.random();
+            ctx.beginPath();
+            ctx.arc(s.x, s.y, s.size, 0, Math.PI*2);
+            ctx.fill();
+        });
+        ctx.globalAlpha = 1;
+
+        drawEarth();
+        drawOrbits();
+
+        // Update & Draw Satellites
+        for (let i = satellites.length - 1; i >= 0; i--) {
+            const s = satellites[i];
+            s.update();
+            s.draw();
+            
+            // Collision Check (Optimized: only check nearby rings or random subset for perf)
+            // Since we need collisions, we check against a subset of other objects
+            if (i > 0 && Math.random() < 0.1) { // Check 10% of pairs per frame to prevent O(N^2) spikes
+                const other = satellites[i-1]; // Check neighbor in array
+                if (s !== other) {
+                    const dist = Math.hypot(s.x - other.x, s.y - other.y);
+                    if (dist < s.size + other.size + 2) {
+                        // Collision!
+                        createExplosion((s.x+other.x)/2, (s.y+other.y)/2, '#ffaa00', COLLISION_SPAWN);
+                        
+                        // Remove both
+                        satellites.splice(i, 1);
+                        satellites.splice(i > satellites.length ? i-1 : i, 1);
+                        
+                        // Spawn debris
+                        const newRing = Math.max(0, s.ringIndex - 1 + Math.floor(Math.random()*3));
+                        for(let k=0; k<3; k++) {
+                            satellites.push(new Satellite(newRing, true));
+                        }
+                        break; // Break inner loop logic
+                    }
+                }
+            }
+        }
+
+        // Update & Draw Drones
+        drones.forEach(d => {
+            d.update();
+            d.draw();
+        });
+
+        // Update & Draw Particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+            const p = particles[i];
+            p.update();
+            p.draw();
+            if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        // Maintain population (resupply)
+        if (satellites.length < MAX_SATELLITES) {
+            const r = Math.floor(Math.random() * NUM_RINGS);
+            satellites.push(new Satellite(r));
+        }
+
+        requestAnimationFrame(loop);
+    }
+
+    init();
+})();
+</script>
+</body>
+</html>

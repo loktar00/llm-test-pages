@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width=device-width, initial-scale=1.0">
+    <title>Game of Life Factory</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #050505;
+            overflow: hidden;
+            font-family: monospace;
+        }
+        canvas {
+            display: block;
+        }
+        #ui {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: #444;
+            font-size: 12px;
+            pointer-events: none;
+            user-select: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="ui">Fps: <span id="fps">60</span> | Gen: <span id="gen">0</span></div>
+    <canvas id="canvas"></canvas>
+
+    <script>
+        // --- Configuration ---
+        const CELL_SIZE = 4;
+        const FADE_SPEED = 0.015; // How fast cells fade to black
+        const WAKEUP_SPEED = 0.05; // How fast cells fade to white
+        const RESTART_THRESHOLD = 0.01; // Activity threshold to trigger wipe
+        
+        // Colors for "Glow" effect
+        const COLOR_FRESH = { r: 0, g: 255, b: 255 }; // Cyan
+        const COLOR_OLD = { r: 0, g: 50, b: 100 };    // Deep Blue
+        
+        // --- Setup ---
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d', { alpha: false });
+        const fpsEl = document.getElementById('fps');
+        const genEl = document.getElementById('gen');
+
+        let width, height;
+        let cols, rows;
+        let grid, nextGrid, ages; // ages stores "youth" 0.0 to 1.0
+        let isWiping = false;
+        let wipeX = 0;
+        let generation = 0;
+        let lastTime = 0;
+        let frameCount = 0;
+        let lastFpsTime = 0;
+
+        // Offscreen canvas for gradient optimization
+        const gradientCanvas = document.createElement('canvas');
+        const gradientCtx = gradientCanvas.getContext('2d');
+        
+        // --- Initialization ---
+        function init() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+
+            cols = Math.ceil(width / CELL_SIZE);
+            rows = Math.ceil(height / CELL_SIZE);
+
+            // Initialize grids
+            grid = new Uint8Array(cols * rows);
+            nextGrid = new Uint8Array(cols * rows);
+            ages = new Float32Array(cols * rows);
+
+            // Generate Gradient Image for cell rendering
+            generateGradient();
+
+            seedFactory();
+        }
+
+        function generateGradient() {
+            // Create a 1x256 gradient to sample later
+            const grad = gradientCtx.createLinearGradient(0, 0, 0, 255);
+            grad.addColorStop(0, `rgb(${COLOR_FRESH.r},${COLOR_FRESH.g},${COLOR_FRESH.b})`);
+            grad.addColorStop(1, `rgb(${COLOR_OLD.r},${COLOR_OLD.g},${COLOR_OLD.b})`);
+            gradientCanvas.width = 1;
+            gradientCanvas.height = 256;
+            gradientCtx.fillStyle = grad;
+            gradientCtx.fillRect(0, 0, 1, 256);
+        }
+
+        // --- Pattern Definitions ---
+        function setCell(x, y, val) {
+            if (x >= 0 && x < cols && y >= 0 && y < rows) {
+                grid[y * cols + x] = val;
+                ages[y * cols + x] = 1.0;
+            }
+        }
+
+        function drawBlock(cx, cy) {
+            setCell(cx, cy, 1); setCell(cx+1, cy, 1);
+            setCell(cx, cy+1, 1); setCell(cx+1, cy+1, 1);
+        }
+
+        function drawGlider(cx, cy) {
+            setCell(cx+1, cy, 1);
+            setCell(cx+2, cy+1, 1);
+            setCell(cx, cy+2, 1); setCell(cx+1, cy+2, 1); setCell(cx+2, cy+2, 1);
+        }
+
+        // Glider Gun (LWSS)
+        function drawGun(cx, cy) {
+            setCell(cx+0, cy+0, 1); setCell(cx+4, cy+0, 1);
+            setCell(cx+0, cy+1, 1); setCell(cx+4, cy+1, 1);
+            setCell(cx+1, cy+2, 1); setCell(cx+4, cy+2, 1);
+            setCell(cx+2, cy+3, 1); setCell(cx+4, cy+3, 1);
+            setCell(cx+1, cy+4, 1); setCell(cx+4, cy+4, 1);
+            setCell(cx+2, cy+5, 1); setCell(cx+4, cy+5, 1);
+            setCell(cx+3, cy+6, 1); setCell(cx+3, cy+6, 1);
+            setCell(cx+3, cy+7, 1); setCell(cx+3, cy+7, 1);
+            setCell(cx+3, cy+8, 1); setCell(cx+4, cy+8, 1);
+            setCell(cx+4, cy+9, 1); setCell(cx+4, cy+9, 1);
+            setCell(cx+5, cy+10, 1);
+            setCell(cx+6, cy+0, 1); setCell(cx+6, cy+4, 1);
+            setCell(cx+6, cy+1, 1); setCell(cx+6, cy+5, 1);
+            setCell(cx+5, cy+2, 1); setCell(cx+7, cy+2, 1);
+            setCell(cx+4, cy+3, 1); setCell(cx+8, cy+3, 1);
+            setCell(cx+5, cy+4, 1); setCell(cx+7, cy+4, 1);
+            setCell(cx+6, cy+5, 1);
+            setCell(cx+7, cy+6, 1);
+            setCell(cx+8, cy+7, 1);
+        }
+
+        function seedFactory() {
+            grid.fill(0);
+            ages.fill(0);
+            generation = 0;
+
+            // Central "Gardens"
+            // Left Gun
+            drawGun(50, 50);
+            // Right Gun
+            drawGun(width - 300, 50);
+            // Bottom Center
+            drawGun(50, height - 300);
+            drawGun(width - 300, height - 300);
+
+            // Random debris
+            for(let i=0; i<200; i++) {
+                let x = Math.floor(Math.random() * cols);
+                let y = Math.floor(Math.random() * rows);
+                drawBlock(x, y);
+            }
+        }
+
+        function triggerWipe() {
+            isWiping = true;
+            wipeX = 0;
+        }
+
+        // --- Logic ---
+        function update() {
+            if (isWiping) {
+                wipeX += (cols * CELL_SIZE) / 60; // 1 second wipe
+                if (wipeX > width) {
+                    seedFactory();
+                    isWiping = false;
+                }
+                return;
+            }
+
+            let activeCells = 0;
+
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    const idx = y * cols + x;
+                    
+                    // Count Neighbors (Wrap)
+                    let neighbors = 0;
+                    for (let dy = -1; dy <= 1; dy++) {
+                        for (let dx = -1; dx <= 1; dx++) {
+                            if (dx === 0 && dy === 0) continue;
+                            const nx = (x + dx + cols) % cols;
+                            const ny = (y + dy + rows) % rows;
+                            neighbors += grid[ny * cols + nx];
+                        }
+                    }
+
+                    const state = grid[idx];
+                    
+                    // Rules
+                    if (state === 1) {
+                        if (neighbors < 2 || neighbors > 3) {
+                            nextGrid[idx] = 0; // Dies
+                        } else {
+                            nextGrid[idx] = 1; // Lives
+                        }
+                    } else {
+                        if (neighbors === 3) {
+                            nextGrid[idx] = 1; // Born
+                        } else {
+                            nextGrid[idx] = 0;
+                        }
+                    }
+
+                    // Age Logic
+                    if (nextGrid[idx] === 1) {
+                        ages[idx] = Math.min(ages[idx] + WAKEUP_SPEED, 1.0);
+                        activeCells++;
+                    } else {
+                        ages[idx] = Math.max(ages[idx] - FADE_SPEED, 0.0);
+                    }
+                }
+            }
+
+            // Swap buffers
+            let temp = grid;
+            grid = nextGrid;
+            nextGrid = temp;
+
+            generation++;
+
+            // Check threshold
+            if (activeCells < cols * rows * RESTART_THRESHOLD && generation > 1000) {
+                triggerWipe();
+            }
+        }
+
+        function draw() {
+            // Clear Background
+            ctx.fillStyle = '#050505';
+            ctx.fillRect(0, 0, width, height);
+
+            // Draw Wipe
+            if (isWiping) {
+                ctx.fillStyle = '#000000';
+                ctx.fillRect(0, 0, wipeX, height);
+            }
+
+            // Draw Cells
+            // Optimization: Use getImageData for pixel manipulation or fillRect for large cells
+            // Since we use a gradient, fillRect is cleaner code-wise.
+            
+            const imgData = gradientCtx.getImageData(0, 0, 1, 256);
+            const pixels = imgData.data;
+
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    const idx = y * cols + x;
+                    const age = ages[idx];
+                    
+                    if (age > 0.01) {
+                        // Map age 0..1 to 0..255
+                        const colorIdx = Math.floor(age * 255);
+                        const r = pixels[colorIdx * 4];
+                        const g = pixels[colorIdx * 4 + 1];
+                        const b = pixels[colorIdx * 4 + 2];
+
+                        ctx.fillStyle = `rgb(${r},${g},${b})`;
+                        ctx.fillRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+                    }
+                }
+            }
+        }
+
+        function loop(timestamp) {
+            const dt = timestamp - lastTime;
+            lastTime = timestamp;
+
+            // FPS Counter
+            frameCount++;
+            if (timestamp - lastFpsTime > 500) {
+                fpsEl.innerText = Math.round(1000 / ((timestamp - lastFpsTime) / frameCount));
+                genEl.innerText = generation;
+                frameCount = 0;
+                lastFpsTime = timestamp;
+            }
+
+            update();
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        // --- Events ---
+        window.addEventListener('resize', () => {
+            init();
+        });
+
+        // Click to restart
+        window.addEventListener('click', () => {
+            seedFactory();
+        });
+
+        // Start
+        init();
+        requestAnimationFrame(loop);
+
+    </script>
+</body>
+</html>

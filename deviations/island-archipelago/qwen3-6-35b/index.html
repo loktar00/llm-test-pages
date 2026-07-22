@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Procedural Archipelago</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="world"></canvas>
+    <script>
+        const canvas = document.getElementById('world');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let islands = [];
+        let ships = [];
+        let time = 0;
+        let dayCycle = 0;
+        const DAY_SPEED = 0.0005;
+        const ISLAND_SPAWN_RATE = 120; // Frames between islands
+
+        // Colors
+        const DEEP_WATER = '#001e36';
+        const SHALLOW_WATER = '#004e75';
+        const SAND = '#e6c288';
+        const GRASS = '#4caf50';
+        const FOREST = '#2e7d32';
+        const MOUNTAIN = '#5d4037';
+        const SNOW = '#ffffff';
+        const SKY_TOP = '#1a237e';
+        const SKY_BOTTOM = '#ffcc80';
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        class Island {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.radius = 40 + Math.random() * 80;
+                this.points = [];
+                this.growth = 0;
+                this.maxGrowth = 100;
+                this.growthSpeed = 0.5 + Math.random() * 0.5;
+                
+                // Generate shape using polar coordinates with noise
+                const numPoints = 20 + Math.floor(Math.random() * 10);
+                for (let i = 0; i < numPoints; i++) {
+                    const angle = (i / numPoints) * Math.PI * 2;
+                    // Base radius + noise
+                    const r = this.radius + (Math.random() - 0.5) * (this.radius * 0.6);
+                    this.points.push({
+                        angle: angle,
+                        r: r,
+                        baseR: r
+                    });
+                }
+            }
+
+            update() {
+                if (this.growth < this.maxGrowth) {
+                    this.growth += this.growthSpeed;
+                    // Animate radius expansion
+                    const ratio = this.growth / this.maxGrowth;
+                    this.points.forEach(p => {
+                        p.r = p.baseR * ratio;
+                    });
+                }
+            }
+
+            draw(ctx, dayTint) {
+                if (this.growth <= 0) return;
+
+                ctx.save();
+                ctx.translate(this.x, this.y);
+
+                // Draw Water (Shoreline)
+                ctx.beginPath();
+                this.points.forEach((p, i) => {
+                    const px = Math.cos(p.angle) * p.r;
+                    const py = Math.sin(p.angle) * p.r;
+                    if (i === 0) ctx.moveTo(px, py);
+                    else ctx.lineTo(px, py);
+                });
+                ctx.closePath();
+                
+                // Wet sand/shallow water ring
+                ctx.fillStyle = '#87CEEB'; 
+                ctx.fill();
+
+                // Draw Island Shape
+                ctx.beginPath();
+                this.points.forEach((p, i) => {
+                    const px = Math.cos(p.angle) * p.r;
+                    const py = Math.sin(p.angle) * p.r;
+                    if (i === 0) ctx.moveTo(px, py);
+                    else ctx.lineTo(px, py);
+                });
+                ctx.closePath();
+
+                // Gradient Fill based on heightmap simulation (distance from center)
+                const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, this.radius);
+                grad.addColorStop(0, dayTint(SNOW));
+                grad.addColorStop(0.3, dayTint(MOUNTAIN));
+                grad.addColorStop(0.6, dayTint(GRASS));
+                grad.addColorStop(0.8, dayTint(SAND));
+                grad.addColorStop(1, dayTint(SAND));
+                
+                ctx.fillStyle = grad;
+                ctx.fill();
+
+                // Draw Foam Animation
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                const foamOffset = time * 2;
+                this.points.forEach((p, i) => {
+                    // Add sine wave to radius for foam effect
+                    const wave = Math.sin((p.angle * 10) + foamOffset) * 2;
+                    const px = Math.cos(p.angle) * (p.r + wave);
+                    const py = Math.sin(p.angle) * (p.r + wave);
+                    if (i === 0) ctx.moveTo(px, py);
+                    else ctx.lineTo(px, py);
+                });
+                ctx.closePath();
+                ctx.stroke();
+
+                ctx.restore();
+            }
+        }
+
+        class Ship {
+            constructor(startIsland, endIsland) {
+                this.start = { x: startIsland.x, y: startIsland.y };
+                this.end = { x: endIsland.x, y: endIsland.y };
+                this.progress = 0;
+                this.speed = 0.002 + Math.random() * 0.002;
+                this.wake = [];
+                this.active = true;
+            }
+
+            update() {
+                this.progress += this.speed;
+                if (this.progress >= 1) {
+                    this.active = false;
+                }
+
+                // Linear interpolation
+                const x = this.start.x + (this.end.x - this.start.x) * this.progress;
+                const y = this.start.y + (this.end.y - this.start.y) * this.progress;
+
+                // Store wake history
+                this.wake.push({ x, y, age: 0 });
+                if (this.wake.length > 20) this.wake.shift();
+
+                // Age wake
+                this.wake.forEach(p => p.age++);
+            }
+
+            draw(ctx) {
+                if (!this.active) return;
+
+                // Draw Wake
+                ctx.beginPath();
+                for (let i = 0; i < this.wake.length - 1; i++) {
+                    const p = this.wake[i];
+                    const alpha = 1 - (p.age / 20);
+                    ctx.strokeStyle = `rgba(255, 255, 255, ${alpha * 0.5})`;
+                    ctx.lineWidth = 2;
+                    ctx.moveTo(p.x, p.y);
+                    ctx.lineTo(this.wake[i+1].x, this.wake[i+1].y);
+                }
+                ctx.stroke();
+
+                // Draw Ship
+                const x = this.start.x + (this.end.x - this.start.x) * this.progress;
+                const y = this.start.y + (this.end.y - this.start.y) * this.progress;
+                
+                ctx.fillStyle = '#3e2723';
+                ctx.beginPath();
+                ctx.moveTo(x, y - 5);
+                ctx.lineTo(x + 8, y + 5);
+                ctx.lineTo(x - 8, y + 5);
+                ctx.fill();
+                
+                // Sail
+                ctx.fillStyle = '#fff';
+                ctx.beginPath();
+                ctx.moveTo(x, y - 5);
+                ctx.lineTo(x, y - 15);
+                ctx.lineTo(x + 6, y - 5);
+                ctx.fill();
+            }
+        }
+
+        function getDayTint() {
+            // Cycle: 0 to 1 represents a full day
+            const t = dayCycle % 1;
+            
+            // Simple gradient stops for sky
+            let r1, g1, b1, r2, g2, b2;
+
+            if (t < 0.2) { // Night
+                r1=10; g1=10; b1=40; r2=20; g2=20; b2=60;
+            } else if (t < 0.3) { // Dawn
+                const p = (t - 0.2) / 0.1;
+                r1 = lerp(10, 255, p); g1 = lerp(10, 100, p); b1 = lerp(40, 50, p);
+                r2 = lerp(20, 200, p); g2 = lerp(20, 150, p); b2 = lerp(60, 100, p);
+            } else if (t < 0.8) { // Day
+                r1=100; g1=150; b1=255; r2=200; g2=220; b2=255;
+            } else if (t < 0.9) { // Dusk
+                const p = (t - 0.8) / 0.1;
+                r1 = lerp(100, 200, p); g1 = lerp(150, 50, p); b1 = lerp(255, 50, p);
+                r2 = lerp(200, 100, p); g2 = lerp(220, 30, p); b2 = lerp(255, 50, p);
+            } else { // Night
+                r1=10; g1=10; b1=40; r2=20; g2=20; b2=60;
+            }
+
+            return (colorStr) => {
+                // Parse hex to rgb, tint, return hex
+                // Simplified: just return a tinted version of the base color
+                // For this demo, we will just tint the sky and ocean. 
+                // Island colors will be drawn with a slight overlay of the day color.
+                return null; // Logic handled in main draw loop for simplicity
+            };
+        }
+
+        function lerp(a, b, t) { return a + (b - a) * t; }
+
+        function drawSky(tint) {
+            const grad = ctx.createLinearGradient(0, 0, 0, height);
+            
+            // Calculate tint colors based on time
+            const t = dayCycle % 1;
+            let skyTop, skyBottom;
+
+            if (t < 0.2) { // Night
+                skyTop = '#050510';
+                skyBottom = '#1a1a2e';
+            } else if (t < 0.3) { // Dawn
+                const p = (t - 0.2) / 0.1;
+                skyTop = `rgb(${lerp(5, 100, p)}, ${lerp(5, 150, p)}, ${lerp(16, 255, p)})`;
+                skyBottom = `rgb(${lerp(26, 255, p)}, ${lerp(26, 200, p)}, ${lerp(46, 150, p)})`;
+            } else if (t < 0.8) { // Day
+                skyTop = '#4a90e2';
+                skyBottom = '#87CEEB';
+            } else if (t < 0.9) { // Dusk
+                const p = (t - 0.8) / 0.1;
+                skyTop = `rgb(${lerp(100, 50, p)}, ${lerp(150, 5, p)}, ${lerp(255, 16, p)})`;
+                skyBottom = `rgb(${lerp(200, 200, p)}, ${lerp(220, 50, p)}, ${lerp(255, 50, p)})`;
+            } else { // Night
+                skyTop = '#050510';
+                skyBottom = '#1a1a2e';
+            }
+
+            grad.addColorStop(0, skyTop);
+            grad.addColorStop(1, skyBottom);
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, width, height);
+        }
+
+        function drawOcean() {
+            const t = dayCycle % 1;
+            let waterColor;
+            if (t < 0.2 || t > 0.9) waterColor = '#001e36'; // Deep night
+            else if (t > 0.3 && t < 0.8) waterColor = '#006994'; // Day
+            else waterColor = '#004e75'; // Transition
+
+            ctx.fillStyle = waterColor;
+            // Draw subtle waves
+            ctx.fillRect(0, 0, width, height);
+            
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+            ctx.lineWidth = 1;
+            for (let i = 0; i < 10; i++) {
+                ctx.beginPath();
+                const y = (i * height / 10) + Math.sin(time * 0.01 + i) * 10;
+                ctx.moveTo(0, y);
+                ctx.bezierCurveTo(width/3, y + 20, width*2/3, y - 20, width, y);
+                ctx.stroke();
+            }
+        }
+
+        function spawnShip() {
+            if (islands.length < 2) return;
+            const i1 = islands[Math.floor(Math.random() * islands.length)];
+            let i2 = islands[Math.floor(Math.random() * islands.length)];
+            while (i1 === i2) {
+                i2 = islands[Math.floor(Math.random() * islands.length)];
+            }
+            ships.push(new Ship(i1, i2));
+        }
+
+        function loop() {
+            time++;
+            dayCycle += DAY_SPEED;
+
+            // Clear and Draw Sky
+            drawSky();
+            
+            // Draw Ocean Base
+            drawOcean();
+
+            // Spawn Islands
+            if (time % ISLAND_SPAWN_RATE === 0) {
+                const x = Math.random() * width;
+                const y = Math.random() * height;
+                islands.push(new Island(x, y));
+            }
+
+            // Spawn Ships
+            if (time % 300 === 0 && islands.length > 1) {
+                spawnShip();
+            }
+
+            // Update and Draw Islands
+            islands.forEach(island => {
+                island.update();
+                island.draw(ctx, (color) => {
+                    // Apply day tint to island colors
+                    // This is a simplified tinting for the demo
+                    return color; 
+                });
+            });
+
+            // Update and Draw Ships
+            ships.forEach(ship => {
+                ship.update();
+                ship.draw(ctx);
+            });
+            ships = ships.filter(s => s.active);
+
+            requestAnimationFrame(loop);
+        }
+
+        loop();
+    </script>
+</body>
+</html>

@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ragdoll Dojo</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #1a1a1a;
+            font-family: 'Courier New', Courier, monospace;
+        }
+        canvas {
+            display: block;
+        }
+        #ui {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: rgba(255, 255, 255, 0.5);
+            pointer-events: none;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div id="ui">RAGDOLL DOJO // AUTO-PHYSICS // NO INPUT</div>
+    <canvas id="dojo"></canvas>
+    <script>
+        /**
+         * RAGDOLL DOJO
+         * A Verlet Integration Physics Engine
+         */
+
+        const canvas = document.getElementById('dojo');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let particles = [];
+        let constraints = [];
+        let obstacles = [];
+        let particlesToDissolve = []; // Particles that have settled and are fading out
+
+        // Physics Configuration
+        const GRAVITY = 0.5;
+        const FRICTION = 0.99;
+        const BOUNCE = 0.7;
+        const GROUND_Y_OFFSET = 50;
+        const ITERATIONS = 5; // Constraint solver iterations
+        
+        // Visual Configuration
+        const LINE_WIDTH = 4;
+        const JOINT_RADIUS = 4;
+        const PALE_COLOR = '#e0e0e0';
+        const DISSOLVE_COLOR = 'rgba(255, 255, 255, 0)';
+        const TRAMPOLINE_COLOR = '#ff4757';
+        const WOOD_COLOR = '#8d6e63';
+        
+        // State
+        let lastTime = 0;
+        let slowMotionFactor = 1.0;
+        let nextDropTime = 0;
+        let collisionEvents = []; // {x, y, intensity}
+
+        // Resize Handler
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            generateObstacles();
+        }
+        window.addEventListener('resize', resize);
+
+        // --- Vector Math Helpers ---
+        const Vec2 = {
+            add: (v1, v2) => ({ x: v1.x + v2.x, y: v1.y + v2.y }),
+            sub: (v1, v2) => ({ x: v1.x - v2.x, y: v1.y - v2.y }),
+            mul: (v, s) => ({ x: v.x * s, y: v.y * s }),
+            len: (v) => Math.sqrt(v.x * v.x + v.y * v.y),
+            norm: (v) => {
+                const l = Math.sqrt(v.x * v.x + v.y * v.y);
+                return l === 0 ? { x: 0, y: 0 } : { x: v.x / l, y: v.y / l };
+            },
+            dist: (v1, v2) => Math.sqrt((v1.x - v2.x) ** 2 + (v1.y - v2.y) ** 2)
+        };
+
+        // --- Classes ---
+
+        class Particle {
+            constructor(x, y, mass = 1, isFixed = false) {
+                this.x = x;
+                this.y = y;
+                this.oldX = x;
+                this.oldY = y;
+                this.mass = mass;
+                this.isFixed = isFixed;
+                this.color = PALE_COLOR;
+                this.alpha = 1;
+                this.dissolving = false;
+                this.dissolveTimer = 0;
+            }
+
+            update() {
+                if (this.isFixed) return;
+
+                const vx = (this.x - this.oldX) * FRICTION;
+                const vy = (this.y - this.oldY) * FRICTION;
+
+                this.oldX = this.x;
+                this.oldY = this.y;
+
+                this.x += vx * slowMotionFactor;
+                this.y += (vy + GRAVITY) * slowMotionFactor;
+
+                // Dissolve Logic
+                if (this.dissolving) {
+                    this.dissolveTimer += 0.02 * slowMotionFactor;
+                    this.alpha = Math.max(0, 1 - this.dissolveTimer);
+                    if (this.alpha <= 0) return false; // Dead
+                }
+                return true; // Alive
+            }
+
+            constrain() {
+                // Boundaries
+                const boundY = height - GROUND_Y_OFFSET;
+                const boundX = 0;
+                const boundXRight = width;
+
+                if (this.x < boundX) { this.x = boundX; this.oldX = this.x + (this.x - this.oldX) * BOUNCE; }
+                if (this.x > boundXRight) { this.x = boundXRight; this.oldX = this.x + (this.x - this.oldX) * BOUNCE; }
+                if (this.y > boundY) { this.y = boundY; this.oldY = this.y + (this.y - this.oldY) * BOUNCE; }
+                
+                // Obstacle Collision
+                for (let obs of obstacles) {
+                    const collision = obs.checkCollision(this);
+                    if (collision) {
+                        this.x = collision.x;
+                        this.y = collision.y;
+                        
+                        // Calculate reflection for impact detection
+                        const vx = this.x - this.oldX;
+                        const vy = this.y - this.oldY;
+                        const speed = Math.sqrt(vx*vx + vy*vy);
+                        
+                        if (speed > 2) {
+                            triggerSlowMotion(speed * 2);
+                        }
+                    }
+                }
+            }
+        }
+
+        class Constraint {
+            constructor(p1, p2, length = null, stiffness = 1) {
+                this.p1 = p1;
+                this.p2 = p2;
+                this.length = length || Vec2.dist(p1, p2);
+                this.stiffness = stiffness;
+            }
+
+            solve() {
+                const dx = this.p2.x - this.p1.x;
+                const dy = this.p2.y - this.p1.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                
+                if (dist === 0) return;
+
+                const diff = (this.length - dist) / dist * this.stiffness;
+                const offsetX = dx * diff * 0.5;
+                const offsetY = dy * diff * 0.5;
+
+                if (!this.p1.isFixed) {
+                    this.p1.x -= offsetX;
+                    this.p1.y -= offsetY;
+                }
+                if (!this.p2.isFixed) {
+                    this.p2.x += offsetX;
+                    this.p2.y += offsetY;
+                }
+            }
+        }
+
+        class Obstacle {
+            constructor(type, x, y, w, h, props = {}) {
+                this.type = type;
+                this.x = x;
+                this.y = y;
+                this.w = w;
+                this.h = h;
+                this.angle = props.angle || 0;
+                this.angularVel = 0;
+                this.pinned = props.pinned || false;
+                this.pivot = props.pivot || null;
+            }
+
+            update() {
+                if (this.type === 'seesaw' || this.type === 'log') {
+                    if (this.pinned) {
+                        // Pendulum logic
+                        const dx = this.x - this.pivot.x;
+                        const dy = this.y - this.pivot.y;
+                        const dist = Math.sqrt(dx*dx + dy*dy);
+                        
+                        // Gravity torque
+                        const angle = Math.atan2(dy, dx);
+                        const gravityTorque = Math.sin(angle) * 0.02;
+                        
+                        this.angularVel += gravityTorque;
+                        this.angularVel *= 0.99; // Damping
+                        this.angle += this.angularVel;
+
+                        // Update vertices for collision
+                        this.updateVertices();
+                    }
+                }
+            }
+
+            updateVertices() {
+                // Recalculate corners based on rotation
+                const hw = this.w / 2;
+                const hh = this.h / 2;
+                const cos = Math.cos(this.angle);
+                const sin = Math.sin(this.angle);
+
+                // Local corners
+                const corners = [
+                    {x: -hw, y: -hh}, {x: hw, y: -hh},
+                    {x: hw, y: hh}, {x: -hw, y: hh}
+                ];
+
+                this.vertices = corners.map(c => ({
+                    x: this.x + (c.x * cos - c.y * sin),
+                    y: this.y + (c.x * sin + c.y * sin) // Simple rotation
+                }));
+            }
+
+            checkCollision(p) {
+                // Simple AABB for trampoline
+                if (this.type === 'trampoline') {
+                    if (p.x > this.x - this.w/2 && p.x < this.x + this.w/2 &&
+                        p.y > this.y - this.h/2 && p.y < this.y + this.h/2) {
+                        
+                        // Detect if falling onto it
+                        if (p.y - p.oldY > 0) {
+                            p.y = this.y + this.h/2;
+                            p.oldY = p.y - (p.y - p.oldY) * 0.8; // Bouncy
+                            return {x: p.x, y: p.y};
+                        }
+                    }
+                    return null;
+                }
+
+                // Rotated Rectangle Collision
+                if (this.type === 'seesaw' || this.type === 'log') {
+                    // Transform particle to local space
+                    const dx = p.x - this.x;
+                    const dy = p.y - this.y;
+                    const cos = Math.cos(-this.angle);
+                    const sin = Math.sin(-this.angle);
+                    const lx = dx * cos - dy * sin;
+                    const ly = dx * sin + dy * cos;
+
+                    const hw = this.w / 2;
+                    const hh = this.h / 2;
+
+                    // Closest point on AABB to center
+                    const closestX = Math.max(-hw, Math.min(lx, hw));
+                    const closestY = Math.max(-hh, Math.min(ly, hh));
+
+                    const distX = lx - closestX;
+                    const distY = ly - closestY;
+                    const distance = Math.sqrt(distX*distX + distY*distY);
+
+                    if (distance < JOINT_RADIUS + 2) {
+                        // Collision normal in local space
+                        let nx = distX;
+                        let ny = distY;
+                        if (distance === 0) { nx = 0; ny = -1; } // Inside
+                        
+                        const len = Math.sqrt(nx*nx + ny*ny) || 1;
+                        nx /= len;
+                        ny /= len;
+
+                        // Rotate normal back to world space
+                        const wNx = nx * Math.cos(this.angle) - ny * Math.sin(this.angle);
+                        const wNy = nx * Math.sin(this.angle) + ny * Math.cos(this.angle);
+
+                        // Push out
+                        const overlap = (JOINT_RADIUS + 2) - distance;
+                        p.x += wNx * overlap;
+                        p.y += wNy * overlap;
+
+                        // Reflect velocity
+                        const v = {x: p.x - p.oldX, y: p.y - p.oldY};
+                        const dot = v.x * wNx + v.y * wNy;
+                        const rV = {x: v.x - 2 * dot * wNx, y: v.y - 2 * dot * wNy};
+                        
+                        p.oldX = p.x - rV.x * 0.5; // Friction
+                        p.oldY = p.y - rV.y * 0.5;
+
+                        return {x: p.x, y: p.y};
+                    }
+                }
+                return null;
+            }
+
+            draw() {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.angle);
+                ctx.strokeStyle = this.type === 'trampoline' ? TRAMPOLINE_COLOR : WOOD_COLOR;
+                ctx.lineWidth = 3;
+                ctx.fillStyle = 'rgba(0,0,0,0.3)';
+                
+                ctx.beginPath();
+                if (this.type === 'trampoline') {
+                    ctx.fillRect(-this.w/2, -this.h/2, this.w, this.h);
+                    ctx.strokeRect(-this.w/2, -this.h/2, this.w, this.h);
+                } else {
+                    ctx.fillRect(-this.w/2, -this.h/2, this.w, this.h);
+                    ctx.strokeRect(-this.w/2, -this.h/2, this.w, this.h);
+                }
+                ctx.restore();
+            }
+        }
+
+        // --- Ragdoll Factory ---
+        function createRagdoll(x, y) {
+            const scale = 1.5;
+            const headRadius = 10 * scale;
+            const neckLen = 10 * scale;
+            const spineLen = 12 * scale;
+            const armLen = 12 * scale;
+            const legLen = 14 * scale;
+
+            // Head
+            const head = new Particle(x, y, 1);
+            // Neck
+            const neck = new Particle(x, y + neckLen, 1);
+            // Spine
+            const spineTop = new Particle(x, y + neckLen + 5, 1);
+            const spineBot = new Particle(x, y + neckLen + spineLen, 1);
+            // Hips
+            const hip = new Particle(x, y + neckLen + spineLen + 5, 1);
+            
+            // Arms
+            const lElbow = new Particle(x - 5, y + neckLen + 10, 1);
+            const lHand = new Particle(x - 10, y + neckLen + 20, 1);
+            const rElbow = new Particle(x + 5, y + neckLen + 10, 1);
+            const rHand = new Particle(x + 10, y + neckLen + 20, 1);
+
+            // Legs
+            const lKnee = new Particle(x - 5, y + neckLen + spineLen + 10, 1);
+            const lFoot = new Particle(x - 10, y + neckLen + spineLen + 20, 1);
+            const rKnee = new Particle(x + 5, y + neckLen + spineLen + 10, 1);
+            const rFoot = new Particle(x + 10, y + neckLen + spineLen + 20, 1);
+
+            const allP = [head, neck, spineTop, spineBot, hip, lElbow, lHand, rElbow, rHand, lKnee, lFoot, rKnee, rFoot];
+            
+            // Add to global
+            particles.push(...allP);
+
+            // Constraints
+            const add = (p1, p2, stiff = 1) => constraints.push(new Constraint(p1, p2, null, stiff));
+            const addLimit = (p1, p2, stiff = 0.5) => constraints.push(new Constraint(p1, p2, null, stiff)); // Joint limits
+
+            // Structure
+            add(head, neck);
+            add(neck, spineTop);
+            add(spineTop, spineBot);
+            add(spineBot, hip);
+
+            // Arms
+            add(neck, lElbow); add(lElbow, lHand);
+            add(neck, rElbow); add(rElbow, rHand);
+
+            // Legs
+            add(hip, lKnee); add(lKnee, lFoot);
+            add(hip, rKnee); add(rKnee, rFoot);
+
+            // Structural Integrity (Triangle-ish)
+            add(neck, spineBot, 0.8);
+            add(spineTop, hip, 0.8);
+            
+            // Joint Limits (prevent snapping)
+            // Shoulders
+            addLimit(neck, lElbow, 0.1);
+            addLimit(neck, rElbow, 0.1);
+            // Hips
+            addLimit(hip, lKnee, 0.1);
+            addLimit(hip, rKnee, 0.1);
+
+            // Cross supports
+            add(head, spineBot, 0.5);
+            add(head, hip, 0.2);
+            add(lElbow, rElbow, 0.5);
+        }
+
+        // --- Level Generation ---
+        function generateObstacles() {
+            obstacles = [];
+            const groundY = height - GROUND_Y_OFFSET;
+            const centerX = width / 2;
+
+            // Center Trampoline
+            obstacles.push(new Obstacle('trampoline', centerX, groundY - 20, 150, 20, {angle: 0}));
+
+            // Left Seesaw
+            const s1X = centerX - 250;
+            obstacles.push(new Obstacle('seesaw', s1X, groundY - 50, 160, 10, {
+                pinned: true,
+                pivot: {x: s1X, y: groundY},
+                angle: 0.1
+            }));
+
+            // Right Log
+            const lX = centerX + 250;
+            obstacles.push(new Obstacle('log', lX, groundY - 50, 180, 15, {
+                pinned: true,
+                pivot: {x: lX, y: groundY},
+                angle: -0.2
+            }));
+
+            // High Platform
+            obstacles.push(new Obstacle('seesaw', centerX, groundY - 200, 100, 10, {
+                pinned: true,
+                pivot: {x: centerX, y: groundY - 100},
+                angle: 0
+            }));
+        }
+
+        // --- Game Logic ---
+
+        function triggerSlowMotion(intensity) {
+            // Cap intensity
+            const factor = Math.max(0.1, 1.0 - (intensity * 0.05));
+            if (factor < slowMotionFactor) {
+                slowMotionFactor = factor;
+            }
+        }
+
+        function checkSettled(p) {
+            if (p.dissolving) return;
+            const vx = Math.abs(p.x - p.oldX);
+            const vy = Math.abs(p.y - p.oldY);
+            const distToGround = (height - GROUND_Y_OFFSET) - p.y;
+            
+            // Check if near bottom and moving very slowly
+            if (distToGround < 5 && (vx < 0.1 && vy < 0.1)) {
+                p.dissolving = true;
+            }
+        }
+
+        function spawnLoop() {
+            const now = Date.now();
+            if (now > nextDropTime) {
+                // Decide spawn
+                const spawnX = Math.random() * (width * 0.8) + (width * 0.1);
+                createRagdoll(spawnX, -50);
+                
+                // Chance for double drop
+                if (Math.random() > 0.7) {
+                    createRagdoll(spawnX + 40, -50);
+                }
+
+                nextDropTime = now + 2000 + Math.random() * 3000;
+            }
+        }
+
+        function drawScene() {
+            // Clear
+            ctx.fillStyle = '#1a1a1a';
+            ctx.fillRect(0, 0, width, height);
+
+            // Draw Obstacles
+            obstacles.forEach(obs => {
+                obs.update();
+                obs.draw();
+            });
+
+            // Draw Particles
+            particles.forEach(p => {
+                if (p.alpha > 0) {
+                    ctx.globalAlpha = p.alpha;
+                    ctx.fillStyle = p.color;
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, JOINT_RADIUS, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.globalAlpha = 1;
+                }
+            });
+
+            // Draw Constraints (Bones)
+            ctx.lineWidth = LINE_WIDTH;
+            ctx.lineCap = 'round';
+            
+            constraints.forEach(c => {
+                // If either particle is dissolving, don't draw or draw faint
+                if (c.p1.alpha > 0.1 && c.p2.alpha > 0.1) {
+                    ctx.strokeStyle = `rgba(200, 200, 200, ${(c.p1.alpha + c.p2.alpha)/2})`;
+                    ctx.beginPath();
+                    ctx.moveTo(c.p1.x, c.p1.y);
+                    ctx.lineTo(c.p2.x, c.p2.y);
+                    ctx.stroke();
+                }
+            });
+        }
+
+        function loop() {
+            // Physics Sub-steps
+            for (let i = 0; i < 1; i++) { // Slow motion handles time step scaling effectively
+                // Update positions
+                particles = particles.filter(p => p.update());
+
+                // Solve Constraints
+                for (let k = 0; k < ITERATIONS; k++) {
+                    constraints.forEach(c => c.solve());
+                    particles.forEach(p => p.constrain());
+                }
+
+                // Check settle status
+                particles.forEach(p => checkSettled(p));
+            }
+
+            // Cleanup dead particles
+            particles = particles.filter(p => p.alpha > 0);
+
+            // Spawning
+            spawnLoop();
+
+            // Slow Motion Recovery
+            if (slowMotionFactor < 1.0) {
+                slowMotionFactor += 0.02;
+                if (slowMotionFactor > 1.0) slowMotionFactor = 1.0;
+            }
+
+            drawScene();
+            requestAnimationFrame(loop);
+        }
+
+        // Init
+        resize();
+        loop();
+
+    </script>
+</body>
+</html>

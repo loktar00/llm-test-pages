@@ -1,0 +1,1006 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Aquarium</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #0a1a2a; width: 100%; height: 100%; }
+  canvas { display: block; cursor: pointer; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  let W = 0, H = 0, DPR = Math.max(1, window.devicePixelRatio || 1);
+
+  function resize() {
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = W * DPR;
+    canvas.height = H * DPR;
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // Utilities
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const randi = (a, b) => Math.floor(rand(a, b));
+  const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+  const lerp = (a, b, t) => a + (b - a) * t;
+
+  // Fish species definitions
+  const SPECIES = {
+    goldfish: {
+      name: 'goldfish',
+      length: 58,
+      height: 28,
+      maxSpeed: 1.2,
+      wanderAmt: 0.015,
+      bodyColor: '#ff8a2a',
+      finColor: '#ffb567',
+      tailColor: '#ff9a3c',
+      eyeColor: '#111',
+      draw: drawGoldfish,
+      wobbleFreq: 0.08,
+      wobbleAmp: 0.08,
+      count: 4
+    },
+    tetra: {
+      name: 'tetra',
+      length: 34,
+      height: 10,
+      maxSpeed: 2.0,
+      wanderAmt: 0.03,
+      bodyColor: '#c8cfd6',
+      finColor: '#8a9aa8',
+      tailColor: '#ff3b3b',
+      stripeColor: '#2ed1ff',
+      eyeColor: '#111',
+      draw: drawTetra,
+      wobbleFreq: 0.18,
+      wobbleAmp: 0.04,
+      count: 6
+    },
+    angel: {
+      name: 'angel',
+      length: 46,
+      height: 64,
+      maxSpeed: 0.9,
+      wanderAmt: 0.01,
+      bodyColor: '#f4ead6',
+      finColor: '#d9ccae',
+      tailColor: '#b8a987',
+      stripeColor: '#2b2b2b',
+      eyeColor: '#111',
+      draw: drawAngel,
+      wobbleFreq: 0.05,
+      wobbleAmp: 0.06,
+      count: 3
+    },
+    guppy: {
+      name: 'guppy',
+      length: 30,
+      height: 12,
+      maxSpeed: 1.9,
+      wanderAmt: 0.04,
+      bodyColor: '#7fc6d8',
+      finColor: '#ffb347',
+      tailColor: '#ffb347',
+      eyeColor: '#111',
+      draw: drawGuppy,
+      wobbleFreq: 0.22,
+      wobbleAmp: 0.05,
+      count: 5
+    },
+    cory: {
+      name: 'cory',
+      length: 44,
+      height: 20,
+      maxSpeed: 1.1,
+      wanderAmt: 0.012,
+      bodyColor: '#d4a76a',
+      finColor: '#a97a44',
+      tailColor: '#a97a44',
+      spotColor: '#5b3b1f',
+      eyeColor: '#111',
+      draw: drawCory,
+      wobbleFreq: 0.09,
+      wobbleAmp: 0.04,
+      count: 3
+    }
+  };
+
+  // Fish
+  class Fish {
+    constructor(species) {
+      this.sp = species;
+      this.x = rand(100, W - 100);
+      this.y = rand(80, H - 180);
+      const ang = rand(0, Math.PI * 2);
+      const sp = rand(0.3, species.maxSpeed);
+      this.vx = Math.cos(ang) * sp;
+      this.vy = Math.sin(ang) * sp;
+      this.wanderAngle = ang;
+      this.phase = rand(0, Math.PI * 2);
+      this.sizeScale = rand(0.85, 1.15);
+      this.hueShift = rand(-15, 15);
+      this.dartTimer = 0;
+      this.breath = rand(0, Math.PI * 2);
+    }
+    update(dt, time) {
+      // Wander steering
+      this.wanderAngle += (Math.random() - 0.5) * this.sp.wanderAmt * 10;
+      const targetD = 80;
+      const cx = this.x + Math.cos(this.wanderAngle) * targetD;
+      const cy = this.y + Math.sin(this.wanderAngle) * targetD;
+      let tx = cx - this.x;
+      let ty = cy - this.y;
+
+      // Wall avoidance - soft margins
+      const margin = 120;
+      const bottomMargin = 180; // keep above gravel/plants area somewhat
+      if (this.x < margin) tx += (margin - this.x) * 0.05;
+      if (this.x > W - margin) tx -= (this.x - (W - margin)) * 0.05;
+      if (this.y < margin) ty += (margin - this.y) * 0.05;
+      if (this.y > H - bottomMargin) ty -= (this.y - (H - bottomMargin)) * 0.08;
+
+      const tlen = Math.hypot(tx, ty) || 1;
+      tx /= tlen; ty /= tlen;
+
+      // Steer
+      const steerStr = 0.04;
+      this.vx += tx * steerStr;
+      this.vy += ty * steerStr;
+
+      // Speed limit
+      let speed = Math.hypot(this.vx, this.vy);
+      const max = this.sp.maxSpeed * (this.dartTimer > 0 ? 3.2 : 1);
+      if (speed > max) {
+        this.vx = (this.vx / speed) * max;
+        this.vy = (this.vy / speed) * max;
+        speed = max;
+      }
+      const min = 0.2;
+      if (speed < min && this.dartTimer <= 0) {
+        const a = Math.atan2(this.vy, this.vx);
+        this.vx = Math.cos(a) * min;
+        this.vy = Math.sin(a) * min;
+      }
+
+      // Dart decay
+      if (this.dartTimer > 0) {
+        this.dartTimer -= dt;
+        if (this.dartTimer <= 0) {
+          // slow down after dart
+          const s = Math.hypot(this.vx, this.vy);
+          if (s > this.sp.maxSpeed) {
+            this.vx = (this.vx / s) * this.sp.maxSpeed;
+            this.vy = (this.vy / s) * this.sp.maxSpeed;
+          }
+        }
+      }
+
+      this.x += this.vx;
+      this.y += this.vy;
+
+      // Hard containment
+      this.x = clamp(this.x, 20, W - 20);
+      this.y = clamp(this.y, 30, H - 120);
+
+      this.phase += this.sp.wobbleFreq + speed * 0.02;
+      this.breath += 0.03;
+    }
+    startle(px, py) {
+      const dx = this.x - px;
+      const dy = this.y - py;
+      const d = Math.hypot(dx, dy);
+      if (d < 260) {
+        const f = (260 - d) / 260;
+        const a = Math.atan2(dy, dx) + rand(-0.3, 0.3);
+        const imp = f * 8;
+        this.vx += Math.cos(a) * imp;
+        this.vy += Math.sin(a) * imp;
+        this.dartTimer = 0.6 + Math.random() * 0.6;
+        this.wanderAngle = a;
+      }
+    }
+    draw(time) {
+      const heading = Math.atan2(this.vy, this.vx);
+      const speed = Math.hypot(this.vx, this.vy);
+      const wobble = Math.sin(this.phase) * this.sp.wobbleAmp;
+      ctx.save();
+      ctx.translate(this.x, this.y);
+      ctx.rotate(heading + wobble);
+      this.sp.draw(this, time, speed);
+      ctx.restore();
+    }
+  }
+
+  // Fish drawing functions. Fish is drawn facing +x, center at origin.
+  function drawGoldfish(fish, time, speed) {
+    const L = fish.sp.length * fish.sizeScale;
+    const Hf = fish.sp.height * fish.sizeScale;
+    const tailSwing = Math.sin(fish.phase * 1.6) * 0.35;
+
+    // Tail
+    ctx.save();
+    ctx.translate(-L * 0.35, 0);
+    ctx.rotate(tailSwing);
+    ctx.fillStyle = fish.sp.tailColor;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.bezierCurveTo(-L*0.25, -Hf*1.0, -L*0.45, -Hf*0.8, -L*0.55, -Hf*0.2);
+    ctx.bezierCurveTo(-L*0.45, 0, -L*0.45, 0, -L*0.55, Hf*0.2);
+    ctx.bezierCurveTo(-L*0.45, Hf*0.8, -L*0.25, Hf*1.0, 0, 0);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    // Body
+    ctx.fillStyle = fish.sp.bodyColor;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, L * 0.42, Hf * 0.55, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Belly highlight
+    const bodyGrad = ctx.createLinearGradient(0, -Hf, 0, Hf);
+    bodyGrad.addColorStop(0, 'rgba(255,230,180,0.35)');
+    bodyGrad.addColorStop(0.5, 'rgba(255,255,255,0.05)');
+    bodyGrad.addColorStop(1, 'rgba(180,80,20,0.3)');
+    ctx.fillStyle = bodyGrad;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, L * 0.42, Hf * 0.55, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Dorsal fin
+    const finWave = Math.sin(fish.phase * 1.2) * 0.15;
+    ctx.fillStyle = fish.sp.finColor;
+    ctx.beginPath();
+    ctx.moveTo(-L*0.2, -Hf*0.45);
+    ctx.bezierCurveTo(-L*0.05, -Hf*(0.85 + finWave), L*0.15, -Hf*(0.8 + finWave), L*0.2, -Hf*0.35);
+    ctx.closePath();
+    ctx.fill();
+
+    // Pectoral fin
+    ctx.beginPath();
+    ctx.moveTo(L*0.05, Hf*0.1);
+    ctx.bezierCurveTo(L*0.0, Hf*0.45, -L*0.15, Hf*0.5, -L*0.2, Hf*0.2);
+    ctx.closePath();
+    ctx.fill();
+
+    // Eye
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(L*0.25, -Hf*0.15, L*0.05, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle = fish.sp.eyeColor;
+    ctx.beginPath();
+    ctx.arc(L*0.26, -Hf*0.15, L*0.028, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  function drawTetra(fish, time, speed) {
+    const L = fish.sp.length * fish.sizeScale;
+    const Hf = fish.sp.height * fish.sizeScale;
+    const tailSwing = Math.sin(fish.phase * 2.0) * 0.4;
+
+    // Tail
+    ctx.save();
+    ctx.translate(-L * 0.4, 0);
+    ctx.rotate(tailSwing);
+    ctx.fillStyle = fish.sp.tailColor;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(-L*0.22, -Hf*0.7);
+    ctx.lineTo(-L*0.18, 0);
+    ctx.lineTo(-L*0.22, Hf*0.7);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    // Body (slim)
+    ctx.fillStyle = fish.sp.bodyColor;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, L * 0.42, Hf * 0.55, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Neon stripe (top half)
+    ctx.strokeStyle = fish.sp.stripeColor;
+    ctx.lineWidth = Hf * 0.3;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(-L*0.35, 0);
+    ctx.lineTo(L*0.3, 0);
+    ctx.stroke();
+
+    // Red lower tail patch
+    ctx.fillStyle = 'rgba(255,60,60,0.6)';
+    ctx.beginPath();
+    ctx.ellipse(-L*0.2, Hf*0.1, L*0.12, Hf*0.3, 0, 0, Math.PI*2);
+    ctx.fill();
+
+    // Eye
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(L*0.28, -Hf*0.05, L*0.055, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle = fish.sp.eyeColor;
+    ctx.beginPath();
+    ctx.arc(L*0.3, -Hf*0.05, L*0.03, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  function drawAngel(fish, time, speed) {
+    const L = fish.sp.length * fish.sizeScale;
+    const Hf = fish.sp.height * fish.sizeScale;
+    const finSway = Math.sin(fish.phase * 0.8) * 0.2;
+
+    // Tall triangular body
+    ctx.fillStyle = fish.sp.bodyColor;
+    ctx.beginPath();
+    ctx.moveTo(-L*0.45, 0);
+    ctx.bezierCurveTo(-L*0.3, -Hf*0.5, L*0.2, -Hf*0.45, L*0.4, -Hf*0.1);
+    ctx.lineTo(L*0.45, 0);
+    ctx.lineTo(L*0.4, Hf*0.1);
+    ctx.bezierCurveTo(L*0.2, Hf*0.45, -L*0.3, Hf*0.5, -L*0.45, 0);
+    ctx.closePath();
+    ctx.fill();
+
+    // Vertical stripes
+    ctx.strokeStyle = fish.sp.stripeColor;
+    ctx.lineWidth = L * 0.04;
+    ctx.lineCap = 'round';
+    for (let i = -1; i <= 1; i++) {
+      ctx.beginPath();
+      const xp = i * L * 0.12;
+      ctx.moveTo(xp, -Hf*0.35);
+      ctx.lineTo(xp, Hf*0.35);
+      ctx.stroke();
+    }
+
+    // Tall dorsal fin
+    ctx.fillStyle = fish.sp.finColor;
+    ctx.beginPath();
+    ctx.moveTo(-L*0.15, -Hf*0.42);
+    ctx.bezierCurveTo(-L*0.05, -Hf*(0.75 + finSway), L*0.15, -Hf*(0.72 + finSway), L*0.2, -Hf*0.4);
+    ctx.closePath();
+    ctx.fill();
+
+    // Long ventral fins (feelers)
+    ctx.strokeStyle = fish.sp.finColor;
+    ctx.lineWidth = L * 0.025;
+    const feelWave = Math.sin(fish.phase * 1.1) * 0.15;
+    ctx.beginPath();
+    ctx.moveTo(L*0.05, Hf*0.3);
+    ctx.bezierCurveTo(L*0.1, Hf*0.5, L*0.05+Math.sin(feelWave)*8, Hf*0.7, L*0.0, Hf*0.85);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(-L*0.05, Hf*0.3);
+    ctx.bezierCurveTo(-L*0.0, Hf*0.5, -L*0.05-Math.sin(feelWave)*8, Hf*0.7, -L*0.1, Hf*0.85);
+    ctx.stroke();
+
+    // Tail
+    ctx.fillStyle = fish.sp.tailColor;
+    ctx.beginPath();
+    ctx.moveTo(-L*0.42, 0);
+    ctx.lineTo(-L*0.6, -Hf*0.2);
+    ctx.lineTo(-L*0.55, 0);
+    ctx.lineTo(-L*0.6, Hf*0.2);
+    ctx.closePath();
+    ctx.fill();
+
+    // Eye
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(L*0.28, -Hf*0.05, L*0.05, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle = fish.sp.eyeColor;
+    ctx.beginPath();
+    ctx.arc(L*0.29, -Hf*0.05, L*0.028, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  function drawGuppy(fish, time, speed) {
+    const L = fish.sp.length * fish.sizeScale;
+    const Hf = fish.sp.height * fish.sizeScale;
+    const tailSwing = Math.sin(fish.phase * 2.2) * 0.5;
+
+    // Big fancy tail
+    ctx.save();
+    ctx.translate(-L * 0.3, 0);
+    ctx.rotate(tailSwing);
+    const tg = ctx.createRadialGradient(0, 0, 2, -L*0.2, 0, L*0.5);
+    tg.addColorStop(0, fish.sp.tailColor);
+    tg.addColorStop(0.6, fish.sp.finColor);
+    tg.addColorStop(1, 'rgba(255,140,60,0.4)');
+    ctx.fillStyle = tg;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.bezierCurveTo(-L*0.2, -Hf*1.4, -L*0.55, -Hf*1.3, -L*0.6, -Hf*0.2);
+    ctx.bezierCurveTo(-L*0.55, 0, -L*0.55, 0, -L*0.6, Hf*0.2);
+    ctx.bezierCurveTo(-L*0.55, Hf*1.3, -L*0.2, Hf*1.4, 0, 0);
+    ctx.closePath();
+    ctx.fill();
+    // tail spots
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.beginPath();
+    ctx.arc(-L*0.25, -Hf*0.4, L*0.06, 0, Math.PI*2);
+    ctx.arc(-L*0.35, Hf*0.3, L*0.05, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+
+    // Body
+    ctx.fillStyle = fish.sp.bodyColor;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, L * 0.35, Hf * 0.6, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Dorsal
+    ctx.fillStyle = fish.sp.finColor;
+    ctx.beginPath();
+    ctx.moveTo(-L*0.1, -Hf*0.5);
+    ctx.bezierCurveTo(0, -Hf*0.9, L*0.1, -Hf*0.8, L*0.05, -Hf*0.4);
+    ctx.closePath();
+    ctx.fill();
+
+    // Eye
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(L*0.2, -Hf*0.1, L*0.055, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle = fish.sp.eyeColor;
+    ctx.beginPath();
+    ctx.arc(L*0.22, -Hf*0.1, L*0.03, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  function drawCory(fish, time, speed) {
+    const L = fish.sp.length * fish.sizeScale;
+    const Hf = fish.sp.height * fish.sizeScale;
+    const tailSwing = Math.sin(fish.phase * 1.3) * 0.25;
+
+    // Tail
+    ctx.save();
+    ctx.translate(-L*0.35, 0);
+    ctx.rotate(tailSwing);
+    ctx.fillStyle = fish.sp.tailColor;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(-L*0.22, -Hf*0.6);
+    ctx.lineTo(-L*0.15, 0);
+    ctx.lineTo(-L*0.22, Hf*0.6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    // Body - armored look
+    ctx.fillStyle = fish.sp.bodyColor;
+    ctx.beginPath();
+    ctx.moveTo(L*0.45, Hf*0.1);
+    ctx.bezierCurveTo(L*0.4, -Hf*0.45, -L*0.1, -Hf*0.5, -L*0.35, -Hf*0.1);
+    ctx.lineTo(-L*0.35, Hf*0.1);
+    ctx.bezierCurveTo(-L*0.1, Hf*0.5, L*0.4, Hf*0.5, L*0.45, Hf*0.1);
+    ctx.closePath();
+    ctx.fill();
+
+    // Lateral line
+    ctx.strokeStyle = fish.sp.spotColor;
+    ctx.lineWidth = L*0.04;
+    ctx.beginPath();
+    ctx.moveTo(-L*0.3, 0);
+    ctx.lineTo(L*0.35, 0);
+    ctx.stroke();
+
+    // Spots
+    ctx.fillStyle = fish.sp.spotColor;
+    ctx.beginPath();
+    ctx.arc(-L*0.1, -Hf*0.2, L*0.04, 0, Math.PI*2);
+    ctx.arc(L*0.15, -Hf*0.15, L*0.03, 0, Math.PI*2);
+    ctx.arc(0, Hf*0.2, L*0.03, 0, Math.PI*2);
+    ctx.fill();
+
+    // Barbels (whiskers)
+    ctx.strokeStyle = fish.sp.spotColor;
+    ctx.lineWidth = L*0.015;
+    const bw = Math.sin(fish.phase*2) * 3;
+    ctx.beginPath();
+    ctx.moveTo(L*0.42, Hf*0.12);
+    ctx.quadraticCurveTo(L*0.5, Hf*0.22, L*0.55, Hf*0.2 + bw);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(L*0.42, Hf*0.05);
+    ctx.quadraticCurveTo(L*0.5, Hf*0.15, L*0.52, Hf*0.15 + bw);
+    ctx.stroke();
+
+    // Dorsal fin
+    ctx.fillStyle = fish.sp.finColor;
+    ctx.beginPath();
+    ctx.moveTo(L*0.05, -Hf*0.42);
+    ctx.lineTo(L*0.0, -Hf*0.75);
+    ctx.lineTo(-L*0.15, -Hf*0.4);
+    ctx.closePath();
+    ctx.fill();
+
+    // Eye
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(L*0.28, -Hf*0.18, L*0.05, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle = fish.sp.eyeColor;
+    ctx.beginPath();
+    ctx.arc(L*0.29, -Hf*0.18, L*0.025, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  // Plants
+  class Plant {
+    constructor(x, baseY, segments, length, width, color) {
+      this.x = x; this.baseY = baseY;
+      this.segments = segments;
+      this.length = length;
+      this.width = width;
+      this.color = color;
+      this.phase = rand(0, Math.PI * 2);
+      this.swaySpeed = rand(0.4, 0.9);
+      this.swayAmt = rand(0.15, 0.35);
+    }
+    draw(time) {
+      ctx.save();
+      ctx.strokeStyle = this.color;
+      ctx.lineCap = 'round';
+      let px = this.x, py = this.baseY;
+      const segLen = this.length / this.segments;
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      for (let i = 1; i <= this.segments; i++) {
+        const t = i / this.segments;
+        const sway = Math.sin(time * this.swaySpeed + this.phase + t * 3) * this.swayAmt * t * 30;
+        px = this.x + sway;
+        py = this.baseY - i * segLen;
+        ctx.lineWidth = this.width * (1 - t * 0.5);
+        ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+      // Draw leaves at intervals
+      ctx.fillStyle = this.color;
+      for (let i = 2; i <= this.segments; i += 2) {
+        const t = i / this.segments;
+        const sway = Math.sin(time * this.swaySpeed + this.phase + t * 3) * this.swayAmt * t * 30;
+        const lx = this.x + sway;
+        const ly = this.baseY - i * segLen;
+        ctx.beginPath();
+        ctx.ellipse(lx + this.width, ly, this.width*1.2, this.width*3, Math.PI*0.2, 0, Math.PI*2);
+        ctx.ellipse(lx - this.width, ly - segLen*0.5, this.width*1.2, this.width*3, -Math.PI*0.2, 0, Math.PI*2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
+
+  // Bubbler
+  class Bubble {
+    constructor(x, y) {
+      this.x = x; this.originX = x; this.y = y;
+      this.r = rand(2, 6);
+      this.rise = rand(0.6, 1.4);
+      this.wobble = rand(0, Math.PI * 2);
+      this.wobbleSpeed = rand(1, 2.5);
+      this.wobbleAmt = rand(8, 20);
+      this.alpha = rand(0.5, 0.85);
+    }
+    update() {
+      this.y -= this.rise;
+      this.wobble += this.wobbleSpeed * 0.02;
+      this.x = this.originX + Math.sin(this.wobble) * this.wobbleAmt;
+      this.r += 0.01;
+    }
+    draw() {
+      ctx.save();
+      ctx.strokeStyle = `rgba(220,240,255,${this.alpha})`;
+      ctx.fillStyle = `rgba(220,240,255,${this.alpha * 0.15})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, this.r, 0, Math.PI*2);
+      ctx.fill();
+      ctx.stroke();
+      // highlight
+      ctx.fillStyle = `rgba(255,255,255,${this.alpha * 0.6})`;
+      ctx.beginPath();
+      ctx.arc(this.x - this.r*0.35, this.y - this.r*0.35, this.r*0.3, 0, Math.PI*2);
+      ctx.fill();
+      ctx.restore();
+    }
+    dead() { return this.y + this.r < -10; }
+  }
+
+  // Hermit Crab
+  class Crab {
+    constructor() {
+      this.x = rand(200, W - 200);
+      this.y = H - 85; // on gravel surface
+      this.vx = 0;
+      this.dir = Math.random() < 0.5 ? -1 : 1;
+      this.state = 'idle';
+      this.stateTimer = rand(1, 4);
+      this.stepPhase = 0;
+      this.antPhase = rand(0, Math.PI*2);
+    }
+    update(dt) {
+      this.stateTimer -= dt;
+      this.stepPhase += Math.abs(this.vx) * 0.15;
+      this.antPhase += dt * 4;
+      if (this.stateTimer <= 0) {
+        if (this.state === 'idle') {
+          this.state = 'walk';
+          this.dir = Math.random() < 0.5 ? -1 : 1;
+          this.vx = this.dir * 0.35;
+          this.stateTimer = rand(2, 6);
+        } else {
+          this.state = 'idle';
+          this.vx = 0;
+          this.stateTimer = rand(1, 4);
+        }
+      }
+      this.x += this.vx;
+      if (this.x < 120) { this.x = 120; this.dir = 1; this.vx = Math.abs(this.vx); }
+      if (this.x > W - 120) { this.x = W - 120; this.dir = -1; this.vx = -Math.abs(this.vx); }
+    }
+    draw() {
+      ctx.save();
+      ctx.translate(this.x, this.y);
+      ctx.scale(this.dir, 1);
+
+      // Shell (spiral conch)
+      const sg = ctx.createRadialGradient(-12, -4, 2, -12, -4, 22);
+      sg.addColorStop(0, '#d9b28a');
+      sg.addColorStop(0.6, '#b88a5e');
+      sg.addColorStop(1, '#6b4a2b');
+      ctx.fillStyle = sg;
+      ctx.beginPath();
+      ctx.ellipse(-10, -6, 18, 14, 0, 0, Math.PI*2);
+      ctx.fill();
+      // shell spiral lines
+      ctx.strokeStyle = '#5b3a1f';
+      ctx.lineWidth = 0.8;
+      for (let i = 0; i < 3; i++) {
+        ctx.beginPath();
+        ctx.ellipse(-10 - i*2, -6, 18 - i*3, 14 - i*2.5, 0, 0, Math.PI*2);
+        ctx.stroke();
+      }
+      // shell ridges
+      ctx.strokeStyle = '#7a5a3a';
+      ctx.lineWidth = 1;
+      for (let i = -2; i <= 2; i++) {
+        ctx.beginPath();
+        ctx.moveTo(-22, -6 + i*3);
+        ctx.lineTo(6, -6 + i*3);
+        ctx.stroke();
+      }
+
+      // Legs (6 legs)
+      ctx.strokeStyle = '#c54a2a';
+      ctx.lineWidth = 1.8;
+      ctx.lineCap = 'round';
+      for (let i = 0; i < 3; i++) {
+        const baseX = 4 + i*3;
+        const legSwing = Math.sin(this.stepPhase + i * 1.2) * 3;
+        // near side legs
+        ctx.beginPath();
+        ctx.moveTo(baseX, 4);
+        ctx.lineTo(baseX + 2, 10 + legSwing);
+        ctx.stroke();
+        // far side (subtle)
+        ctx.beginPath();
+        ctx.moveTo(baseX - 8, 4);
+        ctx.lineTo(baseX - 10, 10 - legSwing);
+        ctx.strokeStyle = '#8a3a1f';
+        ctx.stroke();
+        ctx.strokeStyle = '#c54a2a';
+      }
+
+      // Claws
+      const clawOpen = Math.sin(this.stepPhase * 0.5) * 0.1;
+      // right claw (front)
+      ctx.fillStyle = '#d95a34';
+      ctx.beginPath();
+      ctx.moveTo(10, -2);
+      ctx.lineTo(22, -2 + clawOpen*4);
+      ctx.lineTo(24, 2 + clawOpen*4);
+      ctx.lineTo(18, 4);
+      ctx.lineTo(22, 8);
+      ctx.lineTo(18, 10);
+      ctx.lineTo(14, 6);
+      ctx.closePath();
+      ctx.fill();
+      // left claw (smaller, behind)
+      ctx.fillStyle = '#b84926';
+      ctx.beginPath();
+      ctx.moveTo(8, -1);
+      ctx.lineTo(16, 4);
+      ctx.lineTo(14, 7);
+      ctx.lineTo(10, 4);
+      ctx.closePath();
+      ctx.fill();
+
+      // Head / eyes
+      ctx.fillStyle = '#d95a34';
+      ctx.beginPath();
+      ctx.ellipse(8, -2, 6, 5, 0, 0, Math.PI*2);
+      ctx.fill();
+
+      // Eye stalks
+      ctx.strokeStyle = '#c54a2a';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(10, -4);
+      ctx.lineTo(13, -10);
+      ctx.moveTo(12, -4);
+      ctx.lineTo(16, -9);
+      ctx.stroke();
+
+      // Eyes
+      ctx.fillStyle = '#111';
+      ctx.beginPath();
+      ctx.arc(13, -10, 1.3, 0, Math.PI*2);
+      ctx.arc(16, -9, 1.3, 0, Math.PI*2);
+      ctx.fill();
+
+      // Antennae
+      ctx.strokeStyle = '#c54a2a';
+      ctx.lineWidth = 0.8;
+      ctx.beginPath();
+      const aw1 = Math.sin(this.antPhase) * 2;
+      const aw2 = Math.sin(this.antPhase + 1) * 2;
+      ctx.moveTo(12, -4);
+      ctx.quadraticCurveTo(18, -6 + aw1, 22, -8 + aw1);
+      ctx.moveTo(13, -3);
+      ctx.quadraticCurveTo(19, -3 + aw2, 23, -4 + aw2);
+      ctx.stroke();
+
+      ctx.restore();
+    }
+  }
+
+  // Build scene
+  const fishes = [];
+  const speciesKeys = Object.keys(SPECIES);
+  for (const k of speciesKeys) {
+    const sp = SPECIES[k];
+    for (let i = 0; i < sp.count; i++) fishes.push(new Fish(sp));
+  }
+
+  const plants = [];
+  function buildPlants() {
+    plants.length = 0;
+    const plantCount = Math.max(8, Math.floor(W / 120));
+    for (let i = 0; i < plantCount; i++) {
+      const x = rand(30, W - 30);
+      const baseY = H - rand(60, 80);
+      const segs = randi(6, 12);
+      const len = rand(120, 260);
+      const wid = rand(2.5, 5);
+      const colors = ['#2e6b3a', '#3d8b4a', '#4ea860', '#35804a', '#256038'];
+      plants.push(new Plant(x, baseY, segs, len, wid, colors[randi(0, colors.length)]));
+    }
+  }
+  buildPlants();
+
+  const bubbles = [];
+  let bubblerX = 0, bubblerY = 0;
+  function setBubbler() {
+    bubblerX = W - 140;
+    bubblerY = H - 80;
+  }
+  setBubbler();
+
+  const crab = new Crab();
+
+  // Pebbles/gravel
+  const pebbles = [];
+  function buildPebbles() {
+    pebbles.length = 0;
+    const count = Math.max(80, Math.floor(W / 12));
+    for (let i = 0; i < count; i++) {
+      pebbles.push({
+        x: rand(0, W),
+        y: H - rand(10, 90),
+        r: rand(3, 9),
+        c: `rgb(${60 + rand(0,50)|0}, ${50+rand(0,40)|0}, ${40+rand(0,30)|0})`
+      });
+    }
+  }
+  buildPebbles();
+
+  // Interaction: click to startle
+  canvas.addEventListener('mousedown', (e) => {
+    for (const f of fishes) f.startle(e.clientX, e.clientY);
+    // spawn a puff of bubbles at click for fun
+    for (let i = 0; i < 6; i++) {
+      const b = new Bubble(e.clientX + rand(-10,10), e.clientY);
+      b.rise = rand(0.8, 1.6);
+      bubbles.push(b);
+    }
+  });
+  canvas.addEventListener('touchstart', (e) => {
+    const t = e.touches[0];
+    for (const f of fishes) f.startle(t.clientX, t.clientY);
+  });
+
+  // Handle resize rebuilding
+  window.addEventListener('resize', () => {
+    buildPlants();
+    buildPebbles();
+    setBubbler();
+    crab.y = H - 85;
+    crab.x = clamp(crab.x, 120, W - 120);
+  });
+
+  let lastT = performance.now();
+  let bubbleTimer = 0;
+  let dartCooldown = 0;
+
+  function loop(now) {
+    const dt = Math.min(0.05, (now - lastT) / 1000);
+    lastT = now;
+    const time = now / 1000;
+
+    // --- Render ---
+    // Back water gradient
+    const grad = ctx.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, '#1b4a6b');
+    grad.addColorStop(0.5, '#12374f');
+    grad.addColorStop(1, '#0a1e2e');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+
+    // Caustic light ripples on back glass
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const causticCount = 7;
+    for (let i = 0; i < causticCount; i++) {
+      const cx = W * 0.5 + Math.sin(time * 0.3 + i) * W * 0.4 + Math.cos(time * 0.17 + i * 1.3) * W * 0.2;
+      const cy = H * 0.3 + Math.sin(time * 0.21 + i * 0.7) * H * 0.25 + Math.cos(time * 0.13 + i * 1.1) * H * 0.15;
+      const r = 180 + Math.sin(time * 0.4 + i) * 40;
+      const cg = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+      cg.addColorStop(0, 'rgba(140,220,255,0.10)');
+      cg.addColorStop(0.5, 'rgba(100,180,220,0.04)');
+      cg.addColorStop(1, 'rgba(80,160,200,0)');
+      ctx.fillStyle = cg;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI*2);
+      ctx.fill();
+    }
+    // Thin wavering light lines (caustic web)
+    ctx.globalAlpha = 0.18;
+    ctx.strokeStyle = '#bfe8ff';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 14; i++) {
+      ctx.beginPath();
+      const y0 = (i * 47 + Math.sin(time*0.4 + i) * 20) % H;
+      ctx.moveTo(0, y0);
+      for (let x = 0; x <= W; x += 60) {
+        const y = y0 + Math.sin(time * 0.5 + x * 0.01 + i) * 18 + Math.cos(time*0.7 + x*0.02) * 8;
+        ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    // Back plants (far)
+    ctx.save();
+    ctx.globalAlpha = 0.55;
+    for (let i = 0; i < plants.length; i += 2) plants[i].draw(time);
+    ctx.restore();
+
+    // Fishes
+    for (const f of fishes) {
+      f.update(dt, time);
+      f.draw(time);
+    }
+
+    // Occasional startle (random dart)
+    dartCooldown -= dt;
+    if (dartCooldown <= 0 && fishes.length) {
+      dartCooldown = rand(6, 14);
+      const f = fishes[randi(0, fishes.length)];
+      const a = rand(0, Math.PI*2);
+      f.vx += Math.cos(a) * 4;
+      f.vy += Math.sin(a) * 4;
+      f.dartTimer = 0.4;
+      f.wanderAngle = a;
+    }
+
+    // Gravel
+    ctx.fillStyle = '#1a120a';
+    ctx.fillRect(0, H - 70, W, 70);
+    const gg = ctx.createLinearGradient(0, H - 70, 0, H);
+    gg.addColorStop(0, 'rgba(60,40,25,0.0)');
+    gg.addColorStop(1, 'rgba(20,10,5,0.9)');
+    ctx.fillStyle = gg;
+    ctx.fillRect(0, H - 70, W, 70);
+
+    // Pebbles
+    for (const p of pebbles) {
+      ctx.fillStyle = p.c;
+      ctx.beginPath();
+      ctx.ellipse(p.x, p.y, p.r, p.r * 0.75, 0, 0, Math.PI*2);
+      ctx.fill();
+    }
+
+    // Bubbler device
+    ctx.save();
+    ctx.fillStyle = '#2a2a30';
+    ctx.fillRect(bubblerX - 20, bubblerY - 6, 40, 12);
+    ctx.fillStyle = '#1a1a20';
+    ctx.fillRect(bubblerX - 18, bubblerY - 8, 36, 4);
+    // small holes
+    ctx.fillStyle = '#555';
+    for (let i = -2; i <= 2; i++) {
+      ctx.beginPath();
+      ctx.arc(bubblerX + i*6, bubblerY - 4, 1.2, 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // Hermit crab
+    crab.update(dt);
+    crab.draw();
+
+    // Front plants
+    for (let i = 1; i < plants.length; i += 2) plants[i].draw(time);
+
+    // Bubbles
+    bubbleTimer -= dt;
+    if (bubbleTimer <= 0) {
+      bubbleTimer = rand(0.08, 0.2);
+      for (let i = 0; i < randi(1, 3); i++) {
+        bubbles.push(new Bubble(bubblerX + rand(-10, 10), bubblerY - 4));
+      }
+    }
+    for (let i = bubbles.length - 1; i >= 0; i--) {
+      const b = bubbles[i];
+      b.update();
+      b.draw();
+      if (b.dead()) bubbles.splice(i, 1);
+    }
+
+    // Surface shimmer at top
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const shg = ctx.createLinearGradient(0, 0, 0, 60);
+    shg.addColorStop(0, 'rgba(200,240,255,0.25)');
+    shg.addColorStop(1, 'rgba(200,240,255,0)');
+    ctx.fillStyle = shg;
+    ctx.fillRect(0, 0, W, 60);
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    for (let x = 0; x <= W; x += 8) {
+      const y = Math.sin(time * 1.2 + x * 0.04) * 1.8 + Math.cos(time*0.8 + x*0.02) * 1.2;
+      if (x === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.restore();
+
+    // Vignette
+    const vg = ctx.createRadialGradient(W/2, H/2, Math.min(W,H)*0.4, W/2, H/2, Math.max(W,H)*0.7);
+    vg.addColorStop(0, 'rgba(0,0,0,0)');
+    vg.addColorStop(1, 'rgba(0,0,0,0.55)');
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, W, H);
+
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

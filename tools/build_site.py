@@ -53,6 +53,13 @@ CSS = """
   .panel-head a.full { color: #ff4747; text-decoration: none; font-size: .8rem; letter-spacing: .05em; }
   .panel-head a.full:hover { text-decoration: underline; }
   .panel iframe { display: block; width: 100%; height: 430px; border: 0; background: #000; }
+  .liveslot { position: relative; cursor: pointer; }
+  .liveslot video { display: block; width: 100%; aspect-ratio: 16/10; object-fit: cover; background: #000; }
+  .liveslot .hint { position: absolute; bottom: .6rem; right: .75rem; font-size: .7rem;
+    letter-spacing: .05em; text-transform: uppercase; color: #f0e6e6;
+    background: rgba(0,0,0,.55); border: 1px solid rgba(255,70,70,.45);
+    padding: .25rem .6rem; border-radius: 99px; pointer-events: none; }
+  .liveslot:hover .hint { background: rgba(255,40,40,.35); }
   .wrap.wide { max-width: 1240px; }
 """
 
@@ -124,9 +131,23 @@ for section, stems in by_section.items():
           <span class="muted">{r['tokens']} tok &middot; <span class="b {r['status']}">{r['status']}</span></span>
           <a class="full" href="./{r['runId']}/">open full &rarr;</a>
         </div>
-        <iframe src="./{r['runId']}/" loading="lazy" title="{html.escape(r['modelName'])}"></iframe>
+        <div class="liveslot" data-src="./{r['runId']}/" data-title="{html.escape(r['modelName'])}">
+          <video src="./{r['runId']}/preview.webm" muted loop autoplay playsinline preload="metadata"></video>
+          <span class="hint">&#9654; click to run live</span>
+        </div>
       </div>""")
-        body = '    <div class="panels">\n' + '\n'.join(panels) + '\n    </div>'
+        swap_js = """    <script>
+    // panels show the recorded preview; clicking swaps in the live demo
+    document.querySelectorAll('.liveslot').forEach((s) => {
+      s.addEventListener('click', () => {
+        const f = document.createElement('iframe');
+        f.src = s.dataset.src;
+        f.title = s.dataset.title;
+        s.replaceWith(f);
+      }, { once: true });
+    });
+    </script>"""
+        body = '    <div class="panels">\n' + '\n'.join(panels) + '\n    </div>\n' + swap_js
         open(os.path.join(REPO, section, stem, 'index.html'), 'w', encoding='utf-8').write(
             page(title, '../', SECTIONS[section][0],
                  f'{len(runs)} run(s), live. Add a model, get a panel.', body, wide=True))

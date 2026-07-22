@@ -1,339 +1,478 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dripping Paint Art</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background-color: #000;
-        }
-        canvas {
-            display: block;
-        }
-    </style>
+<style>
+* { margin: 0; padding: 0; }
+body { overflow: hidden; background: #0a0a0a; }
+canvas { display: block; width: 100vw; height: 100vh; }
+</style>
 </head>
 <body>
-    <canvas id="canvas"></canvas>
-    <script>
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+let imageData, pixels, wetness, thickness;
+let drips = [];
+let coverage = 0;
+let fading = false;
+let fadeProgress = 0;
+let frameCount = 0;
 
-        let width, height;
-        let drips = [];
-        let particles = [];
-        
-        // Configuration
-        const PALETTE = [
-            '#FF4136', // Red
-            '#FF851B', // Orange
-            '#FFDC00', // Yellow
-            '#2ECC40', // Green
-            '#0074D9', // Blue
-            '#B10DC9', // Purple
-            '#F012BE', // Pink
-            '#7FDBFF'  // Cyan
-        ];
+const PALETTE = [
+  [220, 30, 50], [240, 80, 20], [255, 180, 20], [255, 220, 60],
+  [30, 160, 220], [20, 100, 200], [10, 200, 180], [40, 220, 120],
+  [180, 40, 180], [220, 40, 160], [200, 60, 100], [100, 40, 200],
+  [20, 80, 160], [160, 20, 80], [200, 140, 30], [60, 200, 60],
+  [255, 100, 40], [40, 200, 240], [160, 60, 200], [255, 60, 120],
+  [10, 140, 80], [220, 160, 80], [80, 40, 180], [240, 40, 40],
+];
 
-        class Drip {
-            constructor() {
-                this.reset();
-            }
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  imageData = ctx.createImageData(W, H);
+  pixels = imageData.data;
+  wetness = new Float32Array(W * H);
+  thickness = new Float32Array(W * H);
+  clearToWhite();
+}
 
-            reset() {
-                this.x = Math.random() * width;
-                this.y = -20; // Start above screen
-                this.vx = (Math.random() - 0.5) * 0.5; // Slight drift
-                this.vy = Math.random() * 1 + 0.5; // Initial speed
-                this.radius = Math.random() * 15 + 10; // Fat drops
-                
-                // Thickness represents the "mass" of the paint
-                this.thickness = this.radius; 
-                
-                this.color = PALETTE[Math.floor(Math.random() * PALETTE.length)];
-                this.dryness = 0; // 0 = wet, 1 = dry
-                this.drySpeed = Math.random() * 0.002 + 0.0005;
-                
-                // Drip state
-                this.isDripping = true;
-                this.minThickness = 3; // Stop dripping when thin
-                this.stopped = false;
-            }
+function clearToWhite() {
+  for (let i = 0; i < W * H * 4; i += 4) {
+    pixels[i] = 255;
+    pixels[i + 1] = 255;
+    pixels[i + 2] = 255;
+    pixels[i + 3] = 255;
+  }
+  wetness.fill(0);
+  thickness.fill(0);
+}
 
-            update() {
-                if (this.stopped) return;
+function hslToRgb(h, s, l) {
+  h /= 360; s /= 100; l /= 100;
+  let r, g, b;
+  if (s === 0) { r = g = b = l; }
+  else {
+    const hue2rgb = (p, q, t) => {
+      if (t < 0) t += 1; if (t > 1) t -= 1;
+      if (t < 1/6) return p + (q - p) * 6 * t;
+      if (t < 1/2) return q;
+      if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+      return p;
+    };
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    r = hue2rgb(p, q, h + 1/3);
+    g = hue2rgb(p, q, h);
+    b = hue2rgb(p, q, h - 1/3);
+  }
+  return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+}
 
-                // Physics: Gravity vs Resistance (thicker paint moves slower? No, usually heavy things fall faster, 
-                // but viscous thick paint falls slower. Let's go with viscous.)
-                // Actually, for visual satisfaction, let's have them accelerate initially then slow down as they thin out.
-                
-                this.vy += 0.02; // Gravity acceleration
-                
-                // Thickness loss (paint leaves trail)
-                this.thickness -= 0.03;
+function getPaletteColor() {
+  return PALETTE[Math.floor(Math.random() * PALETTE.length)];
+}
 
-                // Stopping conditions
-                if (this.thickness <= this.minThickness) {
-                    this.stopped = true;
-                    // Transition to particle system for pooling
-                    this.spawnPoolParticles();
-                }
+function getBrightColor() {
+  const base = getPaletteColor();
+  const bright = [
+    Math.min(255, base[0] + Math.random() * 40),
+    Math.min(255, base[1] + Math.random() * 40),
+    Math.min(255, base[2] + Math.random() * 40),
+  ];
+  return bright;
+}
 
-                this.x += this.vx;
-                this.y += this.vy;
+class Drip {
+  constructor(x, y, color, thickness, fromBranch = false) {
+    this.x = x;
+    this.y = y;
+    this.color = color;
+    this.thickness = thickness;
+    this.initialThickness = thickness;
+    this.wetness = 1.0;
+    this.mass = thickness;
+    this.vx = (Math.random() - 0.5) * 0.8;
+    this.vy = 0.5 + Math.random() * 1.5;
+    this.alive = true;
+    this.age = 0;
+    this.fromBranch = fromBranch;
+    this.branchTimer = 0;
+    this.maxBranches = fromBranch ? 0 : Math.floor(1 + Math.random() * 3);
+    this.branchesLeft = this.maxBranches;
+    this.wobblePhase = Math.random() * Math.PI * 2;
+    this.wobbleSpeed = 0.02 + Math.random() * 0.03;
+    this.wobbleAmp = 0.3 + Math.random() * 0.5;
+    this.stretch = 1.0;
+    this.lastPaintY = y;
+    this.paintInterval = 2;
+    this.pooled = false;
+    this.poolRadius = 0;
+  }
 
-                // Dryness accumulation
-                // Dries faster when stopped and when thicker
-                this.dryness += this.drySpeed * (1 + this.thickness/10);
-                if (this.dryness > 1) this.dryness = 1;
+  update() {
+    if (!this.alive) return;
+    this.age++;
+    this.wobblePhase += this.wobbleSpeed;
 
-                // Reset if fell off screen
-                if (this.y > height + 50) {
-                    this.reset();
-                }
-            }
+    if (this.pooled) {
+      this.poolRadius += 0.3;
+      this.wetness *= 0.998;
+      this.thickness *= 0.999;
+      if (this.poolRadius > 30 + this.initialThickness * 3) {
+        this.alive = false;
+      }
+      return;
+    }
 
-            spawnPoolParticles() {
-                // When a drip stops, it "splats" into static particles
-                const numParticles = Math.floor(this.thickness * 2);
-                for (let i = 0; i < numParticles; i++) {
-                    const p = new Particle(this.x, this.y, this.color, this.thickness);
-                    particles.push(p);
-                }
-                this.dryness = 1; // Instantly dry upon "splashing"
-            }
+    // Speed based on accumulated paint thickness
+    const localThickness = this.getLocalThickness();
+    const speedMult = 0.5 + localThickness * 0.08 + this.mass * 0.05;
 
-            draw(ctx) {
-                if (this.dryness >= 1) return; // Handled by particles
+    // Gravity
+    this.vy += 0.05 * speedMult;
+    this.vy = Math.min(this.vy, 6 + localThickness * 0.3);
 
-                ctx.fillStyle = this.color;
-                ctx.beginPath();
-                // Draw a teardrop shape
-                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
-                
-                // Taper the bottom
-                ctx.moveTo(this.x - this.radius, this.y);
-                ctx.quadraticCurveTo(this.x - this.radius, this.y + this.radius * 1.5, this.x, this.y + this.radius * 2);
-                ctx.quadraticCurveTo(this.x + this.radius, this.y + this.radius * 1.5, this.x + this.radius, this.y);
-                
-                ctx.fill();
-                
-                // Simple lighting/shading for wet look
-                ctx.fillStyle = 'rgba(255,255,255,0.2)';
-                ctx.beginPath();
-                ctx.arc(this.x - this.radius*0.3, this.y - this.radius*0.3, this.radius*0.2, 0, Math.PI*2);
-                ctx.fill();
-            }
+    // Wobble
+    this.vx += Math.sin(this.wobblePhase) * this.wobbleAmp * 0.02;
+    this.vx *= 0.98;
+
+    // Stretch based on velocity
+    this.stretch = 1 + this.vy * 0.15;
+
+    // Move
+    this.x += this.vx * speedMult;
+    this.y += this.vy * speedMult;
+
+    // Random thickness variation
+    this.thickness += (Math.random() - 0.5) * 0.1;
+    this.thickness = Math.max(0.5, this.thickness);
+
+    // Paint trail
+    const dist = this.y - this.lastPaintY;
+    if (dist >= this.paintInterval) {
+      this.paintTrail(this.lastPaintY, this.y);
+      this.lastPaintY = this.y;
+    }
+
+    // Branching
+    if (this.branchesLeft > 0 && this.age > 30 && this.mass > 2) {
+      this.branchTimer++;
+      if (this.branchTimer > 40 + Math.random() * 60) {
+        this.branchTimer = 0;
+        if (Math.random() < 0.4) {
+          this.branch();
+          this.branchesLeft--;
         }
+      }
+    }
 
-        class Particle {
-            constructor(x, y, color, size) {
-                this.x = x + (Math.random() - 0.5) * size;
-                this.y = y + (Math.random() - 0.5) * size;
-                this.color = color;
-                this.size = Math.random() * size * 0.5 + 1;
-                this.dryness = 0;
-                this.drySpeed = Math.random() * 0.005 + 0.002; // Particles dry faster
-            }
+    // Lose mass slowly (evaporation/thinning)
+    this.mass *= 0.9995;
+    this.wetness *= 0.9992;
 
-            update() {
-                this.dryness += this.drySpeed;
-                if (this.dryness > 1) this.dryness = 1;
-            }
+    // Slow down near bottom
+    if (this.y > H * 0.85) {
+      this.vy *= 0.98;
+      this.thickness *= 1.001;
+      if (this.y > H - 20 && this.vy < 1) {
+        this.pooled = true;
+        this.poolRadius = this.thickness * 2;
+      }
+    }
 
-            draw(ctx) {
-                // Opacity depends on wetness. 
-                // Wet paint is opaque and glossy. Dry paint gets darker (opacity/color darkening).
-                const opacity = 1;
-                ctx.fillStyle = this.color;
-                ctx.globalAlpha = opacity;
-                
-                // Add slight blur to simulate liquid spreading
-                ctx.beginPath();
-                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
-                ctx.fill();
-                
-                // Wet gloss
-                if (this.dryness < 0.5) {
-                    ctx.fillStyle = 'rgba(255,255,255,0.3)';
-                    ctx.beginPath();
-                    ctx.arc(this.x - this.size*0.2, this.y - this.size*0.2, this.size*0.3, 0, Math.PI*2);
-                    ctx.fill();
-                }
-                ctx.globalAlpha = 1;
-            }
+    // Out of bounds
+    if (this.y > H + 50 || this.x < -50 || this.x > W + 50) {
+      this.alive = false;
+    }
+
+    if (this.wetness < 0.02) {
+      this.alive = false;
+    }
+  }
+
+  getLocalThickness() {
+    const ix = Math.floor(this.x);
+    const iy = Math.floor(this.y);
+    if (ix < 0 || ix >= W || iy < 0 || iy >= H) return 0;
+    let sum = 0;
+    let count = 0;
+    const r = Math.ceil(this.thickness);
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        const px = ix + dx;
+        const py = iy + dy;
+        if (px >= 0 && px < W && py >= 0 && py < H) {
+          sum += thickness[py * W + px];
+          count++;
         }
+      }
+    }
+    return count > 0 ? sum / count : 0;
+  }
 
-        function init() {
-            width = window.innerWidth;
-            height = window.innerHeight;
-            canvas.width = width;
-            canvas.height = height;
+  paintTrail(y1, y2) {
+    const steps = Math.max(1, Math.ceil((y2 - y1) / 1));
+    const radius = Math.max(1, this.thickness * 0.8);
 
-            // Create initial drips
-            drips = [];
-            for(let i=0; i<15; i++) {
-                drips.push(new Drip());
-                // Spread them out vertically initially
-                drips[i].y = Math.random() * height;
-            }
+    for (let s = 0; s <= steps; s++) {
+      const t = s / steps;
+      const px = this.x + (this.vx * 0.5) * (1 - t);
+      const py = y1 + (y2 - y1) * t;
+      const ix = Math.floor(px);
+      const iy = Math.floor(py);
+
+      if (ix < 1 || ix >= W - 1 || iy < 1 || iy >= H - 1) continue;
+
+      const paintRadius = radius * (0.7 + this.wetness * 0.3);
+      const r2 = paintRadius * paintRadius;
+
+      const rMin = Math.max(0, Math.floor(ix - paintRadius));
+      const rMax = Math.min(W - 1, Math.ceil(ix + paintRadius));
+      const cMin = Math.max(0, Math.floor(iy - paintRadius));
+      const cMax = Math.min(H - 1, Math.ceil(iy + paintRadius));
+
+      for (let cy = cMin; cy <= cMax; cy++) {
+        const dy = cy - iy;
+        const dy2 = dy * dy;
+        for (let cx = rMin; cx <= rMax; cx++) {
+          const dx = cx - ix;
+          const dist2 = dx * dx + dy2;
+          if (dist2 > r2) continue;
+
+          const idx = cy * W + cx;
+          const alpha = (1 - dist2 / r2) * this.wetness * 0.15;
+          if (alpha < 0.01) continue;
+
+          const pi = idx * 4;
+          const oldWet = wetness[idx];
+          const oldThick = thickness[idx];
+
+          // Blend colors
+          const newR = pixels[pi] * (1 - alpha) + this.color[0] * alpha;
+          const newG = pixels[pi + 1] * (1 - alpha) + this.color[1] * alpha;
+          const newB = pixels[pi + 2] * (1 - alpha) + this.color[2] * alpha;
+
+          pixels[pi] = newR;
+          pixels[pi + 1] = newG;
+          pixels[pi + 2] = newB;
+
+          wetness[idx] = Math.min(1, oldWet + alpha * 0.5);
+          thickness[idx] = Math.min(100, oldThick + alpha * 2);
         }
+      }
+    }
+  }
 
-        function checkCoverage() {
-            // We sample pixels to check coverage
-            // To be performant, we don't check every pixel every frame.
-            // We check a subset of pixels.
-            
-            const samples = 2000;
-            let coveredPixels = 0;
+  branch() {
+    const angle = (Math.random() > 0.5 ? 1 : -1) * (0.3 + Math.random() * 0.8);
+    const newThickness = this.thickness * (0.3 + Math.random() * 0.3);
+    const newColor = this.color.map((c, i) => {
+      const shift = (Math.random() - 0.5) * 30;
+      return Math.max(0, Math.min(255, c + shift));
+    });
+    const branch = new Drip(
+      this.x + Math.sin(angle) * 3,
+      this.y,
+      newColor,
+      newThickness,
+      true
+    );
+    branch.vx = this.vx + Math.sin(angle) * 1.5;
+    branch.vy = this.vy * 0.7;
+    branch.mass = this.mass * 0.4;
+    drips.push(branch);
+    this.mass *= 0.6;
+  }
+}
 
-            // Optimization: Check a grid of points
-            for (let i = 0; i < samples; i++) {
-                const x = Math.random() * width;
-                const y = Math.random() * height;
-                
-                // Get pixel data
-                // This is expensive, so we limit samples
-                const p = ctx.getImageData(x, y, 1, 1).data;
-                const [r, g, b] = p;
-                
-                // If pixel is not white (alpha is handled by not clearing rect), it's painted
-                // Since we don't clearRect, the background is whatever was last drawn or black.
-                // Actually, we need to track the "wetness" or "coverage" of the white canvas.
-                // If the pixel is non-white (and not the black background), it's painted.
-                // However, since we draw ON TOP, checking if pixel is white is the key.
-                
-                if (r > 240 && g > 240 && b > 240) {
-                    // White pixel, not covered
-                } else {
-                    coveredPixels++;
-                }
-            }
+function darkenPixels() {
+  const darkenRate = 0.0008;
+  for (let i = 0; i < W * H; i++) {
+    if (wetness[i] > 0.05) {
+      const pi = i * 4;
+      const w = wetness[i];
+      // Darken based on how dry it is
+      const dryFactor = Math.max(0.15, 1 - (1 - w) * 0.85);
+      pixels[pi] *= dryFactor;
+      pixels[pi + 1] *= dryFactor;
+      pixels[pi + 2] *= dryFactor;
+      // Wet paint stays brighter
+      if (w > 0.5) {
+        const wetBoost = (w - 0.5) * 0.3;
+        pixels[pi] = Math.min(255, pixels[pi] + wetBoost * 40);
+        pixels[pi + 1] = Math.min(255, pixels[pi + 1] + wetBoost * 40);
+        pixels[pi + 2] = Math.min(255, pixels[pi + 2] + wetBoost * 40);
+      }
+      // Slight saturation boost for wet paint
+      if (w > 0.3) {
+        const satBoost = w * 0.1;
+        const avg = (pixels[pi] + pixels[pi + 1] + pixels[pi + 2]) / 3;
+        pixels[pi] = pixels[pi] + (pixels[pi] - avg) * satBoost;
+        pixels[pi + 1] = pixels[pi + 1] + (pixels[pi + 1] - avg) * satBoost;
+        pixels[pi + 2] = pixels[pi + 2] + (pixels[pi + 2] - avg) * satBoost;
+      }
+    }
+  }
+}
 
-            const coverageRatio = coveredPixels / samples;
-            
-            if (coverageRatio > 0.65) { // Threshold
-                fadeToWhite(coverageRatio);
-            }
-        }
+function calculateCoverage() {
+  let painted = 0;
+  const total = W * H;
+  for (let i = 0; i < total; i++) {
+    if (wetness[i] > 0.05) painted++;
+  }
+  return painted / total;
+}
 
-        let fading = false;
-        let fadeValue = 0;
+function spawnDrip() {
+  const x = 30 + Math.random() * (W - 60);
+  const color = getBrightColor();
+  const thickness = 2 + Math.random() * 5;
+  drips.push(new Drip(x, -5, color, thickness));
+}
 
-        function fadeToWhite(ratio) {
-            if (fading) return;
-            fading = true;
-            
-            // Gentle fade out logic
-            const fadeInterval = setInterval(() => {
-                fadeValue += 0.05;
-                
-                // Draw white overlay
-                ctx.fillStyle = `rgba(255, 255, 255, ${fadeValue})`;
-                ctx.fillRect(0, 0, width, height);
-                
-                // Update particles to "dry" visually as white fades in
-                // (They don't change state, just obscured)
-                
-                if (fadeValue >= 1) {
-                    clearInterval(fadeInterval);
-                    // Reset
-                    ctx.clearRect(0, 0, width, height);
-                    ctx.fillStyle = '#FFFFFF';
-                    ctx.fillRect(0, 0, width, height);
-                    
-                    // Reset Drips
-                    drips.forEach(d => d.reset());
-                    particles = [];
-                    
-                    fading = false;
-                    fadeValue = 0;
-                }
-            }, 50);
-        }
+function spawnInitialDrips() {
+  for (let i = 0; i < 8; i++) {
+    setTimeout(() => spawnDrip(), i * 100);
+  }
+}
 
-        function darkenDriedPaint() {
-            // This is computationally expensive to do on the whole canvas every frame.
-            // Instead, we rely on the Particle class darkening itself as it dries.
-            // We will simulate the "global darkening" effect by drawing a very dark overlay 
-            // on top of old paint? No, that ruins the white fade.
-            // The requirement "drying is a visible gradual darkening" is best handled per-particle.
-            // We iterate particles and darken their fillStyle.
-        }
+function fadeToWhite() {
+  fading = true;
+  fadeProgress = 0;
+}
 
-        function animate() {
-            // Background is white. We draw on top.
-            
-            // Update and draw Drips
-            drips.forEach(d => {
-                d.update();
-                d.draw(ctx);
-            });
+function updateFade() {
+  if (!fading) return;
+  fadeProgress += 0.005;
+  if (fadeProgress >= 1) {
+    clearToWhite();
+    drips = [];
+    fading = false;
+    fadeProgress = 0;
+    spawnInitialDrips();
+    return;
+  }
+  for (let i = 0; i < W * H; i++) {
+    const pi = i * 4;
+    const w = wetness[i];
+    const white = 255;
+    const paintR = pixels[pi];
+    const paintG = pixels[pi + 1];
+    const paintB = pixels[pi + 2];
+    const blend = fadeProgress * (0.3 + w * 0.7);
+    pixels[pi] = paintR + (white - paintR) * blend;
+    pixels[pi + 1] = paintG + (white - paintG) * blend;
+    pixels[pi + 2] = paintB + (white - paintB) * blend;
+  }
+}
 
-            // Update and draw Particles
-            particles.forEach(p => {
-                p.update();
-                
-                // Darken logic for drying particles
-                if (p.dryness > 0.1) {
-                    // Parse hex color to darken it
-                    const hex = p.color;
-                    const r = parseInt(hex.substring(1, 3), 16);
-                    const g = parseInt(hex.substring(3, 5), 16);
-                    const b = parseInt(hex.substring(5, 7), 16);
-                    
-                    const darkFactor = 0.5 + (0.5 * (1 - p.dryness)); // Starts at 1 (normal), goes to 0.5 (dark)
-                    
-                    // We need to draw the darkened color.
-                    // Since we already drew the wet version, we draw over it.
-                    // However, drawing over white background with the dark color will look wrong if we don't composite correctly.
-                    // Better approach: In Particle.draw, just calculate the darkened color.
-                }
-                
-                // Redraw particle with dryness applied
-                // Note: This redraws on top of the wet version. 
-                // If the particle hasn't moved much, it blends.
-                // But since we are on a white canvas, drawing a semi-transparent dark color on top of the bright wet color 
-                // will darken it correctly.
-                
-                const hex = p.color;
-                const r = parseInt(hex.substring(1, 3), 16);
-                const g = parseInt(hex.substring(3, 5), 16);
-                const b = parseInt(hex.substring(5, 7), 16);
-                
-                const darkenAmt = 0.4 * p.dryness; // How dark it gets
-                const dr = Math.floor(r * (1 - darkenAmt));
-                const dg = Math.floor(g * (1 - darkenAmt));
-                const db = Math.floor(b * (1 - darkenAmt));
-                
-                ctx.fillStyle = `rgb(${dr},${dg},${db})`;
-                ctx.globalAlpha = 0.8; // Slight transparency to blend
-                ctx.beginPath();
-                ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-                ctx.fill();
-                ctx.globalAlpha = 1;
-            });
+function applyPooling() {
+  // Simulate paint pooling at bottom - paint flows into low spots
+  const poolStrength = 0.02;
+  for (let y = H - 1; y > 10; y--) {
+    for (let x = 1; x < W - 1; x++) {
+      const idx = y * W + x;
+      if (thickness[idx] < 0.5) continue;
 
-            // Check coverage periodically (every 10 frames or so)
-            if (frameCount % 10 === 0) {
-                checkCoverage();
-            }
+      // Check neighbors for thickness gradient
+      const belowIdx = (y + 1) * W + x;
+      const belowThick = thickness[belowIdx];
+      const diff = thickness[idx] - belowThick;
 
-            frameCount++;
-            requestAnimationFrame(animate);
-        }
+      if (diff > 0.5 && belowThick < 50) {
+        const transfer = Math.min(diff * poolStrength, thickness[idx] * 0.01);
+        thickness[belowIdx] += transfer;
+        thickness[idx] -= transfer;
+        wetness[belowIdx] = Math.min(1, wetness[belowIdx] + transfer * 0.01);
+        wetness[idx] = Math.max(0, wetness[idx] - transfer * 0.01);
 
-        let frameCount = 0;
+        // Transfer some color
+        const pi = belowIdx * 4;
+        const ci = idx * 4;
+        const blend = transfer * 0.005;
+        pixels[pi] = pixels[pi] * (1 - blend) + pixels[ci] * blend;
+        pixels[pi + 1] = pixels[pi + 1] * (1 - blend) + pixels[ci + 1] * blend;
+        pixels[pi + 2] = pixels[pi + 2] * (1 - blend) + pixels[ci + 2] * blend;
+      }
+    }
+  }
+}
 
-        window.addEventListener('resize', init);
-        init();
-        animate();
+function applyLateralFlow() {
+  // Subtle lateral flow for wet paint
+  const flowRate = 0.003;
+  for (let y = 2; y < H - 1; y++) {
+    for (let x = 2; x < W - 2; x++) {
+      const idx = y * W + x;
+      if (wetness[idx] < 0.1) continue;
 
-    </script>
+      const leftIdx = y * W + (x - 1);
+      const rightIdx = y * W + (x + 1);
+      const thickDiff = thickness[idx] - thickness[leftIdx];
+      const thickDiffR = thickness[idx] - thickness[rightIdx];
+
+      if (thickDiff > 1) {
+        const transfer = thickDiff * flowRate * wetness[idx];
+        thickness[leftIdx] += transfer;
+        thickness[idx] -= transfer;
+      }
+      if (thickDiffR > 1) {
+        const transfer = thickDiffR * flowRate * wetness[idx];
+        thickness[rightIdx] += transfer;
+        thickness[idx] -= transfer;
+      }
+    }
+  }
+}
+
+function update() {
+  frameCount++;
+
+  // Spawn new drips
+  if (frameCount % 15 === 0 && !fading && drips.length < 40) {
+    spawnDrip();
+  }
+
+  // Update drips
+  for (let i = drips.length - 1; i >= 0; i--) {
+    drips[i].update();
+    if (!drips[i].alive) {
+      drips.splice(i, 1);
+    }
+  }
+
+  // Apply paint physics
+  darkenPixels();
+  applyPooling();
+  applyLateralFlow();
+
+  // Check coverage
+  if (!fading) {
+    coverage = calculateCoverage();
+    if (coverage > 0.12) {
+      fadeToWhite();
+    }
+  }
+
+  updateFade();
+
+  // Render
+  ctx.putImageData(imageData, 0, 0);
+}
+
+function loop() {
+  update();
+  requestAnimationFrame(loop);
+}
+
+window.addEventListener('resize', resize);
+resize();
+spawnInitialDrips();
+loop();
+</script>
 </body>
 </html>

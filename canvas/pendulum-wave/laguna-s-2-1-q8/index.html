@@ -1,188 +1,133 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Pendulum Wave</title>
 <style>
   html, body {
     margin: 0;
     padding: 0;
     overflow: hidden;
-    background: #000;
+    background: #111;
+    height: 100%;
   }
   canvas { display: block; }
 </style>
 </head>
 <body>
-<canvas id="canvas"></canvas>
+<canvas id="c"></canvas>
 <script>
-(() => {
-  const canvas = document.getElementById('canvas');
-  const ctx = canvas.getContext('2d');
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
 
-  function resize() {
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-  }
-  window.addEventListener('resize', resize);
-  resize();
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
 
-  const W = canvas.width;
-  const H = canvas.height;
+const N = 24;
+const cycleDuration = 60; // seconds
+const g = 9.81;
+const centerX = canvas.width / 2;
+const baseSpacing = Math.min(canvas.width / (N + 1), 60);
+const pendulumSpacing = baseSpacing;
 
-  // Pendulum parameters
-  const numPendulums = 24;
-  const pendulumSpacing = W / (numPendulums + 1);
+// We'll use a frequency-based tuning that creates a 60-second cycle.
+// Each pendulum oscillates at a slightly different frequency.
+// To get a cycle every 60 seconds, we use harmonic spacing around a base.
+const baseFreq = 1.0; // Hz
+const freqSpread = 0.05; // Spread of frequencies per pendulum index
 
-  const amplitude = 0.4; // radians, initial swing
-  const basePeriod = 2.0; // seconds, central period
-  const spread = 0.5; // spread in period variation
+let pendulums = [];
+for (let i = 0; i < N; i++) {
+  const freq = baseFreq + (i - (N - 1) / 2) * freqSpread;
+  const period = 1 / freq;
+  pendulums.push({
+    freq: freq,
+    phase: (i / N) * Math.PI * 2, // initial variation
+    x: centerX + (i - (N - 1) / 2) * pendulumSpacing,
+    trail: []
+  });
+}
 
-  const lengths = [];
-  const periods = [];
-  const phases = [];
-  const positions = [];
+const trailLength = 100;
+const seismoHistory = 400;
+let time = 0;
+let lastResetFlash = 0;
+const resetCycleTime = cycleDuration;
 
-  // Tuning: create a smooth frequency gradient across pendulums
-  for (let i = 0; i < numPendulums; i++) {
-    // Position along wave: from -1 to 1
-    const t = (i / (numPendulums - 1)) * 2 - 1;
-    
-    // Period varies smoothly - quadratic to create interesting phase relationships
-    const periodVariation = spread * t * t;
-    const period = basePeriod + periodVariation;
-    
-    periods.push(period);
-    phases.push(0);
-    positions.push({ x: 0, y: 0, trail: [] });
-  }
+function animate() {
+  const dt = 1 / 60; // fixed time step for consistency
+  time += dt;
 
-  // Seismograph history
-  const seismoHistoryLength = Math.floor(W * 0.6); // pixels wide
-  const seismoHistory = Array.from({ length: numPendulums }, () => []);
-  const seismoWidth = W * 0.6;
-  const seismoHeight = H * 0.3;
-  const seismoX = (W - seismoWidth) / 2;
-  const seismoY = H - seismoHeight - 20;
-  const trailMaxLength = 80;
+  ctx.fillStyle = 'rgba(17,17,17,0.1)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  // Time tracking
-  let startTime = null;
-  const cycleDuration = 60; // seconds
+  const centerY = canvas.height * 0.3;
+  const amplitude = 120;
 
-  function getAngle(index, time) {
-    const period = periods[index];
-    const omega = (2 * Math.PI) / period;
-    return amplitude * Math.cos(omega * time + phases[index] * 0);
-  }
+  // Draw seismograph baseline
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, canvas.height * 0.7);
+  ctx.lineTo(canvas.width, canvas.height * 0.7);
+  ctx.stroke();
 
-  function getPosition(index, time) {
-    const angle = getAngle(index, time);
-    const length = 200 + 200 * Math.sin((index / numPendulums) * Math.PI);
-    const pivotX = pendulumSpacing * (index + 1);
-    const pivotY = H * 0.2;
-    const x = pivotX + Math.sin(angle) * length;
-    const y = pivotY + Math.cos(angle) * length;
-    return { x, y };
-  }
+  pendulums.forEach((p, i) => {
+    const angle = Math.sin(time * 2 * Math.PI * p.freq + p.phase) * 0.5;
+    const x = p.x + Math.sin(angle) * amplitude * 0.3;
+    const y = centerY + Math.cos(angle) * amplitude;
 
-  function draw() {
-    if (!startTime) startTime = performance.now();
-    const now = performance.now();
-    const elapsed = (now - startTime) / 1000;
-    const time = elapsed % cycleDuration;
-    const cycleProgress = elapsed / cycleDuration;
-    const isResetting = elapsed > 0 && Math.floor(elapsed / cycleDuration) > Math.floor((elapsed - 0.016) / cycleDuration);
+    // Update trail
+    p.trail.push({x, y, t: time});
+    if (p.trail.length > trailLength) p.trail.shift();
 
-    // Clear with fade for trails
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
-    ctx.fillRect(0, 0, W, H);
-
-    // Draw seismograph background
-    ctx.fillStyle = 'rgba(10, 10, 20, 0.7)';
-    ctx.fillRect(seismoX, seismoY, seismoWidth, seismoHeight);
-
-    // Draw seismograph lines
-    for (let i = 0; i < numPendulums; i++) {
-      const hue = (i * 360) / numPendulums;
-      ctx.strokeStyle = `hsla(${hue}, 80%, 60%, 0.7)`;
-      ctx.lineWidth = 1;
+    // Draw trail
+    for (let j = 1; j < p.trail.length; j++) {
+      const alpha = j / p.trail.length * 0.5;
+      ctx.strokeStyle = `rgba(100,200,255,${alpha})`;
+      ctx.lineWidth = 2;
       ctx.beginPath();
-      for (let j = 0; j < seismoHistory[i].length - 1; j++) {
-        const x = seismoX + (j / (seismoWidth)) * seismoWidth;
-        const y = seismoY + seismoHeight / 2 + seismoHistory[i][j] * (seismoHeight / 2);
-        if (j === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
+      ctx.moveTo(p.trail[j-1].x, p.trail[j-1].y);
+      ctx.lineTo(p.trail[j].x, p.trail[j].y);
       ctx.stroke();
     }
 
-    // Draw pendulums
-    for (let i = 0; i < numPendulums; i++) {
-      const pos = positions[i];
-      const hue = (i * 360) / numPendulums;
-      
-      // Update position
-      const newPos = getPosition(i, time);
-      pos.x = newPos.x;
-      pos.y = newPos.y;
+    // Draw bob
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(x, y, 6, 0, Math.PI * 2);
+    ctx.fill();
 
-      // Update trail
-      pos.trail.push({ x: pos.x, y: pos.y });
-      if (pos.trail.length > trailMaxLength) pos.trail.shift();
-
-      // Update seismograph
-      const normalizedX = (pos.x - pendulumSpacing * (i + 1)) / 200;
-      seismoHistory[i].push(normalizedX);
-      if (seismoHistory[i].length > seismoWidth) seismoHistory[i].shift();
-
-      // Draw string
-      const pivotX = pendulumSpacing * (i + 1);
-      const pivotY = H * 0.2;
-      ctx.strokeStyle = 'rgba(100, 100, 120, 0.5)';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(pivotX, pivotY);
-      ctx.lineTo(pos.x, pos.y);
-      ctx.stroke();
-
-      // Draw trail
-      if (pos.trail.length > 1) {
-        ctx.strokeStyle = `hsla(${hue}, 80%, 60%, 0.5)`;
-        ctx.lineWidth = 2;
-        ctx.lineCap = 'round';
-        ctx.beginPath();
-        for (let j = 0; j < pos.trail.length - 1; j++) {
-          if (j === 0) ctx.moveTo(pos.trail[j].x, pos.trail[j].y);
-          else ctx.lineTo(pos.trail[j].x, pos.trail[j].y);
-        }
-        ctx.stroke();
-      }
-
-      // Draw bob
-      const gradient = ctx.createRadialGradient(pos.x - 5, pos.y - 5, 1, pos.x, pos.y, 12);
-      gradient.addColorStop(0, `hsla(${hue}, 100%, 70%, 1)`);
-      gradient.addColorStop(1, `hsla(${hue}, 100%, 40%, 1)`);
-      ctx.fillStyle = gradient;
-      ctx.beginPath();
-      ctx.arc(pos.x, pos.y, 10, 0, Math.PI * 2);
-      ctx.fill();
+    // Seismograph trace
+    const seismoX = (i / (N - 1)) * canvas.width;
+    const seismoY = canvas.height * 0.7 - x * 0.5 + canvas.height * 0.1;
+    
+    p.seismoHistory = p.seismoHistory || [];
+    p.seismoHistory.push({x: seismoX, y: seismoY, t: time});
+    if (p.seismoHistory.length > seismoHistory) p.seismoHistory.shift();
+    
+    ctx.strokeStyle = '#00ffff';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let j = 1; j < p.seismoHistory.length; j++) {
+      ctx.lineTo(p.seismoHistory[j].x, p.seismoHistory[j].y);
     }
+    ctx.stroke();
+  });
 
-    // Flash marker at reset
-    if (isResetting) {
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
-      ctx.font = 'bold 24px monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText('RESET', W / 2, seismoY + 30);
-    }
-
-    requestAnimationFrame(draw);
+  // Flash marker at reset
+  const sinceReset = time % resetCycleTime;
+  if (sinceReset < 0.1 || sinceReset > resetCycleTime - 0.1) {
+    ctx.fillStyle = 'rgba(255,255,0,0.3)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
   }
 
-  requestAnimationFrame(draw);
-})();
+  requestAnimationFrame(animate);
+}
+
+animate();
 </script>
 </body>
 </html>

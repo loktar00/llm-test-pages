@@ -1,280 +1,436 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DNA Replication Simulation</title>
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            background-color: #050508;
-            overflow: hidden;
-            width: 100vw;
-            height: 100vh;
-        }
-        canvas {
-            display: block;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DNA Helix</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; }
+canvas { display: block; }
+</style>
 </head>
 <body>
-    <canvas id="dnaCanvas"></canvas>
-    <script>
-        /**
-         * DNA Replication Simulation
-         * Single file implementation using HTML5 Canvas
-         */
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
 
-        const canvas = document.getElementById('dnaCanvas');
-        const ctx = canvas.getContext('2d');
+let W, H;
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
 
-        let width, height;
-        let animationId;
-        let globalTime = 0;
+// DNA parameters
+const NUM_RUNGS = 80;
+const HELIX_RADIUS = 120;
+const PITCH = 3.5; // vertical distance per full turn
+const RUNG_SPACING = 12;
+const HELIX_LENGTH = NUM_RUNGS * RUNG_SPACING;
+const ROTATION_SPEED = 0.008;
 
-        // Configuration
-        const CONFIG = {
-            basePairs: 120,           // Total number of rungs
-            radius: 120,              // Helix radius
-            verticalSpacing: 18,      // Distance between rungs
-            rotationSpeed: 0.005,     // Radians per frame
-            basePairWidth: 14,        // Thickness of the DNA strand
-            glowSize: 15,             // Glow spread
-            replicationSpeed: 0.8,    // Speed of the unzip wave
-            replicationSize: 12,      // Length of the unzipped section
-            colors: {
-                A: { r: 255, g: 255, b: 255, hex: '#ffffff' }, // Adenine (White)
-                T: { r: 255, g: 100, b: 100, hex: '#ff6464' }, // Thymine (Red)
-                G: { r: 100, g: 255, b: 100, hex: '#64ff64' }, // Guanine (Green)
-                C: { r: 100, g: 150, b: 255, hex: '#6496ff' }, // Cytosine (Blue)
-                backbone: { r: 200, g: 200, b: 220, hex: '#c8c8dc' }
-            }
-        };
+// Base pair types
+const BASE_PAIRS = [
+    { type: 'AT', color1: '#00ffff', color2: '#ff4488', glowColor: '#00ffff' },
+    { type: 'GC', color1: '#ffaa00', color2: '#44ffaa', glowColor: '#ffaa00' }
+];
 
-        // State
-        let segments = [];
-        let replicationState = {
-            active: false,
-            center: 0,
-            progress: 0, // 0 to 1
-            direction: 1 // 1 = replicating (unzipping), -1 = rebuilding
-        };
+// Stars
+const stars = [];
+for (let i = 0; i < 300; i++) {
+    stars.push({
+        x: Math.random() * 2 - 1,
+        y: Math.random() * 2 - 1,
+        z: Math.random(),
+        brightness: Math.random() * 0.5 + 0.1,
+        size: Math.random() * 1.5 + 0.3
+    });
+}
 
-        // Resize Handler
-        function resize() {
-            width = canvas.width = window.innerWidth;
-            height = canvas.height = window.innerHeight;
-        }
-        window.addEventListener('resize', resize);
-        resize();
+// Generate base pair types
+const rungData = [];
+for (let i = 0; i < NUM_RUNGS; i++) {
+    rungData.push({
+        basePair: BASE_PAIRS[Math.floor(Math.random() * BASE_PAIRS.length)],
+        index: i
+    });
+}
 
-        // --- Logic & Math ---
+// Replication state
+let replication = {
+    active: false,
+    startRung: 0,
+    endRung: 0,
+    phase: 'idle', // idle, unzipping, waiting, rebuilding, done
+    unzipProgress: 0,
+    rebuildProgress: 0,
+    rebuildNextRung: 0,
+    timer: 0
+};
 
-        // Initialize DNA segments
-        function initDNA() {
-            segments = [];
-            for (let i = 0; i < CONFIG.basePairs; i++) {
-                segments.push({
-                    index: i,
-                    angleOffset: (i * 0.4), // Twist factor
-                    // Base pair types
-                    type1: Math.random() > 0.5 ? 'A' : 'G',
-                    type2: Math.random() > 0.5 ? 'T' : 'C',
-                    // Replication state (0 = connected, 1 = separated)
-                    separation: 0 
-                });
-            }
-        }
+function triggerReplication() {
+    const len = Math.floor(Math.random() * 15) + 8;
+    const start = Math.floor(Math.random() * (NUM_RUNGS - len));
+    replication.startRung = start;
+    replication.endRung = start + len;
+    replication.active = true;
+    replication.phase = 'unzipping';
+    replication.unzipProgress = 0;
+    replication.rebuildProgress = 0;
+    replication.rebuildNextRung = 0;
+    replication.timer = 0;
+}
 
-        // Update Replication Logic
-        function updateReplication() {
-            if (!replicationState.active) {
-                // Randomly start replication
-                if (Math.random() < 0.002) {
-                    replicationState.active = true;
-                    replicationState.center = Math.floor(Math.random() * CONFIG.basePairs);
-                    replicationState.progress = 0;
-                    replicationState.direction = 1;
+// 3D rotation
+function rotateY(x, y, z, angle) {
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    return {
+        x: x * cos - z * sin,
+        y: y,
+        z: x * sin + z * cos
+    };
+}
+
+function project(x, y, z) {
+    const perspective = 800;
+    const scale = perspective / (perspective + z);
+    return {
+        sx: W / 2 + x * scale,
+        sy: H / 2 + y * scale,
+        scale: scale
+    };
+}
+
+function drawStars(time) {
+    for (const star of stars) {
+        const flicker = 0.7 + 0.3 * Math.sin(time * 0.001 + star.x * 100);
+        const alpha = star.brightness * flicker;
+        ctx.fillStyle = `rgba(200, 220, 255, ${alpha})`;
+        ctx.beginPath();
+        ctx.arc(
+            (star.x + 1) / 2 * W,
+            (star.y + 1) / 2 * H,
+            star.size,
+            0, Math.PI * 2
+        );
+        ctx.fill();
+    }
+}
+
+function drawHelix(time) {
+    const rotation = time * ROTATION_SPEED;
+
+    // Collect all drawable elements for depth sorting
+    const elements = [];
+
+    // Calculate rung positions
+    const rungPositions = [];
+    for (let i = 0; i < NUM_RUNGS; i++) {
+        const t = i / NUM_RUNGS;
+        const angle = t * Math.PI * 2 * 6; // 6 full turns
+        const y = (i - NUM_RUNGS / 2) * RUNG_SPACING;
+
+        // Strand A
+        const ax = HELIX_RADIUS * Math.cos(angle);
+        const ay = y;
+        const az = HELIX_RADIUS * Math.sin(angle);
+
+        // Strand B (opposite side)
+        const bx = HELIX_RADIUS * Math.cos(angle + Math.PI);
+        const by = y;
+        const bz = HELIX_RADIUS * Math.sin(angle + Math.PI);
+
+        // Replication offset
+        let repOffsetA = 0;
+        let repOffsetB = 0;
+        let rungVisible = true;
+
+        if (replication.active) {
+            const inRange = i >= replication.startRung && i <= replication.endRung;
+            if (inRange) {
+                if (replication.phase === 'unzipping' || replication.phase === 'waiting') {
+                    const localProgress = replication.unzipProgress;
+                    const unzipAmount = localProgress * 180;
+                    const sign = Math.cos(angle) >= 0 ? 1 : -1;
+                    repOffsetA = sign * unzipAmount * 0.5;
+                    repOffsetB = -sign * unzipAmount * 0.5;
+                    rungVisible = localProgress < 0.3;
+                } else if (replication.phase === 'rebuilding') {
+                    const localProgress = replication.rebuildProgress;
+                    const rebuildRung = replication.rebuildNextRung;
+                    if (i < rebuildRung) {
+                        // Already rebuilt
+                        const unzipAmount = 0;
+                    } else if (i > rebuildRung + 2) {
+                        // Not yet rebuilt
+                        const unzipAmount = 180;
+                        const sign = Math.cos(angle) >= 0 ? 1 : -1;
+                        repOffsetA = sign * unzipAmount * 0.5;
+                        repOffsetB = -sign * unzipAmount * 0.5;
+                        rungVisible = false;
+                    } else {
+                        // Being rebuilt
+                        const rebuildT = (i - rebuildRung) / 3;
+                        const unzipAmount = 180 * (1 - rebuildT);
+                        const sign = Math.cos(angle) >= 0 ? 1 : -1;
+                        repOffsetA = sign * unzipAmount * 0.5;
+                        repOffsetB = -sign * unzipAmount * 0.5;
+                        rungVisible = rebuildT > 0.3;
+                    }
                 }
-            } else {
-                replicationState.progress += CONFIG.replicationSpeed;
-                
-                // Calculate the wave center based on progress
-                // It expands outwards from the initial center point
-                const halfSize = Math.floor(CONFIG.replicationSize / 2);
-                const currentWaveCenter = replicationState.center + (replicationState.progress * 2);
-                
-                // Determine if we are done
-                if (replicationState.progress > CONFIG.basePairs + CONFIG.replicationSize) {
-                    // Reset DNA
-                    segments.forEach(seg => seg.separation = 0);
-                    replicationState.active = false;
-                } else {
-                    // Update separation based on wave position
-                    segments.forEach(seg => {
-                        const dist = Math.abs(seg.index - currentWaveCenter);
-                        if (dist < halfSize) {
-                            seg.separation = 1;
-                        }
-                    });
-                }
             }
         }
 
-        // --- Rendering ---
+        const aRotated = rotateY(ax + repOffsetA, ay, az, rotation);
+        const bRotated = rotateY(bx + repOffsetB, by, bz, rotation);
 
-        function drawGlow(x, y, color, size, alpha) {
+        rungPositions.push({
+            a: aRotated,
+            b: bRotated,
+            index: i,
+            rungVisible,
+            rungData: rungData[i],
+            depth: (aRotated.z + bRotated.z) / 2,
+            rungZ: az
+        });
+
+        // Add strand dots
+        elements.push({
+            type: 'dot',
+            x: aRotated.x,
+            y: aRotated.y,
+            z: aRotated.z,
+            radius: 3.5,
+            color: '#88ccff',
+            depth: aRotated.z
+        });
+        elements.push({
+            type: 'dot',
+            x: bRotated.x,
+            y: bRotated.y,
+            z: bRotated.z,
+            radius: 3.5,
+            color: '#ff88cc',
+            depth: bRotated.z
+        });
+    }
+
+    // Add rung lines
+    for (const rp of rungPositions) {
+        if (!rp.rungVisible) continue;
+
+        const projA = project(rp.a.x, rp.a.y, rp.a.z);
+        const projB = project(rp.b.x, rp.b.y, rp.b.z);
+
+        const depthFactor = (rp.depth + HELIX_RADIUS) / (2 * HELIX_RADIUS);
+        const brightness = 0.2 + 0.8 * depthFactor;
+
+        const bp = rp.rungData.basePair;
+
+        elements.push({
+            type: 'rung',
+            x1: projA.sx, y1: projA.sy,
+            x2: projB.sx, y2: projB.sy,
+            color1: bp.color1,
+            color2: bp.color2,
+            glowColor: bp.glowColor,
+            depth: rp.depth,
+            brightness,
+            index: rp.index
+        });
+
+        // Base pair nodes
+        elements.push({
+            type: 'node',
+            x: projA.sx, y: projA.sy,
+            radius: 4 * projA.scale,
+            color: bp.color1,
+            glowColor: bp.glowColor,
+            depth: rp.a.z,
+            brightness
+        });
+        elements.push({
+            type: 'node',
+            x: projB.sx, y: projB.sy,
+            radius: 4 * projB.scale,
+            color: bp.color2,
+            glowColor: bp.color2,
+            depth: rp.b.z,
+            brightness
+        });
+    }
+
+    // Sort by depth (far first)
+    elements.sort((a, b) => b.depth - a.depth);
+
+    // Draw all elements
+    for (const el of elements) {
+        const depthFactor = (el.depth + HELIX_RADIUS) / (2 * HELIX_RADIUS);
+        const alpha = 0.15 + 0.85 * depthFactor;
+
+        if (el.type === 'rung') {
+            const glowAmount = 8 * alpha;
             ctx.save();
+            ctx.shadowColor = el.glowColor;
+            ctx.shadowBlur = glowAmount;
+
+            // Gradient along the rung
+            const grad = ctx.createLinearGradient(el.x1, el.y1, el.x2, el.y2);
+            grad.addColorStop(0, el.color1 + Math.floor(alpha * 255).toString(16).padStart(2, '0'));
+            grad.addColorStop(0.5, el.glowColor + Math.floor(alpha * 180).toString(16).padStart(2, '0'));
+            grad.addColorStop(1, el.color2 + Math.floor(alpha * 255).toString(16).padStart(2, '0'));
+
+            ctx.strokeStyle = grad;
+            ctx.lineWidth = 2.5 * alpha + 0.5;
             ctx.beginPath();
-            ctx.arc(x, y, size, 0, Math.PI * 2);
-            ctx.fillStyle = `rgba(${color.r}, ${color.g}, ${color.b}, ${alpha * 0.3})`;
-            ctx.shadowBlur = 20;
-            ctx.shadowColor = `rgba(${color.r}, ${color.g}, ${color.b}, ${alpha})`;
+            ctx.moveTo(el.x1, el.y1);
+            ctx.lineTo(el.x2, el.y2);
+            ctx.stroke();
+            ctx.restore();
+        } else if (el.type === 'dot') {
+            const r = el.radius * (0.6 + 0.4 * alpha);
+            ctx.save();
+            ctx.shadowColor = el.color;
+            ctx.shadowBlur = 6 * alpha;
+            ctx.fillStyle = el.color;
+            ctx.globalAlpha = alpha;
+            ctx.beginPath();
+            ctx.arc(el.x, el.y, r, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        } else if (el.type === 'node') {
+            const r = el.radius * (0.5 + 0.5 * alpha);
+            ctx.save();
+            ctx.shadowColor = el.glowColor;
+            ctx.shadowBlur = 10 * alpha;
+            ctx.fillStyle = el.color;
+            ctx.globalAlpha = alpha;
+            ctx.beginPath();
+            ctx.arc(el.x, el.y, r, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Inner highlight
+            ctx.fillStyle = '#ffffff';
+            ctx.globalAlpha = alpha * 0.5;
+            ctx.beginPath();
+            ctx.arc(el.x - r * 0.2, el.y - r * 0.2, r * 0.35, 0, Math.PI * 2);
             ctx.fill();
             ctx.restore();
         }
+    }
 
-        function drawLine(x1, y1, x2, y2, color, width, alpha) {
-            ctx.save();
-            ctx.beginPath();
-            ctx.moveTo(x1, y1);
-            ctx.lineTo(x2, y2);
-            ctx.strokeStyle = `rgba(${color.r}, ${color.g}, ${color.b}, ${alpha})`;
-            ctx.lineWidth = width;
-            ctx.lineCap = 'round';
-            ctx.shadowBlur = 5;
-            ctx.shadowColor = `rgba(${color.r}, ${color.g}, ${color.b}, ${alpha * 0.5})`;
-            ctx.stroke();
-            ctx.restore();
-        }
+    // Draw backbone curves
+    for (let strand = 0; strand < 2; strand++) {
+        ctx.save();
+        ctx.beginPath();
+        for (let i = 0; i <= NUM_RUNGS; i++) {
+            const t = i / NUM_RUNGS;
+            const angle = t * Math.PI * 2 * 6 + strand * Math.PI;
+            const y = (i - NUM_RUNGS / 2) * RUNG_SPACING;
 
-        function render() {
-            // Clear screen with dark fade for trails (optional, but clean clear is better for geometry)
-            ctx.clearRect(0, 0, width, height);
-            
-            // Background gradient
-            const gradient = ctx.createRadialGradient(width/2, height/2, 0, width/2, height/2, width);
-            gradient.addColorStop(0, '#0a0a12');
-            gradient.addColorStop(1, '#000000');
-            ctx.fillStyle = gradient;
-            ctx.fillRect(0, 0, width, height);
+            let ax = HELIX_RADIUS * Math.cos(angle);
+            let az = HELIX_RADIUS * Math.sin(angle);
 
-            globalTime += CONFIG.rotationSpeed;
-
-            updateReplication();
-
-            // 1. Calculate 3D positions for all segments
-            const projectionScale = 600; // Focal length
-            const centerX = width / 2;
-            const centerY = height / 2;
-
-            const renderList = [];
-
-            segments.forEach((seg, i) => {
-                const angle = globalTime + (i * 0.4);
-                
-                // 3D Coordinates
-                const x3d = Math.cos(angle) * CONFIG.radius;
-                const z3d = Math.sin(angle) * CONFIG.radius;
-                
-                // Separation logic: If unzipped, push strands apart on X axis
-                const separationOffset = seg.separation * 40;
-                
-                // Strand 1 (Left/Right depending on rotation)
-                const s1_x = -x3d - separationOffset;
-                const s1_y = i * CONFIG.verticalSpacing;
-                const s1_z = z3d;
-
-                // Strand 2
-                const s2_x = x3d + separationOffset;
-                const s2_y = i * CONFIG.verticalSpacing;
-                const s2_z = z3d;
-
-                // Calculate depth factor (0 = back, 1 = front)
-                // Z goes from -radius to +radius. 
-                // We map -radius -> 0, +radius -> 1
-                const depth = (s1_z + CONFIG.radius) / (CONFIG.radius * 2);
-                
-                // Add brightness based on depth
-                const brightness = 0.3 + (depth * 0.7);
-
-                // Project to 2D
-                const scale = projectionScale / (projectionScale + s1_z); // Simple perspective
-                const sx1 = centerX + s1_x * scale;
-                const sy1 = centerY + s1_y * scale;
-                
-                const sx2 = centerX + s2_x * scale;
-                const sy2 = centerY + s2_y * scale;
-
-                renderList.push({
-                    index: i,
-                    depth: depth,
-                    brightness: brightness,
-                    scale: scale,
-                    s1: { x: sx1, y: sy1, z: s1_z },
-                    s2: { x: sx2, y: sy2, z: s2_z },
-                    type1: seg.type1,
-                    type2: seg.type2,
-                    separation: seg.separation
-                });
-            });
-
-            // 2. Sort by Depth (Painter's Algorithm: Draw back to front)
-            // Note: In this specific helix geometry, sorting by index usually works 
-            // because it's a single continuous curve, but for strict correctness:
-            renderList.sort((a, b) => a.depth - b.depth);
-
-            // 3. Draw
-            renderList.forEach(item => {
-                const { s1, s2, brightness, scale, type1, type2, separation } = item;
-
-                // Draw Backbone (Strands)
-                // Strand 1
-                const cBackbone = CONFIG.colors.backbone;
-                drawLine(s1.x, s1.y, s1.x, s1.y, cBackbone, CONFIG.basePairWidth * scale, brightness);
-                
-                // Strand 2
-                drawLine(s2.x, s2.y, s2.x, s2.y, cBackbone, CONFIG.basePairWidth * scale, brightness);
-
-                // Draw Base Pair (Rung)
-                if (separation > 0) {
-                    // If separated, draw two half-rungs going to the center or just dots?
-                    // Let's draw lines from base to the center point where they were connected
-                    const midX = (s1.x + s2.x) / 2;
-                    const midY = (s1.y + s2.y) / 2;
-                    
-                    drawLine(s1.x, s1.y, midX, midY, CONFIG.colors[type1], CONFIG.basePairWidth * 0.8 * scale, brightness);
-                    drawLine(s2.x, s2.y, midX, midY, CONFIG.colors[type2], CONFIG.basePairWidth * 0.8 * scale, brightness);
-                } else {
-                    // Connected
-                    drawLine(s1.x, s1.y, s2.x, s2.y, CONFIG.colors[type1], CONFIG.basePairWidth * 0.6 * scale, brightness);
+            // Replication offset
+            if (replication.active) {
+                const inRange = i >= replication.startRung && i <= replication.endRung;
+                if (inRange) {
+                    let unzipAmt = 0;
+                    if (replication.phase === 'unzipping' || replication.phase === 'waiting') {
+                        unzipAmt = replication.unzipProgress * 180;
+                    } else if (replication.phase === 'rebuilding') {
+                        const rebuildRung = replication.rebuildNextRung;
+                        if (i > rebuildRung + 2) {
+                            unzipAmt = 180;
+                        } else {
+                            const rebuildT = (i - rebuildRung) / 3;
+                            unzipAmt = 180 * (1 - Math.max(0, rebuildT));
+                        }
+                    }
+                    const sign = Math.cos(angle) >= 0 ? 1 : -1;
+                    if (strand === 0) {
+                        ax += sign * unzipAmt * 0.5;
+                    } else {
+                        ax -= sign * unzipAmt * 0.5;
+                    }
                 }
+            }
 
-                // Draw Glowing Nodes (The "Beads")
-                const glowAlpha = brightness * 0.8;
-                
-                // Node 1
-                drawGlow(s1.x, s1.y, CONFIG.colors[type1], (CONFIG.basePairWidth + CONFIG.glowSize) * scale, glowAlpha);
-                
-                // Node 2
-                drawGlow(s2.x, s2.y, CONFIG.colors[type2], (CONFIG.basePairWidth + CONFIG.glowSize) * scale, glowAlpha);
+            const rotated = rotateY(ax, y, az, rotation);
+            const proj = project(rotated.x, rotated.y, rotated.z);
 
-                // If separated, draw a small node in the middle to represent the split base
-                if (separation > 0) {
-                    const midX = (s1.x + s2.x) / 2;
-                    const midY = (s1.y + s2.y) / 2;
-                    drawGlow(midX, midY, CONFIG.colors[type2], (CONFIG.basePairWidth * 0.5) * scale, glowAlpha);
-                }
-            });
-
-            animationId = requestAnimationFrame(render);
+            if (i === 0) ctx.moveTo(proj.sx, proj.sy);
+            else ctx.lineTo(proj.sx, proj.sy);
         }
+        const color = strand === 0 ? 'rgba(100, 180, 255, 0.25)' : 'rgba(255, 100, 180, 0.25)';
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.restore();
+    }
+}
 
-        // Start
-        initDNA();
-        render();
+function updateReplication(time) {
+    if (!replication.active) {
+        // Randomly trigger replication
+        if (Math.random() < 0.001) {
+            triggerReplication();
+        }
+        return;
+    }
 
-    </script>
+    replication.timer += 16;
+
+    if (replication.phase === 'unzipping') {
+        replication.unzipProgress += 0.012;
+        if (replication.unzipProgress >= 1) {
+            replication.unzipProgress = 1;
+            replication.phase = 'waiting';
+            replication.timer = 0;
+        }
+    } else if (replication.phase === 'waiting') {
+        if (replication.timer > 1200) {
+            replication.phase = 'rebuilding';
+            replication.rebuildNextRung = replication.startRung;
+            replication.rebuildProgress = 0;
+            replication.timer = 0;
+        }
+    } else if (replication.phase === 'rebuilding') {
+        replication.rebuildProgress += 0.015;
+        if (replication.timer > 80) {
+            replication.rebuildNextRung++;
+            replication.timer = 0;
+        }
+        if (replication.rebuildNextRung > replication.endRung) {
+            replication.phase = 'done';
+            replication.timer = 0;
+        }
+    } else if (replication.phase === 'done') {
+        if (replication.timer > 500) {
+            replication.active = false;
+            replication.phase = 'idle';
+        }
+    }
+}
+
+let lastTime = 0;
+function animate(time) {
+    requestAnimationFrame(animate);
+
+    // Clear with slight trail for glow effect
+    ctx.fillStyle = 'rgba(2, 2, 12, 0.92)';
+    ctx.fillRect(0, 0, W, H);
+
+    drawStars(time);
+    updateReplication(time);
+    drawHelix(time);
+}
+
+requestAnimationFrame(animate);
+</script>
 </body>
 </html>

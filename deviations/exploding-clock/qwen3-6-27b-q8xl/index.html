@@ -1,274 +1,293 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Exploding Clock</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background-color: #050505;
-        }
-        canvas {
-            display: block;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Exploding Clock</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; width: 100%; height: 100%; }
+</style>
 </head>
 <body>
-    <canvas id="canvas"></canvas>
-    <script>
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const offscreen = document.createElement('canvas');
+const offCtx = offscreen.getContext('2d');
 
-        let width, height;
-        let particles = [];
-        let lastTime = '';
-        let lastExplosionTime = 0;
-        const EXPLOSION_INTERVAL = 10000; // 10 seconds
-        
-        // Physics constants
-        const GRAVITY = 0.15;
-        const FRICTION = 0.96;
-        const RETURN_SPEED = 0.15; // Lerp factor
-        const EXPLOSION_FORCE = 15;
+let W, H, fontSize, particles = [], timeStr = '', lastExplosionTime = 0;
+const CYCLE = 10000;
+const EXPLODE_DURATION = 1200;
+const REFORM_DURATION = 2500;
+const GRAVITY = 300;
+const DAMPING = 0.98;
+const SPRING = 0.03;
 
-        // Colors
-        const COLOR_BASE = { h: 200, s: 80, l: 60 }; // Cyan/Blue
-        const COLOR_HOT = { h: 10, s: 90, l: 60 }; // Red/Orange
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  offscreen.width = W;
+  offscreen.height = H;
+  fontSize = Math.min(W / 8, H / 3);
+}
 
-        class Particle {
-            constructor(x, y, color) {
-                this.x = x;
-                this.y = y;
-                this.ox = x; // Origin X (Target)
-                this.oy = y; // Origin Y (Target)
-                this.vx = 0;
-                this.vy = 0;
-                this.size = Math.random() * 1.5 + 1;
-                this.color = color;
-                this.life = 1;
-            }
+function getTimeStr() {
+  const d = new Date();
+  return d.getHours().toString().padStart(2, '0') + ':' +
+         d.getMinutes().toString().padStart(2, '0') + ':' +
+         d.getSeconds().toString().padStart(2, '0');
+}
 
-            update(state) {
-                if (state === 'EXPLODE') {
-                    this.x += this.vx;
-                    this.y += this.vy;
-                    this.vy += GRAVITY;
-                    this.vx *= FRICTION;
-                    this.vy *= FRICTION;
-                } else if (state === 'REASSEMBLE') {
-                    // Move towards origin
-                    const dx = this.ox - this.x;
-                    const dy = this.oy - this.y;
-                    
-                    this.x += dx * RETURN_SPEED;
-                    this.y += dy * RETURN_SPEED;
+function getTextCenters(text) {
+  offCtx.clearRect(0, 0, W, H);
+  offCtx.font = `bold ${fontSize}px "Courier New", monospace`;
+  offCtx.textAlign = 'center';
+  offCtx.textBaseline = 'middle';
+  const metrics = offCtx.measureText(text);
+  const totalW = metrics.width;
+  const startX = (W - totalW) / 2;
+  const cy = H / 2;
+  const centers = [];
+  let cx = startX;
+  for (const ch of text) {
+    const mw = offCtx.measureText(ch).width;
+    centers.push({ x: cx + mw / 2, y: cy });
+    cx += mw;
+  }
+  return centers;
+}
 
-                    // Add some "swarm" noise
-                    this.x += (Math.random() - 0.5) * 2;
-                    this.y += (Math.random() - 0.5) * 2;
-                } else if (state === 'BREATHE') {
-                    // Gentle sine wave movement
-                    this.x = this.ox + Math.sin(Date.now() / 500 + this.ox) * 1;
-                    this.y = this.oy + Math.cos(Date.now() / 500 + this.oy) * 1;
-                }
-            }
+function sampleParticles(text) {
+  offCtx.clearRect(0, 0, W, H);
+  offCtx.font = `bold ${fontSize}px "Courier New", monospace`;
+  offCtx.textAlign = 'center';
+  offCtx.textBaseline = 'middle';
 
-            draw(ctx) {
-                ctx.fillStyle = this.color;
-                ctx.beginPath();
-                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
-                ctx.fill();
-            }
-        }
+  const grad = offCtx.createLinearGradient(0, H * 0.3, 0, H * 0.7);
+  grad.addColorStop(0, '#00ffff');
+  grad.addColorStop(0.5, '#ffffff');
+  grad.addColorStop(1, '#ff66aa');
+  offCtx.fillStyle = grad;
+  offCtx.shadowColor = '#00aaff';
+  offCtx.shadowBlur = 30;
+  offCtx.fillText(text, W / 2, H / 2);
+  offCtx.shadowBlur = 0;
 
-        function resize() {
-            width = canvas.width = window.innerWidth;
-            height = canvas.height = window.innerHeight;
-            initParticles(getCurrentTime());
-        }
+  const imageData = offCtx.getImageData(0, 0, W, H);
+  const data = imageData.data;
+  const step = Math.max(3, Math.floor(fontSize / 25));
+  const targets = [];
 
-        function getCurrentTime() {
-            const now = new Date();
-            return now.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        }
+  for (let y = 0; y < H; y += step) {
+    for (let x = 0; x < W; x += step) {
+      const i = (y * W + x) * 4;
+      if (data[i + 3] > 100) {
+        const r = data[i], g = data[i + 1], b = data[i + 2];
+        targets.push({ x, y, r, g, b });
+      }
+    }
+  }
+  return targets;
+}
 
-        function getPixels(text) {
-            // Create an offscreen canvas to scan pixel data
-            const offCanvas = document.createElement('canvas');
-            const offCtx = offCanvas.getContext('2d');
-            offCanvas.width = width;
-            offCanvas.height = height;
+function initParticles() {
+  timeStr = getTimeStr();
+  const targets = sampleParticles(timeStr);
+  const centers = getTextCenters(timeStr);
 
-            // Style the text
-            const fontSize = Math.min(width / 10, 300);
-            offCtx.font = `bold ${fontSize}px monospace`;
-            offCtx.textAlign = 'center';
-            offCtx.textBaseline = 'middle';
-            offCtx.fillStyle = 'white';
-            offCtx.fillText(text, width / 2, height / 2);
+  particles = targets.map((t, i) => {
+    const closestCenter = centers.reduce((best, c) => {
+      const d = (t.x - c.x) ** 2 + (t.y - c.y) ** 2;
+      return d < best.d ? { c, d } : best;
+    }, { c: centers[0], d: Infinity });
 
-            const imageData = offCtx.getImageData(0, 0, width, height);
-            const data = imageData.data;
-            const pixels = [];
-            
-            // Sampling step (higher = fewer particles, better performance)
-            const gap = 4; 
+    const angle = Math.atan2(t.y - closestCenter.c.y, t.x - closestCenter.c.x);
+    const dist = Math.sqrt((t.x - closestCenter.c.x) ** 2 + (t.y - closestCenter.c.y) ** 2);
+    const speed = 200 + Math.random() * 600;
 
-            for (let y = 0; y < height; y += gap) {
-                for (let x = 0; x < width; x += gap) {
-                    const index = (y * width + x) * 4;
-                    // Check alpha channel
-                    if (data[index + 3] > 128) {
-                        pixels.push({ x, y });
-                    }
-                }
-            }
-            return pixels;
-        }
+    return {
+      x: t.x, y: t.y,
+      tx: t.x, ty: t.y,
+      r: t.r, g: t.g, b: t.b,
+      vx: 0, vy: 0,
+      angle, dist, speed,
+      size: 1.5 + Math.random() * 1.5,
+      phase: Math.random() * Math.PI * 2,
+      opacity: 1
+    };
+  });
 
-        function initParticles(timeStr) {
-            particles = [];
-            const pixels = getPixels(timeStr);
-            
-            pixels.forEach(p => {
-                particles.push(new Particle(p.x, p.y, `hsl(${COLOR_BASE.h}, ${COLOR_BASE.s}%, ${COLOR_BASE.l}%)`));
-            });
-        }
+  lastExplosionTime = performance.now();
+}
 
-        function updateTargetPositions(timeStr) {
-            const pixels = getPixels(timeStr);
-            // Ensure we have enough particles (if new text is longer)
-            while (particles.length < pixels.length) {
-                particles.push(new Particle(width/2, height/2, `hsl(${COLOR_BASE.h}, ${COLOR_BASE.s}%, ${COLOR_BASE.l}%)`));
-            }
-            // If text is shorter, hide extras or just ignore them
-            // For simplicity, we update existing ones and leave extras floating or hide them
-            
-            particles.forEach((p, i) => {
-                if (i < pixels.length) {
-                    p.ox = pixels[i].x;
-                    p.oy = pixels[i].y;
-                    p.color = `hsl(${COLOR_BASE.h}, ${COLOR_BASE.s}%, ${COLOR_BASE.l}%)`;
-                    p.active = true;
-                } else {
-                    p.active = false; // Hide particles that aren't needed for the new number
-                }
-            });
-        }
+function explode() {
+  const centers = getTextCenters(timeStr);
+  particles.forEach(p => {
+    const closestCenter = centers.reduce((best, c) => {
+      const d = (p.tx - c.x) ** 2 + (p.ty - c.y) ** 2;
+      return d < best.d ? { c, d } : best;
+    }, { c: centers[0], d: Infinity });
 
-        function explode() {
-            const centerX = width / 2;
-            const centerY = height / 2;
+    const dx = p.tx - closestCenter.c.x;
+    const dy = p.ty - closestCenter.c.y;
+    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+    const nx = dx / dist;
+    const ny = dy / dist;
+    const speed = p.speed * (0.5 + Math.random() * 1.5);
+    const spread = (Math.random() - 0.5) * 0.8;
 
-            particles.forEach(p => {
-                if (!p.active) return;
+    p.vx = (nx + spread * ny) * speed;
+    p.vy = (ny - spread * nx) * speed;
+  });
+}
 
-                // Calculate vector from center
-                const dx = p.x - centerX;
-                const dy = p.y - centerY;
-                const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+function updateTargets() {
+  timeStr = getTimeStr();
+  const newTargets = sampleParticles(timeStr);
 
-                // Explosion force
-                const force = EXPLOSION_FORCE * (Math.random() + 0.5);
-                
-                p.vx = (dx / dist) * force + (Math.random() - 0.5) * 10;
-                p.vy = (dy / dist) * force + (Math.random() - 0.5) * 10;
+  if (newTargets.length !== particles.length) {
+    const diff = newTargets.length - particles.length;
+    if (diff > 0) {
+      for (let i = 0; i < diff; i++) {
+        const t = newTargets[particles.length + i] || newTargets[Math.floor(Math.random() * newTargets.length)];
+        const centers = getTextCenters(timeStr);
+        const c = centers[Math.floor(Math.random() * centers.length)];
+        particles.push({
+          x: c.x + (Math.random() - 0.5) * 200,
+          y: c.y + (Math.random() - 0.5) * 200,
+          tx: t.x, ty: t.y,
+          r: t.r, g: t.g, b: t.b,
+          vx: 0, vy: 0,
+          angle: 0, dist: 0, speed: 400,
+          size: 1.5 + Math.random() * 1.5,
+          phase: Math.random() * Math.PI * 2,
+          opacity: 0
+        });
+      }
+    } else {
+      particles.splice(newTargets.length);
+    }
+  }
 
-                // Change color to hot
-                p.color = `hsl(${COLOR_HOT.h}, ${COLOR_HOT.s}%, ${COLOR_HOT.l}%)`;
-            });
-        }
+  particles.forEach((p, i) => {
+    if (newTargets[i]) {
+      p.tx = newTargets[i].x;
+      p.ty = newTargets[i].y;
+      p.r = newTargets[i].r;
+      p.g = newTargets[i].g;
+      p.b = newTargets[i].b;
+    }
+  });
+}
 
-        let state = 'BREATHE'; // BREATHE, EXPLODE, REASSEMBLE
+function update(dt) {
+  const now = performance.now();
+  const elapsed = now - lastExplosionTime;
+  const breathe = Math.sin(now * 0.002) * 0.003;
+  const breatheY = Math.sin(now * 0.0015 + 1) * 0.002;
 
-        function animate() {
-            // Clear canvas with trail effect
-            ctx.fillStyle = 'rgba(5, 5, 5, 0.4)';
-            ctx.fillRect(0, 0, width, height);
+  if (elapsed < EXPLODE_DURATION) {
+    const t = elapsed / EXPLODE_DURATION;
+    const ease = t * t;
 
-            const now = Date.now();
-            const currentTime = getCurrentTime();
+    particles.forEach(p => {
+      p.vy += GRAVITY * dt;
+      p.vx *= DAMPING;
+      p.vy *= DAMPING;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.opacity = 1 - ease * 0.3;
+    });
+  } else if (elapsed < EXPLODE_DURATION + REFORM_DURATION) {
+    const t = Math.min(1, (elapsed - EXPLODE_DURATION) / REFORM_DURATION);
+    const springStrength = SPRING + (1 - t) * 0.08;
 
-            // Check for time change or interval trigger
-            if (currentTime !== lastTime || (now - lastExplosionTime > EXPLOSION_INTERVAL)) {
-                if (state !== 'EXPLODE') {
-                    // Trigger sequence
-                    state = 'EXPLODE';
-                    lastExplosionTime = now;
-                    lastTime = currentTime;
-                    updateTargetPositions(currentTime);
-                    explode();
-                }
-            }
+    updateTargets();
 
-            // State Machine
-            let transitioning = false;
+    particles.forEach(p => {
+      const dx = p.tx - p.x;
+      const dy = p.ty - p.y;
+      p.vx += dx * springStrength;
+      p.vy += dy * springStrength;
+      p.vx *= 0.92;
+      p.vy *= 0.92;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.opacity = Math.min(1, p.opacity + dt * 2);
+    });
+  } else {
+    updateTargets();
 
-            particles.forEach(p => {
-                if (!p.active) return;
+    particles.forEach(p => {
+      const bx = p.tx * (1 + breathe);
+      const by = p.ty * (1 + breatheY);
+      const ox = Math.sin(now * 0.003 + p.phase) * 1.5;
+      const oy = Math.cos(now * 0.0025 + p.phase * 1.3) * 1.5;
+      const dx = bx + ox - p.x;
+      const dy = by + oy - p.y;
+      p.vx += dx * 0.05;
+      p.vy += dy * 0.05;
+      p.vx *= 0.9;
+      p.vy *= 0.9;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.opacity = 1;
+    });
 
-                if (state === 'EXPLODE') {
-                    p.update('EXPLODE');
-                    transitioning = true;
-                } else if (state === 'REASSEMBLE') {
-                    p.update('REASSEMBLE');
-                    transitioning = true;
-                    // Check if close enough to switch to breathe
-                    const dist = Math.abs(p.x - p.ox) + Math.abs(p.y - p.oy);
-                    if (dist < 2) {
-                        p.x = p.ox;
-                        p.y = p.oy;
-                    }
-                } else {
-                    p.update('BREATHE');
-                }
+    if (now - lastExplosionTime >= CYCLE) {
+      explode();
+      lastExplosionTime = now;
+    }
+  }
+}
 
-                p.draw(ctx);
-            });
+function draw() {
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
+  ctx.fillRect(0, 0, W, H);
 
-            // Logic to switch states
-            if (state === 'EXPLODE' && !transitioning) {
-                // Fallback safety, though logic above handles transition
-                state = 'REASSEMBLE';
-            }
-            
-            // Check if explosion has slowed down enough to start reassembly
-            if (state === 'EXPLODE') {
-                // Simple heuristic: wait a bit or check max velocity
-                // For smoother animation, we switch to reassemble after a short delay or when velocities drop
-                // Let's just switch to reassemble immediately but keep physics active for a moment?
-                // Better: Switch to REASSEMBLE state after a short duration of explosion
-                if (now - lastExplosionTime > 200) { // 200ms of explosion
-                    state = 'REASSEMBLE';
-                }
-            }
+  ctx.globalCompositeOperation = 'lighter';
 
-            // Check if reassembly is complete
-            if (state === 'REASSEMBLE') {
-                let settled = true;
-                for(let p of particles) {
-                    if(p.active && (Math.abs(p.x - p.ox) > 5 || Math.abs(p.y - p.oy) > 5)) {
-                        settled = false;
-                        break;
-                    }
-                }
-                if (settled) {
-                    state = 'BREATHE';
-                }
-            }
+  particles.forEach(p => {
+    if (p.opacity < 0.01) return;
+    const alpha = p.opacity;
+    const glow = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size * 4);
+    glow.addColorStop(0, `rgba(${p.r}, ${p.g}, ${p.b}, ${alpha * 0.9})`);
+    glow.addColorStop(0.3, `rgba(${p.r}, ${p.g}, ${p.b}, ${alpha * 0.4})`);
+    glow.addColorStop(1, `rgba(${p.r}, ${p.g}, ${p.b}, 0)`);
 
-            requestAnimationFrame(animate);
-        }
+    ctx.fillStyle = glow;
+    ctx.fillRect(p.x - p.size * 4, p.y - p.size * 4, p.size * 8, p.size * 8);
 
-        window.addEventListener('resize', resize);
-        resize();
-        animate();
+    ctx.fillStyle = `rgba(255, 255, 255, ${alpha * 0.8})`;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * 0.6, 0, Math.PI * 2);
+    ctx.fill();
+  });
 
-    </script>
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+let lastTime = performance.now();
+
+function loop(now) {
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+window.addEventListener('resize', () => {
+  resize();
+  initParticles();
+});
+
+resize();
+initParticles();
+requestAnimationFrame(loop);
+</script>
 </body>
 </html>

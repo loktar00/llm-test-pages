@@ -1,343 +1,254 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>2D Wave Interference Tank</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background-color: #000;
-        }
-        canvas {
-            display: block;
-            image-rendering: pixelated; /* Crisp grid look */
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wave Interference Tank</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; width: 100%; height: 100%; }
+</style>
 </head>
 <body>
-    <canvas id="tank"></canvas>
-    <script>
-        // Configuration
-        const CONFIG = {
-            width: 640,
-            height: 360,
-            scale: 2, // UI Scale
-            damping: 0.985, // Energy loss per frame
-            waveSpeed: 0.25, // Propagation speed
-            numSources: 3,
-            colorPalette: [
-                0x001133, // Deep dark blue (trough)
-                0x004488, // Mid blue
-                0x66AAFF, // Light blue
-                0xFFFFFF, // White (crest)
-                0xDDFFFF  // Sparkle white
-            ]
-        };
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
 
-        // Setup Canvas
-        const canvas = document.getElementById('tank');
-        const ctx = canvas.getContext('2d', { alpha: false });
-        canvas.width = CONFIG.width;
-        canvas.height = CONFIG.height;
-        canvas.style.width = (CONFIG.width * CONFIG.scale) + 'px';
-        canvas.style.height = (CONFIG.height * CONFIG.scale) + 'px';
+const W = 480;
+const H = 360;
+const SIZE = W * H;
 
-        // State Variables
-        let buf1, buf2, obstacles;
-        let sources = [];
-        let frameCount = 0;
-        
-        // Image Data for rendering
-        const imgData = ctx.createImageData(CONFIG.width, CONFIG.height);
-        const data = imgData.data;
+const current = new Float32Array(SIZE);
+const previous = new Float32Array(SIZE);
+const barrier = new Uint8Array(SIZE);
 
-        // --- Initialization ---
+const imgData = ctx.createImageData(W, H);
+const pixels = imgData.data;
 
-        function init() {
-            // Initialize buffers using Float32 for precision (or Int16 for speed, Float is safer for interference)
-            // We use typed arrays for the wave simulation
-            const size = CONFIG.width * CONFIG.height;
-            buf1 = new Float32Array(size);
-            buf2 = new Float32Array(size);
-            
-            // Initialize obstacles (0 = water, 1 = wall)
-            obstacles = new Uint8Array(size);
-            
-            // Create Walls
-            for(let y = 0; y < CONFIG.height; y++) {
-                obstacles[y * CONFIG.width] = 1;      // Left
-                obstacles[(y * CONFIG.width) + CONFIG.width - 1] = 1; // Right
-            }
-            for(let x = 0; x < CONFIG.width; x++) {
-                obstacles[x] = 1;             // Top
-                obstacles[(CONFIG.height - 1) * CONFIG.width + x] = 1; // Bottom
-            }
+// Barrier setup: two vertical barriers with slits
+function setupBarriers() {
+    barrier.fill(0);
+    const b1x = Math.floor(W * 0.35);
+    const b2x = Math.floor(W * 0.65);
+    const slit1Top = Math.floor(H * 0.3);
+    const slit1Bot = Math.floor(H * 0.7);
+    const slit2Top = Math.floor(H * 0.25);
+    const slit2Bot = Math.floor(H * 0.75);
 
-            // Create Barriers with Slits (Diffraction)
-            createBarriers();
-
-            // Initialize Sources
-            for(let i=0; i<CONFIG.numSources; i++) {
-                sources.push(new Source());
-            }
-
-            loop();
-        }
-
-        function createBarriers() {
-            const barrierWidth = 4;
-            const slitWidth = 6;
-            const startX = Math.floor(CONFIG.width * 0.6);
-            const centerY = Math.floor(CONFIG.height / 2);
-            
-            // Barrier 1: Top, Slit 1, Middle
-            for(let x = startX; x < startX + 10; x++) {
-                for(let y = 0; y < centerY - slitWidth/2; y++) {
-                    if (y > centerY - slitWidth/2 - barrierWidth && y < centerY - slitWidth/2) continue; // Gap
-                    obstacles[y * CONFIG.width + x] = 1;
+    for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+            if (x === b1x || x === b2x) {
+                if (y < slit1Top || y > slit1Bot) {
+                    barrier[y * W + x] = 1;
                 }
-            }
-            
-            // Barrier 2: Bottom, Slit 2, Middle
-            for(let x = startX; x < startX + 10; x++) {
-                for(let y = centerY + slitWidth/2; y < CONFIG.height; y++) {
-                    if (y < centerY + slitWidth/2 + barrierWidth && y > centerY + slitWidth/2) continue; // Gap
-                    obstacles[y * CONFIG.width + x] = 1;
-                }
-            }
-
-            // Middle Bridge (optional, to make it a clear double slit experiment)
-            // Actually, standard double slit usually has a wall with two holes.
-            // Let's refine: One solid wall with two holes.
-            
-            // Reset
-            obstacles.fill(0);
-            // Re-add borders
-            for(let y = 0; y < CONFIG.height; y++) {
-                obstacles[y * CONFIG.width] = 1;
-                obstacles[(y * CONFIG.width) + CONFIG.width - 1] = 1;
-            }
-            for(let x = 0; x < CONFIG.width; x++) {
-                obstacles[x] = 1;
-                obstacles[(CONFIG.height - 1) * CONFIG.width + x] = 1;
-            }
-
-            const wallX = Math.floor(CONFIG.width * 0.5);
-            const slit1Y = centerY - 15;
-            const slit2Y = centerY + 15;
-
-            for(let x = wallX; x < wallX + 5; x++) {
-                for(let y = 0; y < CONFIG.height; y++) {
-                    let inSlit = (y > slit1Y - 3 && y < slit1Y + 3) || 
-                                 (y > slit2Y - 3 && y < slit2Y + 3);
-                    if(!inSlit) {
-                        obstacles[y * CONFIG.width + x] = 1;
-                    }
+                if (y < slit2Top || y > slit2Bot) {
+                    barrier[y * W + x] = 1;
                 }
             }
         }
+    }
+}
+setupBarriers();
 
-        class Source {
-            constructor() {
-                this.reset();
-            }
+// Sources
+const sources = [];
+function initSources() {
+    sources.length = 0;
+    const defs = [
+        { cx: W * 0.1, cy: H * 0.5, amp: 8, freq: 1.8, phase: 0, speed: 0.0003, orbitR: 15 },
+        { cx: W * 0.85, cy: H * 0.3, amp: 7, freq: 2.2, phase: 1.2, speed: 0.0004, orbitR: 20 },
+        { cx: W * 0.5, cy: H * 0.85, amp: 6, freq: 1.5, phase: 2.5, speed: 0.00025, orbitR: 25 },
+        { cx: W * 0.7, cy: H * 0.15, amp: 5, freq: 2.8, phase: 0.8, speed: 0.00035, orbitR: 12 },
+    ];
+    for (const d of defs) {
+        sources.push({
+            x: d.cx, y: d.cy,
+            baseX: d.cx, baseY: d.cy,
+            amp: d.amp, freq: d.freq, phase: d.phase,
+            speed: d.speed, orbitR: d.orbitR,
+            t: Math.random() * 1000,
+            freqMod: 0,
+        });
+    }
+}
+initSources();
 
-            reset() {
-                this.x = Math.random() * (CONFIG.width * 0.4) + 20;
-                this.y = Math.random() * (CONFIG.height - 40) + 20;
-                this.vx = (Math.random() - 0.5) * 0.5;
-                this.vy = (Math.random() - 0.5) * 0.5;
-                this.frequency = 0.05 + Math.random() * 0.05;
-                this.amplitude = 2.0 + Math.random() * 1.5;
-                this.phase = Math.random() * Math.PI * 2;
-            }
+// Wave parameters
+const c2 = 0.22;
+const damping = 0.988;
 
-            update() {
-                // Move
-                this.x += this.vx;
-                this.y += this.vy;
+let time = 0;
 
-                // Bounce off walls (soft)
-                if (this.x < 20 || this.x > CONFIG.width - 20) this.vx *= -1;
-                if (this.y < 20 || this.y > CONFIG.height - 20) this.vy *= -1;
+function updateWaves() {
+    time += 1;
 
-                // Randomly change frequency occasionally
-                if (Math.random() < 0.005) {
-                    this.frequency = 0.03 + Math.random() * 0.08;
-                }
-            }
+    // Update sources
+    for (const s of sources) {
+        s.t += 1;
+        s.x = s.baseX + Math.sin(s.t * s.speed * 3.7) * s.orbitR + Math.cos(s.t * s.speed * 2.3) * s.orbitR * 0.5;
+        s.y = s.baseY + Math.cos(s.t * s.speed * 4.1) * s.orbitR + Math.sin(s.t * s.speed * 1.9) * s.orbitR * 0.3;
+        s.freq += Math.sin(s.t * 0.005) * 0.002;
+        s.freq = Math.max(0.8, Math.min(4.0, s.freq));
+    }
 
-            emit(buf) {
-                this.phase += this.frequency;
-                const val = Math.sin(this.phase) * this.amplitude;
-                
-                // Gaussian-ish distribution for point source
-                const r2 = 3;
-                for(let dy = -3; dy <= 3; dy++) {
-                    for(let dx = -3; dx <= 3; dx++) {
-                        const idx = (this.y + dy) * CONFIG.width + (this.x + dx);
-                        if (idx >= 0 && idx < buf.length) {
-                            const dist = Math.sqrt(dx*dx + dy*dy);
-                            const falloff = Math.max(0, 1 - dist/3.5);
-                            buf[idx] += val * falloff;
-                        }
-                    }
-                }
+    // Add sources
+    for (const s of sources) {
+        const sx = Math.round(s.x);
+        const sy = Math.round(s.y);
+        const r = 3;
+        const wave = Math.sin(2 * Math.PI * s.freq * time * 0.01 + s.phase) * s.amp;
+        for (let dy = -r; dy <= r; dy++) {
+            for (let dx = -r; dx <= r; dx++) {
+                const dist2 = dx * dx + dy * dy;
+                if (dist2 > r * r) continue;
+                const nx = sx + dx;
+                const ny = sy + dy;
+                if (nx < 1 || nx >= W - 1 || ny < 1 || ny >= H - 1) continue;
+                const falloff = 1 - Math.sqrt(dist2) / (r + 1);
+                const idx = ny * W + nx;
+                if (barrier[idx]) continue;
+                current[idx] += wave * falloff * falloff;
             }
         }
+    }
 
-        // --- Simulation Loop ---
-
-        function updatePhysics() {
-            // 1. Emit Sources
-            for(let s of sources) {
-                s.update();
-                s.emit(buf2); // Emit into the buffer we are about to become the "current" one
+    // Wave equation step
+    for (let y = 1; y < H - 1; y++) {
+        for (let x = 1; x < W - 1; x++) {
+            const idx = y * W + x;
+            if (barrier[idx]) {
+                previous[idx] = current[idx] = 0;
+                continue;
             }
-
-            // 2. Wave Equation Step
-            // New[i] = (2*Old[i] - Prev[i] + c^2 * Laplacian) * damping
-            // Laplacian = sum(neighbors) - 4*center
-            
-            const w = CONFIG.width;
-            const h = CONFIG.height;
-            const c2 = CONFIG.waveSpeed; 
-            const damp = CONFIG.damping;
-
-            // We iterate through the buffer, but we need to handle the obstacle logic
-            // We will read from buf1 and write to buf2. 
-            // Since sources wrote to buf2 already, we need to be careful.
-            // Actually, standard approach:
-            // Calculate new wave values into a temp buffer or buf2 (overwriting source injection if careful).
-            // Let's restructure slightly:
-            // 1. Clear buf2.
-            // 2. Calculate Wave Propagation from buf1 into buf2.
-            // 3. Add Source contributions to buf2.
-            
-            // This is safer.
-            
-            const len = w * h;
-            
-            // Pre-calculate offsets to avoid multiplication in inner loop
-            const up = -w;
-            const down = w;
-            const left = -1;
-            const right = 1;
-
-            for (let y = 1; y < h - 1; y++) {
-                const rowOffset = y * w;
-                for (let x = 1; x < w - 1; x++) {
-                    const idx = rowOffset + x;
-                    
-                    if (obstacles[idx]) {
-                        buf2[idx] = 0; // Walls stay flat
-                        continue;
-                    }
-
-                    // Wave propagation
-                    // Using the 5-point stencil Laplacian
-                    const laplacian = buf1[idx + up] + 
-                                      buf1[idx + down] + 
-                                      buf1[idx + left] + 
-                                      buf1[idx + right] - 
-                                      (4.0 * buf1[idx]);
-
-                    // Formula: new = 2*current - prev + (speed * laplacian)
-                    // We are calculating into buf2, reading from buf1
-                    // But wait, we are swapping buffers. 
-                    // Let's say buf1 is "current", buf2 is "previous" (in next frame).
-                    // The equation is usually: f(t+1) = 2f(t) - f(t-1) + c^2 * del2 f(t)
-                    
-                    buf2[idx] = (2.0 * buf1[idx] - buf2[idx] + (c2 * laplacian)) * damp;
-                }
-            }
-
-            // Swap buffers
-            let temp = buf1;
-            buf1 = buf2;
-            buf2 = temp;
+            const laplacian = current[idx - 1] + current[idx + 1] +
+                              current[idx - W] + current[idx + W] -
+                              4 * current[idx];
+            const val = 2 * current[idx] - previous[idx] + c2 * laplacian;
+            previous[idx] = current[idx];
+            current[idx] = val * damping;
         }
+    }
 
-        // --- Rendering ---
+    // Boundary conditions (reflective walls)
+    for (let x = 0; x < W; x++) {
+        previous[x] = current[x];
+        previous[(H - 1) * W + x] = current[(H - 1) * W + x];
+    }
+    for (let y = 0; y < H; y++) {
+        const idx = y * W;
+        previous[idx] = current[idx];
+        previous[idx + W - 1] = current[idx + W - 1];
+    }
+}
 
-        function render() {
-            const w = CONFIG.width;
-            const h = CONFIG.height;
-            const len = w * h;
+function render() {
+    let maxVal = 0.001;
+    for (let i = 0; i < SIZE; i++) {
+        const v = Math.abs(current[i]);
+        if (v > maxVal) maxVal = v;
+    }
+    const invMax = 1.0 / maxVal;
 
-            for (let i = 0; i < len; i++) {
-                let val = buf1[i];
-                let r, g, b;
+    for (let y = 1; y < H - 1; y++) {
+        for (let x = 1; x < W - 1; x++) {
+            const idx = y * W + x;
+            if (barrier[idx]) {
+                const pIdx = (y * W + x) * 4;
+                pixels[pIdx] = 15;
+                pixels[pIdx + 1] = 15;
+                pixels[pIdx + 2] = 25;
+                pixels[pIdx + 3] = 255;
+                continue;
+            }
 
-                if (obstacles[i]) {
-                    // Render Obstacles
-                    r = 30; g = 30; b = 40;
+            const v = current[idx] * invMax;
+            const absV = Math.abs(v);
+
+            // Check if local crest for sparkle
+            const isCrest = v > 0.3;
+            const isLocalMax = isCrest &&
+                current[idx] > current[idx - 1] && current[idx] > current[idx + 1] &&
+                current[idx] > current[idx - W] && current[idx] > current[idx + W];
+
+            // Color mapping: deep blue (trough) -> dark blue -> medium blue -> light blue -> white (crest)
+            let r, g, b;
+            if (v < 0) {
+                const t = -v;
+                r = Math.floor(5 + t * 20);
+                g = Math.floor(20 + t * 40);
+                b = Math.floor(80 + t * 120);
+            } else {
+                const t = v;
+                if (t < 0.3) {
+                    const s = t / 0.3;
+                    r = Math.floor(5 + s * 30);
+                    g = Math.floor(60 + s * 100);
+                    b = Math.floor(200 + s * 55);
+                } else if (t < 0.6) {
+                    const s = (t - 0.3) / 0.3;
+                    r = Math.floor(35 + s * 180);
+                    g = Math.floor(160 + s * 60);
+                    b = Math.floor(255);
                 } else {
-                    // Render Water
-                    // Normalize roughly between -2 and 2
-                    // val * 0.5 roughly maps -4..4 to -2..2
-                    
-                    if (val > 1.5) {
-                        // Crests: Sparkle white
-                        r = 255;
-                        g = 255;
-                        b = 255;
-                        // Add some sparkle logic based on magnitude
-                        if (Math.random() > 0.8) { // Occasional sparkle
-                            r = 255; g = 255; b = 255;
-                        }
-                    } else if (val < -1.5) {
-                        // Troughs: Dark Blue
-                        r = 0; g = 10; b = 30;
-                    } else {
-                        // Interpolation
-                        // Map val from [-1.5, 1.5] to [0, 1]
-                        let t = (val + 1.5) / 3.0;
-                        t = Math.max(0, Math.min(1, t));
-
-                        // Color Lerp logic (simplified for speed)
-                        // Palette: DarkBlue (0), BlueMid (0.5), White (1)
-                        if (t < 0.5) {
-                            // Dark Blue to Mid Blue
-                            let p = t * 2; // 0 to 1
-                            r = p * 0; // 0 -> 0
-                            g = 17 + p * 55; // 17 -> 72
-                            b = 51 + p * 85; // 51 -> 136
-                        } else {
-                            // Mid Blue to White
-                            let p = (t - 0.5) * 2; // 0 to 1
-                            r = p * 255; // 0 -> 255
-                            g = 72 + p * 183;
-                            b = 136 + p * 119;
-                        }
-                    }
+                    const s = (t - 0.6) / 0.4;
+                    r = Math.floor(215 + s * 40);
+                    g = Math.floor(220 + s * 35);
+                    b = Math.floor(255);
                 }
-
-                const idx = i * 4;
-                data[idx] = r;
-                data[idx + 1] = g;
-                data[idx + 2] = b;
-                data[idx + 3] = 255; // Alpha
             }
 
-            ctx.putImageData(imgData, 0, 0);
+            // Specular sparkle at crests
+            if (isLocalMax && absV > 0.5) {
+                const sparkle = Math.min(1, (absV - 0.5) * 2);
+                r = Math.floor(r + (255 - r) * sparkle * 0.6);
+                g = Math.floor(g + (255 - g) * sparkle * 0.6);
+                b = Math.floor(b + (255 - b) * sparkle * 0.6);
+            }
+
+            const pIdx = idx * 4;
+            pixels[pIdx] = Math.min(255, r);
+            pixels[pIdx + 1] = Math.min(255, g);
+            pixels[pIdx + 2] = Math.min(255, b);
+            pixels[pIdx + 3] = 255;
         }
+    }
 
-        function loop() {
-            frameCount++;
-            updatePhysics();
-            render();
-            requestAnimationFrame(loop);
+    // Render barriers with a subtle glow
+    for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+            const idx = y * W + x;
+            if (!barrier[idx]) continue;
+            const pIdx = idx * 4;
+            // Glow from nearby waves
+            let glow = 0;
+            for (let dy = -3; dy <= 3; dy++) {
+                for (let dx = -3; dx <= 3; dx++) {
+                    const nx = x + dx, ny = y + dy;
+                    if (nx >= 0 && nx < W && ny >= 0 && ny < H) {
+                        glow += Math.abs(current[ny * W + nx]);
+                    }
+                }
+            }
+            const g = Math.min(255, glow * 0.3);
+            pixels[pIdx] = Math.min(255, 20 + g * 0.3);
+            pixels[pIdx + 1] = Math.min(255, 20 + g * 0.4);
+            pixels[pIdx + 2] = Math.min(255, 35 + g * 0.8);
+            pixels[pIdx + 3] = 255;
         }
+    }
 
-        // Start
-        init();
+    ctx.putImageData(imgData, 0, 0);
+}
 
-    </script>
+function frame() {
+    updateWaves();
+    render();
+    requestAnimationFrame(frame);
+}
+
+requestAnimationFrame(frame);
+</script>
 </body>
 </html>

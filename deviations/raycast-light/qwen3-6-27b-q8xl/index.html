@@ -1,292 +1,285 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dynamic Raycast Lighting Demo</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background-color: #000;
-        }
-        canvas {
-            display: block;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>2D Dynamic Lighting</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; width: 100%; height: 100%; }
+</style>
 </head>
 <body>
-    <canvas id="canvas"></canvas>
-    <script>
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
 
-        let width, height;
-        const obstacles = [];
-        const numObstacles = 12;
-        
-        // Configuration
-        const MAX_RAY_COUNT = 1000; // Limit for performance
-        const RAY_DENSITY = 4; // Degrees between rays
-        
-        // Lights
-        const lights = [
-            {
-                radius: 200,
-                speed: 0.0003,
-                orbitX: 0,
-                orbitY: 0,
-                colorBase: { h: 30, s: 100, l: 50 }, // Warm
-                intensity: 1.0,
-                angle: 0
-            },
-            {
-                radius: 150,
-                speed: -0.0005,
-                orbitX: 0,
-                orbitY: 0,
-                colorBase: { h: 220, s: 80, l: 60 }, // Cool
-                intensity: 0.6,
-                angle: Math.PI
-            }
-        ];
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', () => { resize(); generateObstacles(); });
 
-        // Resize handler
-        function resize() {
-            width = window.innerWidth;
-            height = window.innerHeight;
-            canvas.width = width;
-            canvas.height = height;
-            generateObstacles();
+// Generate polygonal obstacles
+let obstacles = [];
+function generateObstacles() {
+  obstacles = [];
+  const margin = 80;
+  const count = 12 + Math.floor(Math.random() * 4);
+  for (let i = 0; i < count; i++) {
+    const cx = margin + Math.random() * (W - 2 * margin);
+    const cy = margin + Math.random() * (H - 2 * margin);
+    const sides = 3 + Math.floor(Math.random() * 5);
+    const radius = 30 + Math.random() * 70;
+    const verts = [];
+    for (let j = 0; j < sides; j++) {
+      const angle = (j / sides) * Math.PI * 2 + Math.random() * 0.3;
+      const r = radius * (0.7 + Math.random() * 0.6);
+      verts.push({ x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r });
+    }
+    // Ensure convex-ish by sorting around centroid
+    const cxc = verts.reduce((s, v) => s + v.x, 0) / verts.length;
+    const cyc = verts.reduce((s, v) => s + v.y, 0) / verts.length;
+    verts.sort((a, b) => Math.atan2(a.y - cyc, a.x - cxc) - Math.atan2(b.y - cyc, b.x - cxc));
+    obstacles.push({ verts, cx, cy });
+  }
+}
+generateObstacles();
+
+// Lights
+const NUM_RAYS = 720;
+
+function raySegmentIntersect(rx, ry, rdx, rdy, ax, ay, bx, by) {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const denom = rdx * dy - rdy * dx;
+  if (Math.abs(denom) < 1e-10) return null;
+  const t = ((ax - rx) * dy - (ay - ry) * dx) / denom;
+  const u = ((ax - rx) * rdy - (ay - ry) * rdx) / denom;
+  if (t > 0.001 && u >= 0 && u <= 1) return { t, x: rx + t * rdx, y: ry + t * rdy };
+  return null;
+}
+
+function computeLitPolygon(light, allObstacles) {
+  const points = [];
+  for (let i = 0; i < NUM_RAYS; i++) {
+    const angle = (i / NUM_RAYS) * Math.PI * 2;
+    const dx = Math.cos(angle);
+    const dy = Math.sin(angle);
+    let closestT = Infinity;
+    let closestPt = null;
+    for (const obs of allObstacles) {
+      const v = obs.verts;
+      for (let j = 0; j < v.length; j++) {
+        const a = v[j];
+        const b = v[(j + 1) % v.length];
+        const hit = raySegmentIntersect(light.x, light.y, dx, dy, a.x, a.y, b.x, b.y);
+        if (hit && hit.t < closestT) {
+          closestT = hit.t;
+          closestPt = { x: hit.x, y: hit.y };
         }
+      }
+    }
+    if (closestPt) {
+      points.push(closestPt);
+    } else {
+      points.push({ x: light.x + dx * Math.max(W, H) * 2, y: light.y + dy * Math.max(W, H) * 2 });
+    }
+  }
+  return points;
+}
 
-        // Generate random polygonal obstacles
-        function generateObstacles() {
-            obstacles.length = 0;
-            const margin = 100;
-            for (let i = 0; i < numObstacles; i++) {
-                const sides = Math.floor(Math.random() * 3) + 3; // 3 to 5 sides
-                const cx = margin + Math.random() * (width - margin * 2);
-                const cy = margin + Math.random() * (height - margin * 2);
-                const radius = 30 + Math.random() * 50;
-                
-                const vertices = [];
-                const angleStep = (Math.PI * 2) / sides;
-                const rotationOffset = Math.random() * Math.PI;
+function computeEdgeIllumination(obs, light) {
+  const v = obs.verts;
+  const lit = [];
+  for (let j = 0; j < v.length; j++) {
+    const a = v[j];
+    const b = v[(j + 1) % v.length];
+    const nx = -(b.y - a.y);
+    const ny = (b.x - a.x);
+    const nl = Math.sqrt(nx * nx + ny * ny) || 1;
+    const nnx = nx / nl;
+    const nny = ny / nl;
+    const mx = (a.x + b.x) / 2;
+    const my = (a.y + b.y) / 2;
+    const toLightX = light.x - mx;
+    const toLightY = light.y - my;
+    const dot = nnx * toLightX + nny * toLightY;
+    lit.push({ a, b, dot, normal: { x: nnx, y: nny } });
+  }
+  return lit;
+}
 
-                for (let j = 0; j < sides; j++) {
-                    const angle = j * angleStep + rotationOffset;
-                    // Add slight randomness to radius for jagged look
-                    const r = radius * (0.8 + Math.random() * 0.4);
-                    vertices.push({
-                        x: cx + Math.cos(angle) * r,
-                        y: cy + Math.sin(angle) * r
-                    });
-                }
-                obstacles.push(vertices);
-            }
+function hslToRgb(h, s, l) {
+  h = ((h % 360) + 360) % 360;
+  s /= 100; l /= 100;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+  const m = l - c / 2;
+  let r, g, b;
+  if (h < 60) { r = c; g = x; b = 0; }
+  else if (h < 120) { r = x; g = c; b = 0; }
+  else if (h < 180) { r = 0; g = c; b = x; }
+  else if (h < 240) { r = 0; g = x; b = c; }
+  else if (h < 300) { r = x; g = 0; b = c; }
+  else { r = c; g = 0; b = x; }
+  return { r: (r + m) * 255, g: (g + m) * 255, b: (b + m) * 255 };
+}
+
+let startTime = performance.now();
+
+function render() {
+  const t = (performance.now() - startTime) / 1000;
+  
+  // Light 1: warm, slow drift
+  const warmHue = 30 + Math.sin(t * 0.02) * 20; // shifts over minutes
+  const warmColor = hslToRgb(warmHue, 85, 55);
+  const l1x = W * 0.5 + Math.cos(t * 0.15) * W * 0.3;
+  const l1y = H * 0.5 + Math.sin(t * 0.2) * H * 0.25;
+  const light1 = { x: l1x, y: l1y, color: warmColor, intensity: 1.0 };
+  
+  // Light 2: cool, counter-orbit
+  const coolHue = 210 + Math.sin(t * 0.015 + 1) * 30;
+  const coolColor = hslToRgb(coolHue, 70, 45);
+  const l2x = W * 0.5 + Math.cos(-t * 0.12 + 2) * W * 0.25;
+  const l2y = H * 0.5 + Math.sin(-t * 0.18 + 1) * H * 0.2;
+  const light2 = { x: l2x, y: l2y, color: coolColor, intensity: 0.45 };
+  
+  const lights = [light1, light2];
+  
+  // Clear to near-black
+  ctx.fillStyle = '#050508';
+  ctx.fillRect(0, 0, W, H);
+  
+  // Compute lit polygons for each light
+  const litPolygons = [];
+  for (const light of lights) {
+    litPolygons.push(computeLitPolygon(light, obstacles));
+  }
+  
+  // Draw lit areas with additive blending
+  ctx.globalCompositeOperation = 'lighter';
+  
+  for (let li = 0; li < lights.length; li++) {
+    const light = lights[li];
+    const poly = litPolygons[li];
+    const c = light.color;
+    
+    // Create gradient from light center outward
+    const grad = ctx.createRadialGradient(light.x, light.y, 0, light.x, light.y, Math.max(W, H) * 0.8);
+    grad.addColorStop(0, `rgba(${c.r|0},${c.g|0},${c.b|0},${0.35 * light.intensity})`);
+    grad.addColorStop(0.3, `rgba(${c.r|0},${c.g|0},${c.b|0},${0.15 * light.intensity})`);
+    grad.addColorStop(1, `rgba(${c.r|0},${c.g|0},${c.b|0},0)`);
+    
+    ctx.beginPath();
+    ctx.moveTo(light.x, light.y);
+    for (const p of poly) {
+      ctx.lineTo(p.x, p.y);
+    }
+    ctx.closePath();
+    ctx.fillStyle = grad;
+    ctx.fill();
+  }
+  
+  // Draw secondary fill for brighter center
+  for (let li = 0; li < lights.length; li++) {
+    const light = lights[li];
+    const poly = litPolygons[li];
+    const c = light.color;
+    
+    ctx.beginPath();
+    ctx.moveTo(light.x, light.y);
+    for (const p of poly) {
+      ctx.lineTo(p.x, p.y);
+    }
+    ctx.closePath();
+    ctx.fillStyle = `rgba(${c.r|0},${c.g|0},${c.b|0},${0.08 * light.intensity})`;
+    ctx.fill();
+  }
+  
+  ctx.globalCompositeOperation = 'source-over';
+  
+  // Draw obstacle bodies (dark)
+  for (const obs of obstacles) {
+    ctx.beginPath();
+    ctx.moveTo(obs.verts[0].x, obs.verts[0].y);
+    for (let j = 1; j < obs.verts.length; j++) {
+      ctx.lineTo(obs.verts[j].x, obs.verts[j].y);
+    }
+    ctx.closePath();
+    ctx.fillStyle = '#0a0a10';
+    ctx.fill();
+  }
+  
+  // Draw lit edges with glow
+  for (const obs of obstacles) {
+    for (let li = 0; li < lights.length; li++) {
+      const light = lights[li];
+      const c = light.color;
+      const edgeInfo = computeEdgeIllumination(obs, light);
+      
+      for (const edge of edgeInfo) {
+        if (edge.dot > 0.1) {
+          const brightness = Math.min(edge.dot / 5, 1) * light.intensity;
+          const glowWidth = 1 + brightness * 4;
+          
+          // Outer glow
+          ctx.beginPath();
+          ctx.moveTo(edge.a.x, edge.a.y);
+          ctx.lineTo(edge.b.x, edge.b.y);
+          ctx.strokeStyle = `rgba(${c.r|0},${c.g|0},${c.b|0},${brightness * 0.3})`;
+          ctx.lineWidth = glowWidth + 4;
+          ctx.lineCap = 'round';
+          ctx.stroke();
+          
+          // Inner bright edge
+          ctx.beginPath();
+          ctx.moveTo(edge.a.x, edge.a.y);
+          ctx.lineTo(edge.b.x, edge.b.y);
+          ctx.strokeStyle = `rgba(${c.r|0},${c.g|0},${c.b|0},${brightness * 0.7})`;
+          ctx.lineWidth = glowWidth;
+          ctx.lineCap = 'round';
+          ctx.stroke();
+          
+          // Core bright line
+          ctx.beginPath();
+          ctx.moveTo(edge.a.x, edge.a.y);
+          ctx.lineTo(edge.b.x, edge.b.y);
+          ctx.strokeStyle = `rgba(${Math.min(c.r + 80, 255)|0},${Math.min(c.g + 80, 255)|0},${Math.min(c.b + 80, 255)|0},${brightness * 0.5})`;
+          ctx.lineWidth = 1;
+          ctx.lineCap = 'round';
+          ctx.stroke();
         }
+      }
+    }
+  }
+  
+  // Draw light sources as glowing points
+  for (const light of lights) {
+    const c = light.color;
+    const grad = ctx.createRadialGradient(light.x, light.y, 0, light.x, light.y, 20);
+    grad.addColorStop(0, `rgba(255,255,255,${0.9 * light.intensity})`);
+    grad.addColorStop(0.3, `rgba(${c.r|0},${c.g|0},${c.b|0},${0.6 * light.intensity})`);
+    grad.addColorStop(1, `rgba(${c.r|0},${c.g|0},${c.b|0},0)`);
+    ctx.beginPath();
+    ctx.arc(light.x, light.y, 20, 0, Math.PI * 2);
+    ctx.fillStyle = grad;
+    ctx.fill();
+  }
+  
+  // Ambient dark overlay to keep room dark
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = 'rgba(5,5,8,0.0)';
+  ctx.fillRect(0, 0, W, H);
+  
+  requestAnimationFrame(render);
+}
 
-        // Math helpers
-        function getIntersection(p1, p2, p3, p4) {
-            const x1 = p1.x, y1 = p1.y, x2 = p2.x, y2 = p2.y;
-            const x3 = p3.x, y3 = p3.y, x4 = p4.x, y4 = p4.y;
-
-            const denom = (y4 - y3) * (x2 - x1) - (x4 - x3) * (y2 - y1);
-            if (denom === 0) return null;
-
-            const ua = ((x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)) / denom;
-            const ub = ((x2 - x1) * (y1 - y3) - (y2 - y1) * (x1 - x3)) / denom;
-
-            if (ua >= 0 && ua <= 1 && ub >= 0 && ub <= 1) {
-                return {
-                    x: x1 + ua * (x2 - x1),
-                    y: y1 + ua * (y2 - y1),
-                    dist: Math.sqrt(Math.pow(x1 + ua * (x2 - x1) - x1, 2) + Math.pow(y1 + ua * (y2 - y1) - y1, 2))
-                };
-            }
-            return null;
-        }
-
-        function getClosestIntersection(rayOrigin, rayDir) {
-            let closest = null;
-            let minDist = Infinity;
-
-            // Ray end point (far away)
-            const rayEnd = {
-                x: rayOrigin.x + Math.cos(rayDir) * 10000,
-                y: rayOrigin.y + Math.sin(rayDir) * 10000
-            };
-
-            for (let obs of obstacles) {
-                for (let i = 0; i < obs.length; i++) {
-                    const p1 = obs[i];
-                    const p2 = obs[(i + 1) % obs.length];
-                    
-                    const hit = getIntersection(rayOrigin, rayEnd, p1, p2);
-                    if (hit) {
-                        if (hit.dist < minDist) {
-                            minDist = hit.dist;
-                            closest = hit;
-                        }
-                    }
-                }
-            }
-            return closest;
-        }
-
-        // Lighting Logic
-        function castLight(light, time) {
-            const cx = width / 2 + Math.cos(time * light.speed * 1000 + light.angle) * (width * 0.3);
-            const cy = height / 2 + Math.sin(time * light.speed * 1000 + light.angle) * (height * 0.3);
-            
-            const source = { x: cx, y: cy };
-            
-            // Shift hue slowly
-            const hue = (light.colorBase.h + time * 0.02) % 360;
-            const colorStr = `hsla(${hue}, ${light.colorBase.s}%, ${light.colorBase.l}%,`;
-            
-            ctx.save();
-            ctx.globalCompositeOperation = 'lighter'; // Additive blending for light
-
-            // Draw rays
-            ctx.beginPath();
-            ctx.moveTo(source.x, source.y);
-            
-            let rayCount = 0;
-            const startAngle = 0;
-            const endAngle = Math.PI * 2;
-
-            // Raycasting
-            for (let angle = startAngle; angle < endAngle; angle += (Math.PI / 180) * RAY_DENSITY) {
-                if (rayCount++ > MAX_RAY_COUNT) break;
-                
-                const hit = getClosestIntersection(source, angle);
-                
-                if (hit) {
-                    ctx.lineTo(hit.x, hit.y);
-                } else {
-                    // If no hit, go off screen
-                    const farX = source.x + Math.cos(angle) * Math.max(width, height) * 2;
-                    const farY = source.y + Math.sin(angle) * Math.max(width, height) * 2;
-                    ctx.lineTo(farX, farY);
-                }
-            }
-            ctx.closePath();
-            
-            // Gradient for the light cone
-            const gradient = ctx.createRadialGradient(source.x, source.y, 0, source.x, source.y, Math.max(width, height));
-            gradient.addColorStop(0, colorStr + '0.8)');
-            gradient.addColorStop(0.2, colorStr + '0.3)');
-            gradient.addColorStop(1, colorStr + '0.0)');
-            
-            ctx.fillStyle = gradient;
-            ctx.fill();
-            ctx.restore();
-
-            return source;
-        }
-
-        // Render Loop
-        function draw(time) {
-            // 1. Clear with black (Dark room)
-            ctx.fillStyle = '#000000';
-            ctx.fillRect(0, 0, width, height);
-
-            // 2. Cast Lights
-            const lightSources = lights.map(l => castLight(l, time));
-
-            // 3. Draw Obstacles
-            // We draw them twice: once for the "shadow" body, once for the glowing edges
-            ctx.save();
-            
-            // Draw filled polygons (dark, slightly visible to ground them)
-            ctx.fillStyle = '#111';
-            ctx.strokeStyle = '#222';
-            ctx.lineWidth = 2;
-            
-            for (let obs of obstacles) {
-                ctx.beginPath();
-                ctx.moveTo(obs[0].x, obs[0].y);
-                for (let i = 1; i < obs.length; i++) {
-                    ctx.lineTo(obs[i].x, obs[i].y);
-                }
-                ctx.closePath();
-                ctx.fill();
-                ctx.stroke();
-            }
-
-            // Draw glowing edges based on proximity to light
-            // This simulates "Lit edges glow faintly"
-            ctx.globalCompositeOperation = 'screen';
-            ctx.lineWidth = 3;
-            
-            for (let obs of obstacles) {
-                for (let i = 0; i < obs.length; i++) {
-                    const p1 = obs[i];
-                    const p2 = obs[(i + 1) % obs.length];
-                    
-                    // Check distance to each light source
-                    lightSources.forEach((src, idx) => {
-                        // Simple distance check from light to segment midpoint
-                        const midX = (p1.x + p2.x) / 2;
-                        const midY = (p1.y + p2.y) / 2;
-                        const dist = Math.sqrt(Math.pow(midX - src.x, 2) + Math.pow(midY - src.y, 2));
-                        
-                        // If close enough, glow
-                        const threshold = 300;
-                        if (dist < threshold) {
-                            // Determine if this edge is actually facing the light (dot product)
-                            // Normal vector of edge
-                            const dx = p2.x - p1.x;
-                            const dy = p2.y - p1.y;
-                            const len = Math.sqrt(dx*dx + dy*dy);
-                            const nx = -dy / len;
-                            const ny = dx / len;
-                            
-                            // Vector from midpoint to light
-                            const lx = src.x - midX;
-                            const ly = src.y - midY;
-                            
-                            // Dot product
-                            const dot = (nx * lx) + (ny * ly);
-                            
-                            // If dot > 0, it's facing the light
-                            if (dot > 0) {
-                                const intensity = (1 - dist / threshold) * lights[idx].intensity;
-                                const hue = (lights[idx].colorBase.h + time * 0.02) % 360;
-                                ctx.strokeStyle = `hsla(${hue}, 100%, 70%, ${intensity})`;
-                                ctx.beginPath();
-                                ctx.moveTo(p1.x, p1.y);
-                                ctx.lineTo(p2.x, p2.y);
-                                ctx.stroke();
-                            }
-                        }
-                    });
-                }
-            }
-            
-            ctx.restore();
-
-            // 4. Vignette / Atmosphere (Optional, for depth)
-            // Just a slight darkening at corners to enhance the room feel
-            const grad = ctx.createRadialGradient(width/2, height/2, height/3, width/2, height/2, height);
-            grad.addColorStop(0, 'rgba(0,0,0,0)');
-            grad.addColorStop(1, 'rgba(0,0,0,0.4)');
-            ctx.fillStyle = grad;
-            ctx.fillRect(0,0,width,height);
-
-            requestAnimationFrame(draw);
-        }
-
-        // Init
-        window.addEventListener('resize', resize);
-        resize();
-        requestAnimationFrame(draw);
-
-    </script>
+requestAnimationFrame(render);
+</script>
 </body>
 </html>

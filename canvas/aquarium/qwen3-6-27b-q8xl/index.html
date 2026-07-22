@@ -1,444 +1,731 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Aquarium</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background-color: #000;
-        }
-        canvas {
-            display: block;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Aquarium</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; width: 100%; height: 100%; }
+</style>
 </head>
 <body>
-    <canvas id="aquarium"></canvas>
-    <script>
-        const canvas = document.getElementById('aquarium');
-        const ctx = canvas.getContext('2d');
+<canvas id="a"></canvas>
+<script>
+const canvas = document.getElementById('a');
+const ctx = canvas.getContext('2d');
+let W, H;
 
-        let width, height;
-        let time = 0;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
 
-        // Utility
-        const random = (min, max) => Math.random() * (max - min) + min;
-        const randomInt = (min, max) => Math.floor(random(min, max));
-        const dist = (x1, y1, x2, y2) => Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
+const GRAVEL_H = H * 0.12;
+const WATER_TOP = 0;
 
-        function resize() {
-            width = canvas.width = window.innerWidth;
-            height = canvas.height = window.innerHeight;
-        }
-        window.addEventListener('resize', resize);
-        resize();
+// Utility
+function rand(a, b) { return Math.random() * (b - a) + a; }
+function randInt(a, b) { return Math.floor(rand(a, b + 1)); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+function clamp(v, mn, mx) { return Math.max(mn, Math.min(mx, v)); }
 
-        // --- Classes ---
+// Time
+let t = 0;
 
-        // Background Gradient
-        const waterGradient = () => {
-            const g = ctx.createLinearGradient(0, 0, 0, height);
-            g.addColorStop(0, '#006994');
-            g.addColorStop(1, '#001e2b');
-            return g;
-        };
+// ===== CAUSTICS =====
+function drawCaustics() {
+  ctx.save();
+  ctx.globalAlpha = 0.06;
+  ctx.globalCompositeOperation = 'lighter';
+  const cols = 12, rows = 8;
+  const cw = W / cols, ch = H / rows;
+  for (let i = 0; i < cols; i++) {
+    for (let j = 0; j < rows; j++) {
+      const x = i * cw + cw / 2;
+      const y = j * ch + ch / 2;
+      const v = Math.sin(t * 0.8 + i * 1.3 + j * 0.7) *
+                Math.cos(t * 0.6 + i * 0.9 - j * 1.1) *
+                Math.sin(t * 0.4 + i * 0.5 + j * 1.5);
+      if (v > 0.2) {
+        const r = cw * 0.8 * v;
+        const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
+        grad.addColorStop(0, `rgba(180,220,255,${v * 0.5})`);
+        grad.addColorStop(1, 'rgba(180,220,255,0)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(x - r, y - r, r * 2, r * 2);
+      }
+    }
+  }
+  ctx.restore();
+}
 
-        // Caustics (Light Ripples)
-        class Caustics {
-            constructor() {
-                this.points = [];
-                for(let i=0; i<30; i++) {
-                    this.points.push({
-                        x: random(0, width),
-                        y: random(0, height),
-                        vx: random(-0.5, 0.5),
-                        vy: random(-0.5, 0.5),
-                        size: random(50, 150)
-                    });
-                }
-            }
-            update() {
-                this.points.forEach(p => {
-                    p.x += p.vx;
-                    p.y += p.vy;
-                    if(p.x < -100) p.x = width + 100;
-                    if(p.x > width + 100) p.x = -100;
-                    if(p.y < -100) p.y = height + 100;
-                    if(p.y > height + 100) p.y = -100;
-                });
-            }
-            draw() {
-                ctx.save();
-                ctx.globalCompositeOperation = 'overlay';
-                ctx.fillStyle = 'rgba(255, 255, 255, 0.05)';
-                this.points.forEach(p => {
-                    ctx.beginPath();
-                    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-                    ctx.fill();
-                });
-                ctx.restore();
-            }
-        }
+// ===== BACKGROUND =====
+function drawBackground() {
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#0a3d5c');
+  grad.addColorStop(0.3, '#0c4a6e');
+  grad.addColorStop(0.7, '#0d5478');
+  grad.addColorStop(1, '#0a3d5c');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+}
 
-        // Plants
-        class Plant {
-            constructor(x) {
-                this.x = x;
-                this.segments = randomInt(8, 15);
-                this.segLength = random(10, 20);
-                this.angle = random(-0.5, 0.5);
-                this.hue = random(80, 140);
-            }
-            draw() {
-                ctx.save();
-                ctx.translate(this.x, height);
-                let curX = 0;
-                let curY = 0;
-                ctx.strokeStyle = `hsl(${this.hue}, 60%, 30%)`;
-                ctx.lineWidth = 4;
-                ctx.lineCap = 'round';
-                ctx.beginPath();
-                
-                for(let i=0; i<this.segments; i++) {
-                    const sway = Math.sin(time * 0.002 + i * 0.5) * (i * 0.05);
-                    const segAngle = this.angle + sway;
-                    curX += Math.sin(segAngle) * this.segLength;
-                    curY -= Math.cos(segAngle) * this.segLength;
-                    ctx.lineTo(curX, curY);
-                }
-                ctx.stroke();
-                ctx.restore();
-            }
-        }
+// ===== GRAVEL =====
+const gravelStones = [];
+function initGravel() {
+  gravelStones.length = 0;
+  for (let i = 0; i < 300; i++) {
+    gravelStones.push({
+      x: rand(0, W),
+      y: H - GRAVEL_H + rand(0, GRAVEL_H),
+      r: rand(2, 8),
+      color: `hsl(${randInt(20, 40)}, ${randInt(15, 35)}%, ${randInt(25, 45)}%)`
+    });
+  }
+}
+initGravel();
 
-        // Bubbles
-        class Bubble {
-            constructor() {
-                this.reset();
-                this.y = random(height, height + 100); // Start off screen
-            }
-            reset() {
-                this.x = width / 4 + random(-20, 20); // Near bubbler
-                this.y = height + 10;
-                this.size = random(2, 6);
-                this.speed = random(0.5, 1.5);
-                this.wobbleOffset = random(0, Math.PI * 2);
-            }
-            update() {
-                this.y -= this.speed;
-                this.x += Math.sin(time * 0.01 + this.wobbleOffset) * 0.5;
-                if(this.y < -10) this.reset();
-            }
-            draw() {
-                ctx.beginPath();
-                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
-                ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
-                ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
-                ctx.lineWidth = 1;
-                ctx.fill();
-                ctx.stroke();
-            }
-        }
+function drawGravel() {
+  // Base
+  const gGrad = ctx.createLinearGradient(0, H - GRAVEL_H, 0, H);
+  gGrad.addColorStop(0, '#5a4a32');
+  gGrad.addColorStop(1, '#3a2a18');
+  ctx.fillStyle = gGrad;
+  ctx.fillRect(0, H - GRAVEL_H, W, GRAVEL_H);
 
-        // Hermit Crab
-        class Crab {
-            constructor() {
-                this.x = random(width * 0.2, width * 0.8);
-                this.y = height - 20;
-                this.dir = Math.random() > 0.5 ? 1 : -1;
-                this.speed = 0.2;
-                this.state = 'walk'; // walk, hide
-                this.timer = 0;
-            }
-            update() {
-                this.timer++;
-                if(this.state === 'walk') {
-                    this.x += this.dir * this.speed;
-                    if(this.x < 50 || this.x > width - 50) {
-                        this.dir *= -1;
-                    }
-                    if(Math.random() < 0.005) this.state = 'hide';
-                } else {
-                    if(this.timer > 200) {
-                        this.state = 'walk';
-                        this.timer = 0;
-                    }
-                }
-            }
-            draw() {
-                if(this.state === 'hide') return; // Invisible inside shell (visual trick)
-                
-                ctx.save();
-                ctx.translate(this.x, this.y);
-                ctx.scale(this.dir, 1);
+  for (const s of gravelStones) {
+    ctx.beginPath();
+    ctx.ellipse(s.x, s.y, s.r, s.r * 0.6, 0, 0, Math.PI * 2);
+    ctx.fillStyle = s.color;
+    ctx.fill();
+  }
+}
 
-                // Shell
-                ctx.beginPath();
-                ctx.arc(-5, -5, 12, Math.PI, 0);
-                ctx.fillStyle = '#8B4513';
-                ctx.fill();
-                ctx.strokeStyle = '#5D4037';
-                ctx.stroke();
+// ===== PLANTS =====
+const plants = [];
+function initPlants() {
+  plants.length = 0;
+  const count = Math.floor(W / 80);
+  for (let i = 0; i < count; i++) {
+    plants.push({
+      x: rand(W * 0.05, W * 0.95),
+      baseY: H - GRAVEL_H + rand(-5, 5),
+      segments: randInt(6, 12),
+      segLen: rand(15, 30),
+      phase: rand(0, Math.PI * 2),
+      speed: rand(0.8, 1.5),
+      hue: randInt(90, 160),
+      width: rand(3, 8)
+    });
+  }
+}
+initPlants();
 
-                // Legs
-                ctx.strokeStyle = '#D2691E';
-                ctx.lineWidth = 2;
-                for(let i=0; i<3; i++) {
-                    const legY = -2 + i*3;
-                    const walkOffset = Math.sin(time * 0.01 + i) * 2;
-                    ctx.beginPath();
-                    ctx.moveTo(-2, legY);
-                    ctx.lineTo(5 + walkOffset, legY + 2);
-                    ctx.stroke();
-                }
+function drawPlant(p) {
+  ctx.save();
+  ctx.strokeStyle = `hsl(${p.hue}, 50%, 25%)`;
+  ctx.lineWidth = p.width;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  let x = p.x, y = p.baseY;
+  ctx.moveTo(x, y);
+  for (let i = 0; i < p.segments; i++) {
+    const sway = Math.sin(t * p.speed + p.phase + i * 0.5) * (8 + i * 2);
+    x += sway * 0.3;
+    y -= p.segLen;
+    ctx.lineTo(x, y);
+  }
+  ctx.stroke();
 
-                // Eyes
-                ctx.fillStyle = 'white';
-                ctx.beginPath();
-                ctx.arc(4, -8, 2, 0, Math.PI*2);
-                ctx.fill();
+  // Leaves
+  ctx.fillStyle = `hsl(${p.hue}, 55%, 30%)`;
+  for (let i = 2; i < p.segments; i += 2) {
+    const sway = Math.sin(t * p.speed + p.phase + i * 0.5) * (8 + i * 2);
+    const lx = p.x + sway * 0.3 * (i / p.segments) * 2;
+    const ly = p.baseY - i * p.segLen;
+    const leafW = rand(4, 10);
+    ctx.beginPath();
+    ctx.ellipse(lx + rand(-3, 3), ly, leafW, leafW * 0.4, sway * 0.05, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
 
-                ctx.restore();
-            }
-        }
+// ===== BUBBLES =====
+const bubbles = [];
+function spawnBubble() {
+  bubbles.push({
+    x: rand(W * 0.15, W * 0.85),
+    y: H - GRAVEL_H + rand(-10, 0),
+    r: rand(2, 7),
+    speed: rand(0.5, 1.8),
+    wobblePhase: rand(0, Math.PI * 2),
+    wobbleAmp: rand(1, 3),
+    wobbleSpeed: rand(2, 4),
+    alpha: rand(0.3, 0.7)
+  });
+}
 
-        // Fish Species
-        const SPECIES = {
-            NEON: { color: '#00FFFF', size: 15, speed: 2, shape: 'slender' },
-            GOLDFISH: { color: '#FFA500', size: 25, speed: 1.5, shape: 'round' },
-            ANGLER: { color: '#4B0082', size: 35, speed: 1, shape: 'blob' },
-            CLOWN: { color: '#FF4500', size: 20, speed: 1.8, shape: 'oval' }
-        };
+function updateBubbles() {
+  if (Math.random() < 0.08) spawnBubble();
+  for (let i = bubbles.length - 1; i >= 0; i--) {
+    const b = bubbles[i];
+    b.y -= b.speed;
+    b.x += Math.sin(t * b.wobbleSpeed + b.wobblePhase) * b.wobbleAmp * 0.3;
+    if (b.y < -20) bubbles.splice(i, 1);
+  }
+}
 
-        class Fish {
-            constructor(speciesKey) {
-                this.species = SPECIES[speciesKey];
-                this.x = random(100, width - 100);
-                this.y = random(100, height - 100);
-                this.vx = random(-1, 1);
-                this.vy = random(-1, 1);
-                this.angle = 0;
-                this.state = 'wander'; // wander, dart
-                this.stateTimer = 0;
-                this.scale = random(0.8, 1.2);
-            }
+function drawBubbles() {
+  for (const b of bubbles) {
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(180,220,255,${b.alpha})`;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = `rgba(200,235,255,${b.alpha * 0.3})`;
+    ctx.fill();
+    // Highlight
+    ctx.beginPath();
+    ctx.arc(b.x - b.r * 0.3, b.y - b.r * 0.3, b.r * 0.25, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,255,255,${b.alpha * 0.6})`;
+    ctx.fill();
+  }
+}
 
-            update() {
-                // State Machine
-                if (this.state === 'wander') {
-                    // Gentle steering
-                    this.vx += random(-0.05, 0.05);
-                    this.vy += random(-0.05, 0.05);
-                    
-                    // Limit speed
-                    const speed = Math.sqrt(this.vx**2 + this.vy**2);
-                    if(speed > this.species.speed) {
-                        this.vx *= 0.99;
-                        this.vy *= 0.99;
-                    }
+// ===== HERMIT CRAB =====
+const crab = {
+  x: W * 0.5,
+  y: H - GRAVEL_H + 5,
+  targetX: W * 0.5,
+  speed: 0.3,
+  shellHue: randInt(15, 35),
+  legPhase: 0,
+  direction: 1,
+  timer: 0
+};
 
-                    // Random chance to dart
-                    if(Math.random() < 0.005) {
-                        this.state = 'dart';
-                        this.stateTimer = 30;
-                    }
-                } else if (this.state === 'dart') {
-                    this.stateTimer--;
-                    // Accelerate
-                    this.vx *= 1.1;
-                    this.vy *= 1.1;
-                    if(this.stateTimer <= 0) this.state = 'wander';
-                }
+function updateCrab() {
+  crab.timer++;
+  if (crab.timer > rand(200, 600)) {
+    crab.targetX = rand(W * 0.1, W * 0.9);
+    crab.timer = 0;
+  }
+  const dx = crab.targetX - crab.x;
+  if (Math.abs(dx) > 1) {
+    crab.direction = dx > 0 ? 1 : -1;
+    crab.x += crab.direction * crab.speed;
+    crab.legPhase += 0.15;
+  } else {
+    crab.legPhase += 0.02;
+  }
+  crab.x = clamp(crab.x, 20, W - 20);
+}
 
-                // Wall Avoidance (Soft)
-                const margin = 50;
-                const turnStrength = 0.1;
-                if (this.x < margin) this.vx += turnStrength;
-                if (this.x > width - margin) this.vx -= turnStrength;
-                if (this.y < margin) this.vy += turnStrength;
-                if (this.y > height - margin) this.vy -= turnStrength;
+function drawCrab() {
+  const cx = crab.x, cy = crab.y;
+  const d = crab.direction;
+  const lp = crab.legPhase;
 
-                // Move
-                this.x += this.vx;
-                this.y += this.vy;
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.scale(d, 1);
 
-                // Calculate Angle for drawing
-                this.angle = Math.atan2(this.vy, this.vx);
-            }
+  // Legs
+  ctx.strokeStyle = '#c47a4a';
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 4; i++) {
+    const legAngle = Math.sin(lp + i * 0.8) * 0.3;
+    ctx.beginPath();
+    ctx.moveTo(-2 + i * 3, 2);
+    ctx.lineTo(-4 + i * 3, 8 + Math.sin(lp + i) * 2);
+    ctx.lineTo(-6 + i * 3, 10);
+    ctx.stroke();
+    // Other side
+    ctx.beginPath();
+    ctx.moveTo(-2 + i * 3, 2);
+    ctx.lineTo(-4 + i * 3, -2 + Math.sin(lp + i + 1) * 2);
+    ctx.lineTo(-6 + i * 3, -4);
+    ctx.stroke();
+  }
 
-            draw() {
-                ctx.save();
-                ctx.translate(this.x, this.y);
-                
-                // Flip if swimming left
-                if (this.vx < 0) ctx.scale(-1, 1);
-                
-                ctx.scale(this.scale, this.scale);
-                ctx.fillStyle = this.species.color;
-                ctx.strokeStyle = 'rgba(0,0,0,0.2)';
-                ctx.lineWidth = 1;
+  // Body
+  ctx.fillStyle = '#b8683a';
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 10, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
 
-                // Tail animation
-                const tailWag = Math.sin(time * 0.2 + this.x) * 5;
+  // Shell
+  ctx.fillStyle = `hsl(${crab.shellHue}, 55%, 40%)`;
+  ctx.beginPath();
+  ctx.ellipse(-2, -3, 9, 7, -0.2, Math.PI, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = `hsl(${crab.shellHue}, 50%, 30%)`;
+  ctx.lineWidth = 1;
+  ctx.stroke();
 
-                if (this.species.shape === 'slender') {
-                    // Neon Tetra style
-                    ctx.beginPath();
-                    ctx.moveTo(15, 0); // Nose
-                    ctx.quadraticCurveTo(0, -8, -15, -5 + tailWag); // Top back
-                    ctx.lineTo(-10, 0); // Tail notch
-                    ctx.lineTo(-15, 5 + tailWag); // Bottom back
-                    ctx.quadraticCurveTo(0, 8, 15, 0); // Belly
-                    ctx.fill();
-                    // Stripe
-                    ctx.fillStyle = 'blue';
-                    ctx.fillRect(-5, -2, 10, 4);
-                } else if (this.species.shape === 'round') {
-                    // Goldfish style
-                    ctx.beginPath();
-                    ctx.ellipse(0, 0, 20, 12, 0, 0, Math.PI*2);
-                    ctx.fill();
-                    // Tail
-                    ctx.beginPath();
-                    ctx.moveTo(-15, 0);
-                    ctx.lineTo(-25, -10 + tailWag);
-                    ctx.lineTo(-25, 10 + tailWag);
-                    ctx.fill();
-                    // Eye
-                    ctx.fillStyle = 'white';
-                    ctx.beginPath(); ctx.arc(10, -4, 3, 0, Math.PI*2); ctx.fill();
-                    ctx.fillStyle = 'black';
-                    ctx.beginPath(); ctx.arc(11, -4, 1, 0, Math.PI*2); ctx.fill();
-                } else if (this.species.shape === 'blob') {
-                    // Angler/Puffer style
-                    ctx.beginPath();
-                    ctx.arc(0, 0, 18, 0, Math.PI*2);
-                    ctx.fill();
-                    // Spines
-                    ctx.beginPath();
-                    for(let i=0; i<8; i++) {
-                        const a = (i/8) * Math.PI * 2;
-                        ctx.moveTo(0,0);
-                        ctx.lineTo(Math.cos(a)*25, Math.sin(a)*25);
-                    }
-                    ctx.stroke();
-                    // Eye
-                    ctx.fillStyle = 'yellow';
-                    ctx.beginPath(); ctx.arc(8, -5, 4, 0, Math.PI*2); ctx.fill();
-                } else {
-                    // Clownfish style
-                    ctx.beginPath();
-                    ctx.ellipse(0, 0, 18, 10, 0, 0, Math.PI*2);
-                    ctx.fill();
-                    // Stripes
-                    ctx.fillStyle = 'white';
-                    ctx.fillRect(-5, -10, 3, 20);
-                    ctx.fillRect(5, -10, 3, 20);
-                    // Tail
-                    ctx.fillStyle = this.species.color;
-                    ctx.beginPath();
-                    ctx.moveTo(-15, 0);
-                    ctx.lineTo(-22, -8 + tailWag);
-                    ctx.lineTo(-22, 8 + tailWag);
-                    ctx.fill();
-                }
+  // Shell spiral
+  ctx.beginPath();
+  ctx.arc(-3, -5, 3, 0, Math.PI * 2);
+  ctx.strokeStyle = `hsl(${crab.shellHue}, 45%, 35%)`;
+  ctx.stroke();
 
-                ctx.restore();
-            }
-        }
+  // Eyes
+  ctx.fillStyle = '#222';
+  ctx.beginPath();
+  ctx.arc(8, -3, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(8, 1, 1.5, 0, Math.PI * 2);
+  ctx.fill();
 
-        // --- Setup Scene ---
+  // Eye stalks
+  ctx.strokeStyle = '#b8683a';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(7, -2);
+  ctx.lineTo(9, -4);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(7, 2);
+  ctx.lineTo(9, 3);
+  ctx.stroke();
 
-        const caustics = new Caustics();
-        const crab = new Crab();
-        const plants = [];
-        for(let i=0; i<10; i++) {
-            plants.push(new Plant(random(0, width)));
-        }
-        const bubbles = [];
-        for(let i=0; i<30; i++) {
-            bubbles.push(new Bubble());
-        }
+  // Claws
+  ctx.fillStyle = '#c47a4a';
+  ctx.beginPath();
+  ctx.ellipse(12, -4, 4, 2.5, 0.3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(12, 4, 4, 2.5, -0.3, 0, Math.PI * 2);
+  ctx.fill();
 
-        const fishSchool = [];
-        // Add 12-20 fish
-        const keys = Object.keys(SPECIES);
-        for(let i=0; i<16; i++) {
-            const key = keys[randomInt(0, keys.length)];
-            fishSchool.push(new Fish(key));
-        }
+  ctx.restore();
+}
 
-        // --- Main Loop ---
+// ===== FISH =====
+const SPECIES = {
+  clownfish: {
+    name: 'Clownfish',
+    bodyColor: '#ff6b2b',
+    stripeColor: '#fff',
+    finColor: '#ff8c4a',
+    size: 1,
+    speed: 1.2,
+    bodyShape: 'oval',
+    count: 4
+  },
+  bluetang: {
+    name: 'Blue Tang',
+    bodyColor: '#1a6bcc',
+    stripeColor: '#0a2a5a',
+    finColor: '#2a7ddd',
+    size: 1.3,
+    speed: 1.0,
+    bodyShape: 'tang',
+    count: 3
+  },
+  angelfish: {
+    name: 'Angelfish',
+    bodyColor: '#f0c040',
+    stripeColor: '#2a2a2a',
+    finColor: '#e0b030',
+    size: 1.5,
+    speed: 0.7,
+    bodyShape: 'tall',
+    count: 3
+  },
+  tetra: {
+    name: 'Tetra',
+    bodyColor: '#e04060',
+    stripeColor: '#c02040',
+    finColor: '#ff6080',
+    size: 0.5,
+    speed: 1.8,
+    bodyShape: 'small',
+    count: 5
+  },
+  pufferfish: {
+    name: 'Pufferfish',
+    bodyColor: '#c8a848',
+    stripeColor: '#8a7030',
+    finColor: '#b89838',
+    size: 0.9,
+    speed: 0.5,
+    bodyShape: 'round',
+    count: 2
+  }
+};
 
-        function drawGravel() {
-            ctx.fillStyle = '#3e2723';
-            ctx.fillRect(0, height - 30, width, 30);
-            
-            ctx.fillStyle = '#5d4037';
-            for(let i=0; i<50; i++) {
-                // Use pseudo-random based on index to keep gravel static-ish without storing state
-                const gx = (i * 137) % width;
-                const gy = height - 30 + (i * 31) % 25;
-                ctx.beginPath();
-                ctx.arc(gx, gy, (i%3)+2, 0, Math.PI*2);
-                ctx.fill();
-            }
-        }
+const fish = [];
 
-        function drawBubbler() {
-            ctx.fillStyle = '#555';
-            ctx.fillRect(width/4 - 10, height - 20, 20, 10);
-            ctx.fillStyle = '#888';
-            ctx.beginPath();
-            ctx.arc(width/4, height - 20, 5, 0, Math.PI*2);
-            ctx.fill();
-        }
+function createFish(species) {
+  const s = SPECIES[species];
+  return {
+    species,
+    x: rand(W * 0.1, W * 0.9),
+    y: rand(H * 0.15, H * 0.65),
+    vx: rand(-1, 1) * s.speed,
+    vy: rand(-0.5, 0.5) * s.speed,
+    size: s.size * rand(0.85, 1.15),
+    speed: s.speed,
+    wanderAngle: rand(0, Math.PI * 2),
+    wanderTimer: 0,
+    wanderInterval: randInt(60, 180),
+    dartTimer: 0,
+    dartCooldown: randInt(300, 900),
+    isDarting: false,
+    dartVx: 0,
+    dartVy: 0,
+    tailPhase: rand(0, Math.PI * 2),
+    tailSpeed: rand(3, 6),
+    bobPhase: rand(0, Math.PI * 2),
+    bobAmp: species === 'pufferfish' ? 3 : 1,
+    facing: 1
+  };
+}
 
-        function loop() {
-            time++;
-            ctx.clearRect(0, 0, width, height);
+function initFish() {
+  fish.length = 0;
+  for (const [key, s] of Object.entries(SPECIES)) {
+    for (let i = 0; i < s.count; i++) {
+      fish.push(createFish(key));
+    }
+  }
+}
+initFish();
 
-            // 1. Background
-            ctx.fillStyle = waterGradient();
-            ctx.fillRect(0, 0, width, height);
+function updateFish() {
+  for (const f of fish) {
+    const s = SPECIES[f.species];
 
-            // 2. Caustics
-            caustics.update();
-            caustics.draw();
+    // Dart cooldown
+    f.dartCooldown--;
+    if (f.dartCooldown <= 0 && !f.isDarting && Math.random() < 0.005) {
+      f.isDarting = true;
+      f.dartTimer = randInt(15, 30);
+      const angle = rand(0, Math.PI * 2);
+      const dartSpeed = f.speed * rand(4, 7);
+      f.dartVx = Math.cos(angle) * dartSpeed;
+      f.dartVy = Math.sin(angle) * dartSpeed;
+      f.dartCooldown = randInt(400, 1000);
+    }
 
-            // 3. Background Plants
-            plants.forEach(p => p.draw());
+    if (f.isDarting) {
+      f.x += f.dartVx;
+      f.y += f.dartVy;
+      f.dartVx *= 0.92;
+      f.dartVy *= 0.92;
+      f.dartTimer--;
+      if (f.dartTimer <= 0) {
+        f.isDarting = false;
+        f.vx = f.dartVx * 0.3;
+        f.vy = f.dartVy * 0.3;
+      }
+    } else {
+      // Wander
+      f.wanderTimer++;
+      if (f.wanderTimer > f.wanderInterval) {
+        f.wanderAngle += rand(-1.5, 1.5);
+        f.wanderTimer = 0;
+        f.wanderInterval = randInt(60, 180);
+      }
 
-            // 4. Fish (Sort by Y for depth)
-            fishSchool.sort((a, b) => a.y - b.y);
-            fishSchool.forEach(f => {
-                f.update();
-                f.draw();
-            });
+      const wanderForce = 0.03;
+      f.vx += Math.cos(f.wanderAngle) * wanderForce;
+      f.vy += Math.sin(f.wanderAngle) * wanderForce;
 
-            // 5. Foreground Elements
-            drawGravel();
-            crab.update();
-            crab.draw();
-            drawBubbler();
+      // Wall avoidance
+      const margin = 60;
+      const avoidForce = 0.15;
+      if (f.x < margin) f.vx += avoidForce * (1 - f.x / margin);
+      if (f.x > W - margin) f.vx -= avoidForce * (1 - (W - f.x) / margin);
+      if (f.y < margin) f.vy += avoidForce * (1 - f.y / margin);
+      if (f.y > H - GRAVEL_H - margin) f.vy -= avoidForce * (1 - (H - GRAVEL_H - f.y) / margin);
 
-            // 6. Bubbles
-            bubbles.forEach(b => {
-                b.update();
-                b.draw();
-            });
+      // Speed limit
+      const maxSpd = f.speed * 2.5;
+      const spd = Math.hypot(f.vx, f.vy);
+      if (spd > maxSpd) {
+        f.vx = (f.vx / spd) * maxSpd;
+        f.vy = (f.vy / spd) * maxSpd;
+      }
 
-            requestAnimationFrame(loop);
-        }
+      // Damping
+      f.vx *= 0.995;
+      f.vy *= 0.995;
 
-        loop();
+      f.x += f.vx;
+      f.y += f.vy;
+    }
 
-    </script>
+    // Gentle bob
+    f.y += Math.sin(t * 0.5 + f.bobPhase) * f.bobAmp * 0.02;
+
+    // Clamp
+    f.x = clamp(f.x, 10, W - 10);
+    f.y = clamp(f.y, 10, H - GRAVEL_H - 10);
+
+    // Facing
+    if (Math.abs(f.vx) > 0.1) f.facing = f.vx > 0 ? 1 : -1;
+
+    // Tail
+    f.tailPhase += f.tailSpeed * 0.05;
+  }
+}
+
+function drawFishBody(f) {
+  const s = SPECIES[f.species];
+  const sz = f.size * 18;
+  const x = f.x, y = f.y;
+  const dir = f.facing;
+
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(dir, 1);
+
+  const tailSwing = Math.sin(f.tailPhase) * 0.3;
+
+  // Tail fin
+  ctx.fillStyle = s.finColor;
+  ctx.beginPath();
+  if (f.species === 'angelfish') {
+    ctx.moveTo(-sz * 0.7, 0);
+    ctx.quadraticCurveTo(-sz * 1.2, -sz * 0.5 + tailSwing * sz, -sz * 1.4, -sz * 0.3);
+    ctx.quadraticCurveTo(-sz * 1.1, tailSwing * sz * 0.5, -sz * 1.4, sz * 0.3);
+    ctx.quadraticCurveTo(-sz * 1.2, sz * 0.5 + tailSwing * sz, -sz * 0.7, 0);
+  } else if (f.species === 'pufferfish') {
+    ctx.moveTo(-sz * 0.6, 0);
+    ctx.quadraticCurveTo(-sz * 0.9, -sz * 0.25 + tailSwing * sz * 0.5, -sz * 1.0, -sz * 0.15);
+    ctx.quadraticCurveTo(-sz * 0.85, tailSwing * sz * 0.3, -sz * 1.0, sz * 0.15);
+    ctx.quadraticCurveTo(-sz * 0.9, sz * 0.25 + tailSwing * sz * 0.5, -sz * 0.6, 0);
+  } else {
+    ctx.moveTo(-sz * 0.8, 0);
+    ctx.quadraticCurveTo(-sz * 1.2, -sz * 0.4 + tailSwing * sz, -sz * 1.5, -sz * 0.2);
+    ctx.quadraticCurveTo(-sz * 1.1, tailSwing * sz * 0.5, -sz * 1.5, sz * 0.2);
+    ctx.quadraticCurveTo(-sz * 1.2, sz * 0.4 + tailSwing * sz, -sz * 0.8, 0);
+  }
+  ctx.fill();
+
+  // Body
+  ctx.fillStyle = s.bodyColor;
+  ctx.beginPath();
+  if (f.species === 'angelfish') {
+    // Tall, diamond-like
+    ctx.moveTo(sz * 0.9, 0);
+    ctx.quadraticCurveTo(sz * 0.5, -sz * 0.8, -sz * 0.3, -sz * 0.7);
+    ctx.quadraticCurveTo(-sz * 0.7, -sz * 0.3, -sz * 0.7, 0);
+    ctx.quadraticCurveTo(-sz * 0.7, sz * 0.3, -sz * 0.3, sz * 0.7);
+    ctx.quadraticCurveTo(sz * 0.5, sz * 0.8, sz * 0.9, 0);
+  } else if (f.species === 'pufferfish') {
+    // Round
+    ctx.ellipse(0, 0, sz * 0.8, sz * 0.7, 0, 0, Math.PI * 2);
+  } else if (f.species === 'tetra') {
+    // Small, sleek
+    ctx.moveTo(sz * 0.8, 0);
+    ctx.quadraticCurveTo(sz * 0.4, -sz * 0.35, -sz * 0.5, -sz * 0.25);
+    ctx.quadraticCurveTo(-sz * 0.8, -sz * 0.1, -sz * 0.8, 0);
+    ctx.quadraticCurveTo(-sz * 0.8, sz * 0.1, -sz * 0.5, sz * 0.25);
+    ctx.quadraticCurveTo(sz * 0.4, sz * 0.35, sz * 0.8, 0);
+  } else if (f.species === 'bluetang') {
+    // Tang shape - laterally compressed with notch
+    ctx.moveTo(sz * 0.9, 0);
+    ctx.quadraticCurveTo(sz * 0.5, -sz * 0.5, -sz * 0.4, -sz * 0.45);
+    ctx.quadraticCurveTo(-sz * 0.7, -sz * 0.2, -sz * 0.8, 0);
+    ctx.quadraticCurveTo(-sz * 0.7, sz * 0.2, -sz * 0.4, sz * 0.45);
+    ctx.quadraticCurveTo(sz * 0.5, sz * 0.5, sz * 0.9, 0);
+  } else {
+    // Clownfish - oval
+    ctx.ellipse(0, 0, sz * 0.85, sz * 0.45, 0, 0, Math.PI * 2);
+  }
+  ctx.fill();
+
+  // Stripes
+  ctx.fillStyle = s.stripeColor;
+  if (f.species === 'clownfish') {
+    for (let i = -1; i <= 1; i++) {
+      ctx.beginPath();
+      ctx.ellipse(i * sz * 0.3, 0, sz * 0.06, sz * 0.42, 0.1 * i, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else if (f.species === 'bluetang') {
+    ctx.beginPath();
+    ctx.ellipse(sz * 0.1, 0, sz * 0.08, sz * 0.42, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Yellow tail area
+    ctx.fillStyle = '#f0c030';
+    ctx.beginPath();
+    ctx.moveTo(-sz * 0.5, -sz * 0.15);
+    ctx.quadraticCurveTo(-sz * 0.7, 0, -sz * 0.5, sz * 0.15);
+    ctx.fill();
+  } else if (f.species === 'angelfish') {
+    for (let i = -2; i <= 2; i++) {
+      ctx.beginPath();
+      ctx.moveTo(i * sz * 0.2, -sz * 0.65);
+      ctx.lineTo(i * sz * 0.2, sz * 0.65);
+      ctx.lineWidth = sz * 0.06;
+      ctx.strokeStyle = s.stripeColor;
+      ctx.stroke();
+    }
+  } else if (f.species === 'tetra') {
+    // Red stripe
+    ctx.fillStyle = '#ff2040';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, sz * 0.6, sz * 0.08, 0, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (f.species === 'pufferfish') {
+    // Spots
+    ctx.fillStyle = '#6a5820';
+    const spots = [[0.2, 0.2], [-0.2, -0.15], [0.1, -0.25], [-0.15, 0.2], [0.35, 0]];
+    for (const [sx, sy] of spots) {
+      ctx.beginPath();
+      ctx.arc(sx * sz, sy * sz, sz * 0.08, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Dorsal fin
+  ctx.fillStyle = s.finColor;
+  ctx.globalAlpha = 0.8;
+  ctx.beginPath();
+  if (f.species === 'angelfish') {
+    ctx.moveTo(sz * 0.3, -sz * 0.7);
+    ctx.quadraticCurveTo(0, -sz * 1.3, -sz * 0.4, -sz * 0.65);
+  } else if (f.species === 'pufferfish') {
+    ctx.moveTo(sz * 0.1, -sz * 0.65);
+    ctx.quadraticCurveTo(-sz * 0.1, -sz * 0.9, -sz * 0.3, -sz * 0.6);
+  } else {
+    ctx.moveTo(sz * 0.2, -sz * 0.4);
+    ctx.quadraticCurveTo(0, -sz * 0.75, -sz * 0.3, -sz * 0.35);
+  }
+  ctx.fill();
+
+  // Ventral fin
+  ctx.beginPath();
+  if (f.species === 'angelfish') {
+    ctx.moveTo(sz * 0.1, sz * 0.6);
+    ctx.quadraticCurveTo(-sz * 0.1, sz * 1.0, -sz * 0.3, sz * 0.55);
+  } else if (f.species === 'pufferfish') {
+    ctx.moveTo(sz * 0.1, sz * 0.6);
+    ctx.quadraticCurveTo(-sz * 0.1, sz * 0.85, -sz * 0.3, sz * 0.55);
+  } else {
+    ctx.moveTo(sz * 0.1, sz * 0.35);
+    ctx.quadraticCurveTo(-sz * 0.1, sz * 0.6, -sz * 0.3, sz * 0.3);
+  }
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // Eye
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(sz * 0.5, -sz * 0.08, sz * 0.12, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#111';
+  ctx.beginPath();
+  ctx.arc(sz * 0.53, -sz * 0.08, sz * 0.07, 0, Math.PI * 2);
+  ctx.fill();
+  // Eye highlight
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(sz * 0.55, -sz * 0.12, sz * 0.025, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Mouth
+  ctx.strokeStyle = s.stripeColor;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(sz * 0.75, sz * 0.02, sz * 0.06, -0.5, 0.5);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+// ===== LIGHT RAYS =====
+function drawLightRays() {
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = 0.04;
+  for (let i = 0; i < 5; i++) {
+    const x = W * 0.2 + i * W * 0.15;
+    const sway = Math.sin(t * 0.3 + i * 1.2) * 30;
+    const grad = ctx.createLinearGradient(x + sway, 0, x + sway + 40, H);
+    grad.addColorStop(0, 'rgba(200,230,255,0.3)');
+    grad.addColorStop(0.5, 'rgba(200,230,255,0.1)');
+    grad.addColorStop(1, 'rgba(200,230,255,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(x + sway - 15, 0);
+    ctx.lineTo(x + sway + 55, H);
+    ctx.lineTo(x + sway + 25, H);
+    ctx.lineTo(x + sway - 35, 0);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// ===== WATER SURFACE =====
+function drawWaterSurface() {
+  ctx.save();
+  ctx.globalAlpha = 0.15;
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  for (let x = 0; x <= W; x += 5) {
+    const y = Math.sin(t * 1.2 + x * 0.015) * 3 + Math.sin(t * 0.7 + x * 0.025) * 2;
+    ctx.lineTo(x, y);
+  }
+  ctx.lineTo(W, 15);
+  ctx.lineTo(0, 15);
+  ctx.closePath();
+  const grad = ctx.createLinearGradient(0, -5, 0, 15);
+  grad.addColorStop(0, 'rgba(150,200,255,0.4)');
+  grad.addColorStop(1, 'rgba(150,200,255,0)');
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.restore();
+}
+
+// ===== MAIN LOOP =====
+function frame() {
+  t += 0.016;
+
+  ctx.clearRect(0, 0, W, H);
+
+  drawBackground();
+  drawCaustics();
+  drawLightRays();
+
+  // Plants behind fish
+  for (const p of plants) drawPlant(p);
+
+  drawGravel();
+
+  // Update & draw crab
+  updateCrab();
+  drawCrab();
+
+  // Bubbles
+  updateBubbles();
+  drawBubbles();
+
+  // Fish
+  updateFish();
+  // Sort by y for depth
+  const sortedFish = [...fish].sort((a, b) => a.y - b.y);
+  for (const f of sortedFish) {
+    drawFishBody(f);
+  }
+
+  drawWaterSurface();
+
+  requestAnimationFrame(frame);
+}
+
+frame();
+</script>
 </body>
 </html>

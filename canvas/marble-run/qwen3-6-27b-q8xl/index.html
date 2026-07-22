@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Marble Run</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a1a; }
+canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+const GRAVITY = 600;
+const RESTITUTION = 0.65;
+const FRICTION = 0.995;
+const MARBLE_RADIUS = 7;
+const SPAWN_INTERVAL = 0.4;
+const REBUILD_INTERVAL = 30;
+const MAX_MARBLES = 80;
+
+let camera = { x: 0, y: 0, targetY: 0 };
+let marbles = [];
+let obstacles = [];
+let lastSpawn = 0;
+let lastRebuild = 0;
+let sectionHeights = [];
+let sectionObstacles = [];
+let time = 0;
+
+const COLORS = [
+  '#ff6b6b', '#ffd93d', '#6bcb77', '#4d96ff',
+  '#ff6b9d', '#c084fc', '#38bdf8', '#fbbf24',
+  '#f87171', '#a3e635', '#22d3ee', '#e879f9'
+];
+
+class Marble {
+  constructor(x, y) {
+    this.x = x;
+    this.y = y;
+    this.vx = (Math.random() - 0.5) * 40;
+    this.vy = Math.random() * 20;
+    this.radius = MARBLE_RADIUS;
+    this.color = COLORS[Math.floor(Math.random() * COLORS.length)];
+    this.trail = [];
+    this.maxTrail = 12;
+    this.alive = true;
+  }
+
+  update(dt) {
+    this.vy += GRAVITY * dt;
+    this.vx *= FRICTION;
+    this.vy *= FRICTION;
+
+    this.trail.push({ x: this.x, y: this.y });
+    if (this.trail.length > this.maxTrail) this.trail.shift();
+
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+
+    if (this.y > camera.y + H + 200) {
+      this.x = W * 0.2 + Math.random() * W * 0.6;
+      this.y = camera.y - 50;
+      this.vx = (Math.random() - 0.5) * 40;
+      this.vy = Math.random() * 20;
+      this.trail = [];
+    }
+  }
+
+  draw() {
+    for (let i = 0; i < this.trail.length; i++) {
+      const t = this.trail[i];
+      const alpha = (i / this.trail.length) * 0.35;
+      const r = this.radius * (0.3 + 0.7 * (i / this.trail.length));
+      ctx.beginPath();
+      ctx.arc(t.x - camera.x, t.y - camera.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = this.color + Math.floor(alpha * 255).toString(16).padStart(2, '0');
+      ctx.fill();
+    }
+
+    ctx.beginPath();
+    ctx.arc(this.x - camera.x, this.y - camera.y, this.radius, 0, Math.PI * 2);
+    ctx.fillStyle = this.color;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(this.x - camera.x - this.radius * 0.25, this.y - camera.y - this.radius * 0.25, this.radius * 0.35, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.fill();
+  }
+}
+
+class Ramp {
+  constructor(x1, y1, x2, y2) {
+    this.x1 = x1; this.y1 = y1;
+    this.x2 = x2; this.y2 = y2;
+    this.type = 'ramp';
+    this.color = '#3a3a5c';
+  }
+
+  draw() {
+    ctx.beginPath();
+    ctx.moveTo(this.x1 - camera.x, this.y1 - camera.y);
+    ctx.lineTo(this.x2 - camera.x, this.y2 - camera.y);
+    ctx.strokeStyle = this.color;
+    ctx.lineWidth = 4;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+
+    const mx = (this.x1 + this.x2) / 2 - camera.x;
+    const my = (this.y1 + this.y2) / 2 - camera.y;
+    ctx.beginPath();
+    ctx.moveTo(this.x1 - camera.x, this.y1 - camera.y);
+    ctx.lineTo(this.x2 - camera.x, this.y2 - camera.y);
+    ctx.strokeStyle = 'rgba(100,100,180,0.3)';
+    ctx.lineWidth = 8;
+    ctx.stroke();
+  }
+}
+
+class Spinner {
+  constructor(cx, cy, length, speed) {
+    this.cx = cx; this.cy = cy;
+    this.length = length;
+    this.speed = speed;
+    this.angle = Math.random() * Math.PI * 2;
+    this.type = 'spinner';
+    this.color = '#5c3a5c';
+  }
+
+  update(dt) {
+    this.angle += this.speed * dt;
+  }
+
+  getEndpoints() {
+    const half = this.length / 2;
+    return {
+      x1: this.cx + Math.cos(this.angle) * half,
+      y1: this.cy + Math.sin(this.angle) * half,
+      x2: this.cx - Math.cos(this.angle) * half,
+      y2: this.cy - Math.sin(this.angle) * half
+    };
+  }
+
+  draw() {
+    const e = this.getEndpoints();
+    ctx.beginPath();
+    ctx.moveTo(e.x1 - camera.x, e.y1 - camera.y);
+    ctx.lineTo(e.x2 - camera.x, e.y2 - camera.y);
+    ctx.strokeStyle = '#8866aa';
+    ctx.lineWidth = 5;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(this.cx - camera.x, this.cy - camera.y, 5, 0, Math.PI * 2);
+    ctx.fillStyle = '#aa88cc';
+    ctx.fill();
+  }
+}
+
+class Bumper {
+  constructor(x, y, radius) {
+    this.x = x; this.y = y;
+    this.radius = radius;
+    this.type = 'bumper';
+    this.color = '#3a5c3a';
+    this.pulsePhase = Math.random() * Math.PI * 2;
+  }
+
+  draw() {
+    const pulse = 1 + 0.05 * Math.sin(time * 3 + this.pulsePhase);
+    const r = this.radius * pulse;
+    ctx.beginPath();
+    ctx.arc(this.x - camera.x, this.y - camera.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = '#2a4a2a';
+    ctx.fill();
+    ctx.strokeStyle = '#5a8a5a';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(this.x - camera.x - r * 0.2, this.y - camera.y - r * 0.2, r * 0.3, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(100,200,100,0.3)';
+    ctx.fill();
+  }
+}
+
+class Funnel {
+  constructor(cx, topY, bottomY, topWidth, bottomWidth) {
+    this.cx = cx;
+    this.topY = topY;
+    this.bottomY = bottomY;
+    this.topWidth = topWidth;
+    this.bottomWidth = bottomWidth;
+    this.type = 'funnel';
+    this.leftSeg = { x1: cx - topWidth/2, y1: topY, x2: cx - bottomWidth/2, y2: bottomY };
+    this.rightSeg = { x1: cx + topWidth/2, y1: topY, x2: cx + bottomWidth/2, y2: bottomY };
+  }
+
+  draw() {
+    ctx.beginPath();
+    ctx.moveTo(this.leftSeg.x1 - camera.x, this.leftSeg.y1 - camera.y);
+    ctx.lineTo(this.leftSeg.x2 - camera.x, this.leftSeg.y2 - camera.y);
+    ctx.strokeStyle = '#4a4a7a';
+    ctx.lineWidth = 4;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(this.rightSeg.x1 - camera.x, this.rightSeg.y1 - camera.y);
+    ctx.lineTo(this.rightSeg.x2 - camera.x, this.rightSeg.y2 - camera.y);
+    ctx.strokeStyle = '#4a4a7a';
+    ctx.lineWidth = 4;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+  }
+}
+
+function closestPointOnSegment(px, py, x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return { x: x1, y: y1, t: 0 };
+  let t = ((px - x1) * dx + (py - y1) * dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  return { x: x1 + t * dx, y: y1 + t * dy, t };
+}
+
+function resolveCollisions(marble) {
+  for (const obs of obstacles) {
+    if (obs.type === 'ramp') {
+      const cp = closestPointOnSegment(marble.x, marble.y, obs.x1, obs.y1, obs.x2, obs.y2);
+      const dx = marble.x - cp.x, dy = marble.y - cp.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < marble.radius && dist > 0) {
+        const nx = dx / dist, ny = dy / dist;
+        marble.x = cp.x + nx * marble.radius;
+        marble.y = cp.y + ny * marble.radius;
+        const dot = marble.vx * nx + marble.vy * ny;
+        if (dot < 0) {
+          marble.vx -= (1 + RESTITUTION) * dot * nx;
+          marble.vy -= (1 + RESTITUTION) * dot * ny;
+        }
+      }
+    } else if (obs.type === 'spinner') {
+      const e = obs.getEndpoints();
+      const cp = closestPointOnSegment(marble.x, marble.y, e.x1, e.y1, e.x2, e.y2);
+      const dx = marble.x - cp.x, dy = marble.y - cp.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < marble.radius && dist > 0) {
+        const nx = dx / dist, ny = dy / dist;
+        marble.x = cp.x + nx * marble.radius;
+        marble.y = cp.y + ny * marble.radius;
+        const spinVel = obs.speed * obs.length / 2;
+        const dot = marble.vx * nx + marble.vy * ny;
+        if (dot < 0) {
+          marble.vx -= (1 + RESTITUTION) * dot * nx;
+          marble.vy -= (1 + RESTITUTION) * dot * ny;
+          marble.vx += nx * spinVel * 0.3;
+          marble.vy += ny * spinVel * 0.3;
+        }
+      }
+    } else if (obs.type === 'bumper') {
+      const dx = marble.x - obs.x, dy = marble.y - obs.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const minDist = marble.radius + obs.radius;
+      if (dist < minDist && dist > 0) {
+        const nx = dx / dist, ny = dy / dist;
+        marble.x = obs.x + nx * minDist;
+        marble.y = obs.y + ny * minDist;
+        const dot = marble.vx * nx + marble.vy * ny;
+        if (dot < 0) {
+          marble.vx -= (1 + RESTITUTION * 1.2) * dot * nx;
+          marble.vy -= (1 + RESTITUTION * 1.2) * dot * ny;
+          const boost = 80;
+          marble.vx += nx * boost;
+          marble.vy += ny * boost;
+        }
+      }
+    } else if (obs.type === 'funnel') {
+      for (const seg of [obs.leftSeg, obs.rightSeg]) {
+        const cp = closestPointOnSegment(marble.x, marble.y, seg.x1, seg.y1, seg.x2, seg.y2);
+        const dx = marble.x - cp.x, dy = marble.y - cp.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < marble.radius && dist > 0) {
+          const nx = dx / dist, ny = dy / dist;
+          marble.x = cp.x + nx * marble.radius;
+          marble.y = cp.y + ny * marble.radius;
+          const dot = marble.vx * nx + marble.vy * ny;
+          if (dot < 0) {
+            marble.vx -= (1 + RESTITUTION) * dot * nx;
+            marble.vy -= (1 + RESTITUTION) * dot * ny;
+          }
+        }
+      }
+    }
+  }
+}
+
+function generateSection(baseY, index) {
+  const section = [];
+  const sectionH = 180 + Math.random() * 120;
+  const margin = 40;
+
+  const pattern = Math.floor(Math.random() * 6);
+
+  if (pattern === 0) {
+    const numRamps = 2 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < numRamps; i++) {
+      const y = baseY + (sectionH / (numRamps + 1)) * (i + 1);
+      const x1 = margin + Math.random() * (W - margin * 2);
+      const x2 = margin + Math.random() * (W - margin * 2);
+      section.push(new Ramp(x1, y, x2, y + 10 + Math.random() * 20));
+    }
+  } else if (pattern === 1) {
+    const cx = W * 0.2 + Math.random() * W * 0.6;
+    const cy = baseY + sectionH * 0.5;
+    section.push(new Spinner(cx, cy, 80 + Math.random() * 60, (Math.random() - 0.5) * 4));
+    if (Math.random() > 0.5) {
+      section.push(new Spinner(cx + (Math.random() - 0.5) * 100, cy + 30, 60 + Math.random() * 40, (Math.random() - 0.5) * 3));
+    }
+  } else if (pattern === 2) {
+    const cx = W * 0.3 + Math.random() * W * 0.4;
+    const topW = 120 + Math.random() * 100;
+    const botW = 20 + Math.random() * 40;
+    section.push(new Funnel(cx, baseY + 20, baseY + sectionH - 20, topW, botW));
+  } else if (pattern === 3) {
+    const numBumpers = 3 + Math.floor(Math.random() * 5);
+    for (let i = 0; i < numBumpers; i++) {
+      const bx = margin + Math.random() * (W - margin * 2);
+      const by = baseY + 30 + Math.random() * (sectionH - 60);
+      section.push(new Bumper(bx, by, 12 + Math.random() * 10));
+    }
+  } else if (pattern === 4) {
+    const numRamps = 3 + Math.floor(Math.random() * 2);
+    for (let i = 0; i < numRamps; i++) {
+      const y = baseY + (sectionH / (numRamps + 1)) * (i + 1);
+      const slope = (Math.random() - 0.5) * 0.4;
+      const cx = W * 0.3 + Math.random() * W * 0.4;
+      const hw = 80 + Math.random() * 80;
+      section.push(new Ramp(cx - hw, y - hw * slope, cx + hw, y + hw * slope));
+    }
+  } else {
+    const cx = W * 0.3 + Math.random() * W * 0.4;
+    const cy = baseY + sectionH * 0.5;
+    section.push(new Spinner(cx, cy, 100 + Math.random() * 40, (Math.random() - 0.5) * 5));
+    const numBumpers = 2 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < numBumpers; i++) {
+      const angle = (i / numBumpers) * Math.PI * 2;
+      const dist = 40 + Math.random() * 30;
+      section.push(new Bumper(cx + Math.cos(angle) * dist, cy + Math.sin(angle) * dist, 10 + Math.random() * 8));
+    }
+  }
+
+  if (Math.random() > 0.6) {
+    const bx = margin + Math.random() * (W - margin * 2);
+    const by = baseY + Math.random() * sectionH;
+    section.push(new Bumper(bx, by, 10 + Math.random() * 12));
+  }
+
+  return { obstacles: section, height: sectionH };
+}
+
+function buildCourse() {
+  obstacles = [];
+  sectionHeights = [];
+  let y = -H;
+  for (let i = 0; i < 30; i++) {
+    const section = generateSection(y, i);
+    obstacles.push(...section.obstacles);
+    sectionHeights.push({ y, h: section.height });
+    y += section.height;
+  }
+}
+
+function rebuildSection(sectionIndex) {
+  if (sectionIndex < 0 || sectionIndex >= sectionHeights.length) return;
+  const info = sectionHeights[sectionIndex];
+  const oldObs = obstacles.filter(o => {
+    if (o.type === 'funnel') {
+      return o.topY >= info.y && o.bottomY <= info.y + info.h;
+    }
+    if (o.type === 'ramp') {
+      return o.y1 >= info.y && o.y2 <= info.y + info.h;
+    }
+    if (o.type === 'spinner' || o.type === 'bumper') {
+      return o.y >= info.y && o.y <= info.y + info.h;
+    }
+    return false;
+  });
+
+  const newSection = generateSection(info.y, sectionIndex);
+  obstacles = obstacles.filter(o => !oldObs.includes(o));
+  obstacles.push(...newSection.obstacles);
+  sectionHeights[sectionIndex].h = newSection.height;
+}
+
+function checkMarbleInSection(sectionIndex) {
+  if (sectionIndex < 0 || sectionIndex >= sectionHeights.length) return false;
+  const info = sectionHeights[sectionIndex];
+  for (const m of marbles) {
+    if (m.y >= info.y - 50 && m.y <= info.y + info.h + 50) return true;
+  }
+  return false;
+}
+
+function updateCamera() {
+  if (marbles.length === 0) {
+    camera.targetY = 0;
+  } else {
+    let avgY = 0;
+    for (const m of marbles) avgY += m.y;
+    avgY /= marbles.length;
+    camera.targetY = avgY - H * 0.4;
+  }
+  camera.y += (camera.targetY - camera.y) * 0.03;
+  camera.x = 0;
+}
+
+function drawBackground() {
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#0a0a1a');
+  grad.addColorStop(1, '#1a1a2e');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.strokeStyle = 'rgba(50,50,80,0.15)';
+  ctx.lineWidth = 1;
+  const gridSize = 60;
+  const offX = -camera.x % gridSize;
+  const offY = -camera.y % gridSize;
+  for (let x = offX; x < W; x += gridSize) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, H);
+    ctx.stroke();
+  }
+  for (let y = offY; y < H; y += gridSize) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(W, y);
+    ctx.stroke();
+  }
+}
+
+function drawSpawnIndicator() {
+  const sy = -camera.y - 20;
+  if (sy > -50 && sy < H + 50) {
+    ctx.fillStyle = 'rgba(255,255,255,0.05)';
+    ctx.fillRect(0, sy - 20, W, 40);
+    ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([5, 5]);
+    ctx.beginPath();
+    ctx.moveTo(0, sy);
+    ctx.lineTo(W, sy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+}
+
+function init() {
+  buildCourse();
+  for (let i = 0; i < 15; i++) {
+    const m = new Marble(W * 0.3 + Math.random() * W * 0.4, -Math.random() * H * 2);
+    m.y = -Math.random() * 1000;
+    marbles.push(m);
+  }
+}
+
+let lastTime = performance.now();
+
+function loop(now) {
+  const dt = Math.min((now - lastTime) / 1000, 0.033);
+  lastTime = now;
+  time += dt;
+
+  lastSpawn += dt;
+  if (lastSpawn > SPAWN_INTERVAL && marbles.length < MAX_MARBLES) {
+    lastSpawn = 0;
+    marbles.push(new Marble(W * 0.3 + Math.random() * W * 0.4, camera.y - 80));
+  }
+
+  lastRebuild += dt;
+  if (lastRebuild > REBUILD_INTERVAL) {
+    lastRebuild = 0;
+    const rebuildCount = 3 + Math.floor(Math.random() * 3);
+    const candidates = [];
+    for (let i = 2; i < sectionHeights.length - 2; i++) {
+      if (!checkMarbleInSection(i)) candidates.push(i);
+    }
+    for (let i = 0; i < Math.min(rebuildCount, candidates.length); i++) {
+      const idx = candidates[Math.floor(Math.random() * candidates.length)];
+      if (idx >= 0) rebuildSection(idx);
+    }
+  }
+
+  for (const obs of obstacles) {
+    if (obs.update) obs.update(dt);
+  }
+
+  for (const m of marbles) {
+    m.update(dt);
+    resolveCollisions(m);
+  }
+
+  updateCamera();
+
+  drawBackground();
+  drawSpawnIndicator();
+
+  for (const obs of obstacles) {
+    if (obs.type === 'funnel') {
+      if (obs.topY - camera.y > -200 && obs.bottomY - camera.y < H + 200) obs.draw();
+    } else if (obs.type === 'spinner') {
+      if (obs.cy - camera.y > -200 && obs.cy - camera.y < H + 200) obs.draw();
+    } else if (obs.type === 'bumper') {
+      if (obs.y - camera.y > -100 && obs.y - camera.y < H + 100) obs.draw();
+    } else {
+      if (obs.y1 - camera.y > -100 && obs.y2 - camera.y < H + 100) obs.draw();
+    }
+  }
+
+  for (const m of marbles) {
+    m.draw();
+  }
+
+  requestAnimationFrame(loop);
+}
+
+init();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Physarum Slime Mold</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; }
+canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(() => {
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+
+    let W = window.innerWidth;
+    let H = window.innerHeight;
+
+    function onResize() {
+        W = canvas.width = window.innerWidth;
+        H = canvas.height = window.innerHeight;
+        initMap();
+    }
+    window.addEventListener('resize', onResize);
+
+    const SCALE = 2;
+    let mapW, mapH, mapSize;
+    let deposit, depositNext;
+
+    function initMap() {
+        mapW = Math.ceil(W / SCALE);
+        mapH = Math.ceil(H / SCALE);
+        mapSize = mapW * mapH;
+        deposit = new Float32Array(mapSize);
+        depositNext = new Float32Array(mapSize);
+    }
+    initMap();
+
+    const NUM_AGENTS = 45000;
+    const ax = new Float32Array(NUM_AGENTS);
+    const ay = new Float32Array(NUM_AGENTS);
+    const aAngle = new Float32Array(NUM_AGENTS);
+
+    const SENSOR_DIST = 14;
+    const SENSOR_ANGLE = Math.PI / 6;
+    const COS_SA = Math.cos(SENSOR_ANGLE);
+    const SIN_SA = Math.sin(SENSOR_ANGLE);
+
+    const NUM_FOOD = 7;
+    const fx = new Float32Array(NUM_FOOD);
+    const fy = new Float32Array(NUM_FOOD);
+    const ft = new Float32Array(NUM_FOOD);
+
+    function initFood() {
+        for (let i = 0; i < NUM_FOOD; i++) {
+            fx[i] = 80 + Math.random() * (W - 160);
+            fy[i] = 80 + Math.random() * (H - 160);
+            ft[i] = 3 + Math.random() * 5;
+        }
+    }
+    initFood();
+
+    function initAgents() {
+        for (let i = 0; i < NUM_AGENTS; i++) {
+            ax[i] = Math.random() * W;
+            ay[i] = Math.random() * H;
+            aAngle[i] = Math.random() * Math.PI * 2;
+        }
+    }
+    initAgents();
+
+    const PAL = new Uint8Array(256 * 3);
+    for (let i = 0; i < 256; i++) {
+        const t = i / 255;
+        let r, g, b;
+        if (t < 0.5) {
+            const s = t * 2;
+            r = 0;
+            g = Math.floor(60 + s * 160);
+            b = Math.floor(160 + s * 95);
+        } else {
+            const s = (t - 0.5) * 2;
+            r = Math.floor(140 + s * 115);
+            g = Math.floor(160 + s * 95);
+            b = Math.floor(120 - s * 100);
+        }
+        PAL[i * 3] = r;
+        PAL[i * 3 + 1] = g;
+        PAL[i * 3 + 2] = b;
+    }
+
+    const pixelMap = new Int32Array(mapSize * 4);
+    function buildPixelMap() {
+        for (let y = 0; y < mapH; y++) {
+            for (let x = 0; x < mapW; x++) {
+                const srcIdx = y * mapW + x;
+                const dstBase = (y * SCALE) * W + (x * SCALE);
+                for (let dy = 0; dy < SCALE; dy++) {
+                    for (let dx = 0; dx < SCALE; dx++) {
+                        pixelMap[srcIdx * 4 + dy * SCALE + dx] = (dstBase + dy * W + dx) * 4;
+                    }
+                }
+            }
+        }
+    }
+    buildPixelMap();
+
+    let imgData = ctx.createImageData(W, H);
+    let pixels = imgData.data;
+
+    let lastTime = performance.now();
+
+    function loop(time) {
+        const dt = Math.min(0.033, (time - lastTime) / 1000);
+        lastTime = time;
+
+        for (let i = 0; i < NUM_FOOD; i++) {
+            ft[i] -= dt;
+            if (ft[i] <= 0) {
+                fx[i] = 60 + Math.random() * (W - 120);
+                fy[i] = 60 + Math.random() * (H - 120);
+                ft[i] = 3 + Math.random() * 5;
+            }
+        }
+
+        for (let i = 0; i < NUM_AGENTS; i++) {
+            const x = ax[i];
+            const y = ay[i];
+            const ang = aAngle[i];
+
+            const cosA = Math.cos(ang);
+            const sinA = Math.sin(ang);
+
+            const cx = x + cosA * SENSOR_DIST;
+            const cy = y + sinA * SENSOR_DIST;
+            const lx = x + (cosA * COS_SA + sinA * SIN_SA) * SENSOR_DIST;
+            const ly = y + (sinA * COS_SA - cosA * SIN_SA) * SENSOR_DIST;
+            const rx = x + (cosA * COS_SA - sinA * SIN_SA) * SENSOR_DIST;
+            const ry = y + (sinA * COS_SA + cosA * SIN_SA) * SENSOR_DIST;
+
+            const vC = (cx >= 0 && cx < W && cy >= 0 && cy < H)
+                ? deposit[((cy / SCALE) | 0) * mapW + ((cx / SCALE) | 0)] : 0;
+            const vL = (lx >= 0 && lx < W && ly >= 0 && ly < H)
+                ? deposit[((ly / SCALE) | 0) * mapW + ((lx / SCALE) | 0)] : 0;
+            const vR = (rx >= 0 && rx < W && ry >= 0 && ry < H)
+                ? deposit[((ry / SCALE) | 0) * mapW + ((rx / SCALE) | 0)] : 0;
+
+            let turn = 0;
+            if (vC > vL && vC > vR) {
+                turn = (Math.random() - 0.5) * 0.08;
+            } else if (vC < vL && vC < vR) {
+                turn = Math.PI;
+            } else if (vL > vR) {
+                turn = -0.25;
+            } else if (vR > vL) {
+                turn = 0.25;
+            } else {
+                turn = (Math.random() - 0.5) * 0.15;
+            }
+
+            let minD2 = Infinity;
+            let nfx = 0, nfy = 0;
+            for (let j = 0; j < NUM_FOOD; j++) {
+                const dx = fx[j] - x;
+                const dy = fy[j] - y;
+                const d2 = dx * dx + dy * dy;
+                if (d2 < minD2) {
+                    minD2 = d2;
+                    nfx = fx[j];
+                    nfy = fy[j];
+                }
+            }
+            if (minD2 > 400) {
+                const ddx = nfx - x;
+                const ddy = nfy - y;
+                const dd = Math.sqrt(minD2);
+                const fa = Math.atan2(ddy, ddx);
+                let diff = fa - ang;
+                while (diff > 6.2831853) diff -= 6.2831853;
+                while (diff < -6.2831853) diff += 6.2831853;
+                turn += diff * 0.015;
+            }
+
+            aAngle[i] += turn + (Math.random() - 0.5) * 0.06;
+
+            const spd = 1.5 + Math.random() * 0.3;
+            ax[i] += Math.cos(aAngle[i]) * spd;
+            ay[i] += Math.sin(aAngle[i]) * spd;
+
+            if (ax[i] < 0) ax[i] += W;
+            else if (ax[i] >= W) ax[i] -= W;
+            if (ay[i] < 0) ay[i] += H;
+            else if (ay[i] >= H) ay[i] -= H;
+
+            const mx = (ax[i] / SCALE) | 0;
+            const my = (ay[i] / SCALE) | 0;
+            if (mx >= 0 && mx < mapW && my >= 0 && my < mapH) {
+                deposit[my * mapW + mx] += 0.9;
+            }
+        }
+
+        for (let y = 1; y < mapH - 1; y++) {
+            const row = y * mapW;
+            for (let x = 1; x < mapW - 1; x++) {
+                const idx = row + x;
+                depositNext[idx] = (deposit[idx - 1] + deposit[idx + 1] +
+                    deposit[idx - mapW] + deposit[idx + mapW] + deposit[idx]) * 0.2;
+            }
+        }
+        for (let i = 0; i < mapSize; i++) {
+            deposit[i] = Math.min(2.0, depositNext[i]) * 0.955;
+        }
+
+        const data = pixels;
+        data.fill(0);
+
+        for (let i = 0; i < mapSize; i++) {
+            const val = deposit[i];
+            if (val > 0.008) {
+                const idx = val > 10 ? 255 : (val * 25) | 0;
+                const r = PAL[idx * 3];
+                const g = PAL[idx * 3 + 1];
+                const b = PAL[idx * 3 + 2];
+                const a = val > 10 ? 255 : ((val * 80) | 0);
+
+                const base = i * 4;
+                let p;
+                p = pixelMap[base]; data[p] = r; data[p + 1] = g; data[p + 2] = b; data[p + 3] = a;
+                p = pixelMap[base + 1]; data[p] = r; data[p + 1] = g; data[p + 2] = b; data[p + 3] = a;
+                p = pixelMap[base + 2]; data[p] = r; data[p + 1] = g; data[p + 2] = b; data[p + 3] = a;
+                p = pixelMap[base + 3]; data[p] = r; data[p + 1] = g; data[p + 2] = b; data[p + 3] = a;
+            }
+        }
+
+        ctx.putImageData(imgData, 0, 0);
+
+        requestAnimationFrame(loop);
+    }
+
+    requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

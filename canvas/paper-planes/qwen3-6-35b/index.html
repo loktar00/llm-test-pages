@@ -1,405 +1,594 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Atrium Gliders</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background-color: #1a1a1a;
-        }
-        canvas {
-            display: block;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Paper Planes</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a0a; }
+  canvas { display: block; }
+</style>
 </head>
 <body>
-    <canvas id="atrium"></canvas>
-    <script>
-        // --- Configuration ---
-        const CONFIG = {
-            planeCount: 10,
-            gravity: 0.05,
-            liftCoeff: 0.06,
-            dragCoeff: 0.01,
-            thermalStrength: 0.12,
-            thermalRadius: 150,
-            colors: ['#F0F0F0', '#E8E8E8', '#D4D4D4', '#C0C0C0', '#B0B0B0'],
-            windowCols: 5,
-            windowRows: 8
-        };
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
 
-        const canvas = document.getElementById('atrium');
-        const ctx = canvas.getContext('2d');
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
 
-        let width, height;
-        let planes = [];
-        let dustMotes = [];
-        let thermalCenter = { x: 0, y: 0 };
-        let time = 0;
+// --- Constants ---
+const GRAVITY = 180;
+const LIFT_COEFF = 0.00012;
+const DRAG_COEFF = 0.00008;
+const THERMAL_X_RATIO = 0.5;
+const THERMAL_RADIUS = 120;
+const THERMAL_STRENGTH = 120;
+const NUM_PLANES = 10;
+const NUM_DUST = 200;
+const NUM_SUNBEAMS = 5;
 
-        // --- Setup & Resize ---
-        function resize() {
-            width = window.innerWidth;
-            height = window.innerHeight;
-            canvas.width = width;
-            canvas.height = height;
-            thermalCenter.x = width / 2;
-            thermalCenter.y = height / 2;
-            initDust();
-            initPlanes();
-        }
+// --- Dust Motes ---
+class DustMote {
+  constructor() { this.reset(true); }
+  reset(init) {
+    this.x = Math.random() * W;
+    this.y = init ? Math.random() * H : H * 0.3 + Math.random() * H * 0.6;
+    this.size = 0.5 + Math.random() * 2;
+    this.speedX = (Math.random() - 0.5) * 8;
+    this.speedY = -5 - Math.random() * 15;
+    this.opacity = 0.1 + Math.random() * 0.4;
+    this.life = 3 + Math.random() * 8;
+    this.maxLife = this.life;
+    this.phase = Math.random() * Math.PI * 2;
+  }
+  update(dt) {
+    this.phase += dt * 0.5;
+    this.x += (this.speedX + Math.sin(this.phase) * 10) * dt;
+    this.y += this.speedY * dt;
+    this.life -= dt;
+    if (this.life <= 0 || this.y < -10 || this.x < -10 || this.x > W + 10) this.reset(false);
+  }
+  draw(ctx) {
+    let alpha = this.opacity * Math.min(1, this.life / 1) * Math.min(1, (this.maxLife - this.life) / 1);
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255, 240, 200, ${alpha})`;
+    ctx.fill();
+  }
+}
 
-        window.addEventListener('resize', resize);
+const dustMotes = [];
+for (let i = 0; i < NUM_DUST; i++) dustMotes.push(new DustMote());
 
-        // --- Classes ---
+// --- Sunbeams ---
+class Sunbeam {
+  constructor() {
+    this.x = W * (0.3 + Math.random() * 0.4);
+    this.width = 60 + Math.random() * 100;
+    this.opacity = 0.02 + Math.random() * 0.04;
+    this.drift = (Math.random() - 0.5) * 5;
+  }
+  update(dt) { this.x += this.drift * dt; }
+  draw(ctx) {
+    let grad = ctx.createLinearGradient(this.x - this.width / 2, 0, this.x + this.width / 2, 0);
+    grad.addColorStop(0, 'rgba(255, 220, 150, 0)');
+    grad.addColorStop(0.3, `rgba(255, 220, 150, ${this.opacity})`);
+    grad.addColorStop(0.5, `rgba(255, 230, 170, ${this.opacity * 1.5})`);
+    grad.addColorStop(0.7, `rgba(255, 220, 150, ${this.opacity})`);
+    grad.addColorStop(1, 'rgba(255, 220, 150, 0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(this.x - this.width / 2, 0, this.width, H);
+  }
+}
 
-        class DustMote {
-            constructor() {
-                this.reset();
-                this.y = Math.random() * height; // Start anywhere
-            }
+const sunbeams = [];
+for (let i = 0; i < NUM_SUNBEAMS; i++) sunbeams.push(new Sunbeam());
 
-            reset() {
-                this.x = Math.random() * width;
-                this.y = height + Math.random() * 100;
-                this.size = Math.random() * 1.5 + 0.5;
-                this.speed = Math.random() * 0.5 + 0.2;
-                this.wobbleSpeed = Math.random() * 0.02 + 0.005;
-                this.wobbleOffset = Math.random() * Math.PI * 2;
-                this.alpha = Math.random() * 0.3 + 0.1;
-            }
+// --- Balconies ---
+function getBalconies() {
+  const balconies = [];
+  const count = 6;
+  for (let i = 0; i < count; i++) {
+    let side = i % 2 === 0 ? 'left' : 'right';
+    let y = H * 0.15 + (i / count) * H * 0.5;
+    let x = side === 'left' ? W * 0.04 + Math.random() * W * 0.06 : W * 0.9 - Math.random() * W * 0.06;
+    balconies.push({ x, y, side, width: 40 + Math.random() * 20 });
+  }
+  return balconies;
+}
 
-            update() {
-                this.y -= this.speed;
-                this.x += Math.sin(time * this.wobbleSpeed + this.wobbleOffset) * 0.3;
+let balconies = getBalconies();
 
-                // Thermal influence
-                const dx = this.x - thermalCenter.x;
-                const dy = this.y - thermalCenter.y;
-                const dist = Math.sqrt(dx*dx + dy*dy);
-                
-                if (dist < CONFIG.thermalRadius * 1.5) {
-                    this.x -= dx * 0.0005; // Suck towards center
-                    this.y -= 0.2; // Extra lift
-                }
+// --- Paper Airplane ---
+class PaperPlane {
+  constructor(balcony, index) {
+    this.balcony = balcony;
+    this.index = index;
+    this.reset();
+  }
 
-                if (this.y < -10) this.reset();
-            }
+  reset() {
+    let b = this.balcony;
+    this.x = b.x + (b.side === 'left' ? b.width * 0.5 : -b.width * 0.5);
+    this.y = b.y - 15;
+    this.vx = (b.side === 'left' ? 1 : -1) * (40 + Math.random() * 30);
+    this.vy = -10 - Math.random() * 20;
+    this.angle = Math.atan2(this.vy, this.vx);
+    this.bank = 0;
+    this.targetBank = (Math.random() - 0.5) * 0.4;
+    this.speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+    this.state = 'LAUNCHING'; // LAUNCHING, GLIDING, THERMAL, LANDING, FOLDING, RELANCHING
+    this.foldTimer = 0;
+    this.relaunchTimer = 0;
+    this.foldFlash = 0;
+    this.trail = [];
+    this.wingPhase = Math.random() * Math.PI * 2;
+    this.size = 8 + Math.random() * 4;
+    this.color = this.randomPaperColor();
+    this.thermalCaught = false;
+    this.glideTimer = 0;
+    this.targetAngle = this.angle;
+    this.turnRate = 0;
+  }
 
-            draw() {
-                // Only draw if in light shafts (center)
-                const dx = this.x - thermalCenter.x;
-                if (Math.abs(dx) < width / 2.5) {
-                    ctx.fillStyle = `rgba(255, 255, 240, ${this.alpha})`;
-                    ctx.beginPath();
-                    ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
-                    ctx.fill();
-                }
-            }
-        }
+  randomPaperColor() {
+    const colors = [
+      { r: 255, g: 250, b: 240 },
+      { r: 240, g: 235, b: 220 },
+      { r: 255, g: 245, b: 230 },
+      { r: 230, g: 230, b: 240 },
+      { r: 245, g: 240, b: 225 },
+    ];
+    return colors[Math.floor(Math.random() * colors.length)];
+  }
 
-        class Plane {
-            constructor(isRelaunch = false, startY = 0) {
-                this.reset(isRelaunch, startY);
-            }
+  update(dt) {
+    this.wingPhase += dt * 3;
+    this.glideTimer += dt;
 
-            reset(isRelaunch = false, startY = 0) {
-                // Position: Pick a balcony edge (Left or Right)
-                this.bank = Math.random() > 0.5 ? -1 : 1; // -1 Left, 1 Right
-                this.x = this.bank === -1 ? 0 : width;
-                this.y = startY || height * 0.2 + Math.random() * height * 0.2;
-                
-                // Velocity: Initial forward throw
-                const speed = Math.random() * 2 + 2;
-                this.vx = -speed * this.bank;
-                this.vy = Math.random() * 1 + 0.5; // Slight dip on launch
-                
-                this.angle = 0;
-                this.bankAngle = 0;
-                this.scale = 0.6 + Math.random() * 0.4;
-                this.color = CONFIG.colors[Math.floor(Math.random() * CONFIG.colors.length)];
-                
-                // State machine
-                this.state = 'GLIDING'; // GLIDING, BANKING, FOLDING, RETURNING
-                this.stateTimer = 0;
-                this.foldFlash = 0;
-                
-                // Aerodynamic properties
-                this.lift = 0;
-            }
+    if (this.state === 'FOLDING') {
+      this.foldTimer += dt;
+      this.foldFlash = Math.max(0, 1 - this.foldTimer * 2);
+      if (this.foldTimer > 1.5) {
+        this.state = 'RELANCHING';
+        this.relaunchTimer = 0;
+      }
+      return;
+    }
 
-            update() {
-                if (this.state === 'FOLDING' || this.state === 'RETURNING') {
-                    this.handleEndState();
-                    return;
-                }
+    if (this.state === 'RELANCHING') {
+      this.relaunchTimer += dt;
+      let b = this.balcony;
+      let targetX = b.x + (b.side === 'left' ? b.width * 0.5 : -b.width * 0.5);
+      let targetY = b.y - 15;
+      let lerp = Math.min(1, this.relaunchTimer * 0.5);
+      this.x += (targetX - this.x) * lerp * dt * 3;
+      this.y += (targetY - this.y) * lerp * dt * 3;
+      if (this.relaunchTimer > 2) {
+        this.vx = (b.side === 'left' ? 1 : -1) * (40 + Math.random() * 30);
+        this.vy = -10 - Math.random() * 20;
+        this.angle = Math.atan2(this.vy, this.vx);
+        this.state = 'LAUNCHING';
+        this.foldTimer = 0;
+        this.foldFlash = 0;
+      }
+      return;
+    }
 
-                // --- Physics ---
-                
-                // Gravity
-                this.vy += CONFIG.gravity * 0.1;
+    // Aerodynamics
+    let speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+    if (speed < 1) speed = 1;
 
-                // Lift (based on speed)
-                const speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
-                this.lift = speed * CONFIG.liftCoeff;
-                this.vy -= this.lift;
+    let cosA = Math.cos(this.angle);
+    let sinA = Math.sin(this.angle);
 
-                // Drag
-                this.vx *= (1 - CONFIG.dragCoeff);
-                this.vy *= (1 - CONFIG.dragCoeff);
+    // Drag
+    let dragForce = DRAG_COEFF * speed * speed;
+    let dragVx = -dragForce * cosA;
+    let dragVy = -dragForce * sinA;
 
-                // Thermal Column (Center)
-                const dx = this.x - thermalCenter.x;
-                const dy = this.y - thermalCenter.y;
-                const dist = Math.sqrt(dx*dx + dy*dy);
-                
-                // Simple thermal logic
-                if (dist < CONFIG.thermalRadius * 2) {
-                    const heat = Math.max(0, 1 - dist / (CONFIG.thermalRadius * 2));
-                    this.vy -= CONFIG.thermalStrength * heat * 0.1;
-                    
-                    // Gentle swirl
-                    this.vx += (dx / dist) * 0.05; 
-                }
+    // Lift (perpendicular to velocity, upward relative to plane)
+    let liftForce = LIFT_COEFF * speed * speed;
+    let liftVx = -liftForce * sinA;
+    let liftVy = liftForce * cosA;
 
-                // Movement
-                this.x += this.vx;
-                this.y += this.vy;
+    // Gravity
+    let gravVy = GRAVITY;
 
-                // --- Controls & Banking ---
+    // Thermal
+    let thermalCenterX = W * THERMAL_X_RATIO;
+    let thermalDist = Math.abs(this.x - thermalCenterX);
+    let thermalFactor = Math.max(0, 1 - thermalDist / THERMAL_RADIUS);
+    thermalFactor *= thermalFactor;
 
-                // Target angle based on velocity
-                const targetAngle = Math.atan2(this.vy, this.vx);
-                this.angle = this.angle * 0.9 + targetAngle * 0.1;
+    let thermalVy = -THERMAL_STRENGTH * thermalFactor;
+    let thermalTurn = thermalFactor * 2;
 
-                // Banking logic
-                // If thermal, bank gently. If gliding, bank based on x position relative to thermal.
-                let turnInput = 0;
-                if (dist < CONFIG.thermalRadius * 1.5) {
-                    turnInput = dx * 0.001; // Bank towards center
-                } else {
-                    turnInput = (this.x - thermalCenter.x) * 0.0005; // Drift back to center
-                }
+    // Apply forces
+    this.vx += (dragVx + liftVx) * dt;
+    this.vy += (dragVy + liftVy + gravVy + thermalVy) * dt;
 
-                this.bankAngle += turnInput;
-                this.bankAngle *= 0.95; // Damping
-                this.bankAngle = Math.max(-0.5, Math.min(0.5, this.bankAngle)); // Clamp
+    // Thermal turning
+    if (thermalFactor > 0.2) {
+      this.targetBank = Math.sign(this.vx) * 0.6;
+      this.turnRate = thermalTurn * thermalFactor * Math.sign(this.vx);
+    } else {
+      this.turnRate *= 0.95;
+    }
 
-                // --- End Condition ---
-                // If plane hits floor or goes off screen completely
-                if (this.y > height - 50) {
-                    this.startLanding();
-                } else if (this.x < -100 || this.x > width + 100) {
-                    // If it flies off screen, it just loops
-                    this.reset(false, Math.random() * height);
-                }
-            }
+    // Gentle random turning
+    if (this.glideTimer > 2 && !this.thermalCaught) {
+      this.targetBank += (Math.random() - 0.5) * 0.01;
+      this.targetBank = Math.max(-0.5, Math.min(0.5, this.targetBank));
+    }
 
-            handleEndState() {
-                this.stateTimer++;
-                
-                if (this.state === 'FOLDING') {
-                    this.foldFlash = 1.0;
-                    if (this.stateTimer > 30) {
-                        this.state = 'RETURNING';
-                        this.stateTimer = 0;
-                        // Calculate vector back to balcony
-                        const tx = this.bank === -1 ? 0 : width;
-                        const ty = this.y;
-                        const angle = Math.atan2(ty - this.y, tx - this.x);
-                        this.vx = Math.cos(angle) * -5; // Fast back
-                        this.vy = Math.sin(angle) * -5;
-                    }
-                } else if (this.state === 'RETURNING') {
-                    this.x += this.vx;
-                    this.y += this.vy;
-                    // Simple bounce logic for returning
-                    if (this.x < 0 || this.x > width) {
-                        this.reset(false, this.y);
-                    }
-                }
-            }
+    // Bank interpolation
+    this.bank += (this.targetBank - this.bank) * dt * 2;
 
-            startLanding() {
-                this.state = 'FOLDING';
-                this.stateTimer = 0;
-                this.foldFlash = 0;
-                // Stop movement, drop to floor visually
-                this.vx = 0;
-                this.vy = 0;
-                this.y = height - 20;
-            }
+    // Update angle based on velocity
+    let newAngle = Math.atan2(this.vy, this.vx);
+    let angleDiff = newAngle - this.angle;
+    while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+    while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+    this.angle += angleDiff * dt * 3;
 
-            draw() {
-                ctx.save();
-                ctx.translate(this.x, this.y);
-                
-                // Shadow
-                if (this.state === 'GLIDING') {
-                    const shadowScale = Math.max(0, 1 - (height - this.y) / height);
-                    ctx.save();
-                    ctx.translate(10, 40); // Offset shadow
-                    ctx.rotate(this.angle);
-                    ctx.scale(this.scale * (1 + shadowScale), this.scale * (1 + shadowScale) * 0.5);
-                    ctx.fillStyle = `rgba(0,0,0,${0.1 * shadowScale})`;
-                    this.drawShape();
-                    ctx.restore();
-                }
+    // Bank affects heading
+    this.angle += this.bank * dt * 0.5;
 
-                // Plane
-                ctx.rotate(this.bankAngle); // Visual banking roll
-                ctx.rotate(this.angle); // Heading
-                
-                const scale = this.state === 'FOLDING' ? (1 - this.stateTimer/30) : this.scale;
-                ctx.scale(scale, scale);
+    // Update position
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
 
-                // Flash effect on fold
-                if (this.state === 'FOLDING') {
-                    ctx.shadowColor = 'white';
-                    ctx.shadowBlur = 20 * Math.sin(this.stateTimer);
-                }
+    this.speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
 
-                ctx.fillStyle = this.color;
-                ctx.strokeStyle = '#888';
-                ctx.lineWidth = 1;
-                this.drawShape();
+    // Trail
+    this.trail.push({ x: this.x, y: this.y, age: 0 });
+    if (this.trail.length > 30) this.trail.shift();
+    this.trail.forEach(t => t.age += dt);
 
-                ctx.restore();
-            }
+    // State management
+    let floorY = H * 0.88;
 
-            drawShape() {
-                ctx.beginPath();
-                // Simple dart shape
-                ctx.moveTo(20, 0);
-                ctx.lineTo(-15, 10);
-                ctx.lineTo(-10, 0);
-                ctx.lineTo(-15, -10);
-                ctx.closePath();
-                ctx.fill();
-                ctx.stroke();
-                
-                // Fold line
-                ctx.beginPath();
-                ctx.moveTo(20, 0);
-                ctx.lineTo(-10, 0);
-                ctx.strokeStyle = 'rgba(0,0,0,0.1)';
-                ctx.stroke();
-            }
-        }
+    // Check thermal catch
+    if (thermalFactor > 0.3 && this.speed > 20) {
+      this.thermalCaught = true;
+      this.state = 'THERMAL';
+    }
 
-        // --- Initialization ---
+    if (this.state === 'THERMAL') {
+      if (this.vy > -10 || this.y < H * 0.1 || thermalFactor < 0.1) {
+        this.state = 'GLIDING';
+        this.thermalCaught = false;
+        this.glideTimer = 0;
+      }
+    }
 
-        function initPlanes() {
-            planes = [];
-            for (let i = 0; i < CONFIG.planeCount; i++) {
-                planes.push(new Plane());
-            }
-        }
+    if (this.state === 'GLIDING' || this.state === 'LAUNCHING') {
+      // Check if landing
+      if (this.y > floorY - 20 && this.vy > 0 && this.speed < 100) {
+        this.state = 'LANDING';
+      }
+      // Wall bouncing
+      if (this.x < 20 || this.x > W - 20) {
+        this.vx *= -0.5;
+        this.x = Math.max(20, Math.min(W - 20, this.x));
+      }
+      // Ceiling
+      if (this.y < 10) {
+        this.vy = Math.abs(this.vy) * 0.5;
+        this.y = 10;
+      }
+    }
 
-        function initDust() {
-            dustMotes = [];
-            for (let i = 0; i < 150; i++) {
-                dustMotes.push(new DustMote());
-            }
-        }
+    if (this.state === 'LANDING') {
+      this.vy = Math.min(this.vy, 30);
+      this.vx *= 0.98;
+      if (this.y >= floorY - 5) {
+        this.y = floorY - 5;
+        this.state = 'FOLDING';
+        this.foldTimer = 0;
+        this.foldFlash = 1;
+      }
+    }
+  }
 
-        // --- Drawing Functions ---
+  draw(ctx) {
+    // Trail
+    if (this.trail.length > 1) {
+      for (let i = 1; i < this.trail.length; i++) {
+        let t = this.trail[i];
+        let alpha = (1 - t.age * 0.5) * 0.15;
+        if (alpha <= 0) continue;
+        ctx.beginPath();
+        ctx.arc(t.x, t.y, 1, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(200, 200, 200, ${alpha})`;
+        ctx.fill();
+      }
+    }
 
-        function drawBackground() {
-            // Sky / Atrium Wall Gradient
-            const grad = ctx.createLinearGradient(0, 0, 0, height);
-            grad.addColorStop(0, '#87CEEB'); // Sky blue top
-            grad.addColorStop(0.4, '#F0F8FF'); // Alice blue
-            grad.addColorStop(1, '#D3D3D3'); // Light gray floor
-            ctx.fillStyle = grad;
-            ctx.fillRect(0, 0, width, height);
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.angle + this.bank * 0.3);
 
-            // Draw Light Shafts (God rays)
-            ctx.save();
-            ctx.globalCompositeOperation = 'screen';
-            const rayGrad = ctx.createRadialGradient(
-                thermalCenter.x, 0, 10,
-                thermalCenter.x, height / 2, height
-            );
-            rayGrad.addColorStop(0, 'rgba(255, 255, 200, 0.4)');
-            rayGrad.addColorStop(0.5, 'rgba(255, 255, 255, 0.1)');
-            rayGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
-            
-            ctx.fillStyle = rayGrad;
-            ctx.beginPath();
-            ctx.moveTo(thermalCenter.x - 50, 0);
-            ctx.lineTo(thermalCenter.x + 50, 0);
-            ctx.lineTo(width, height);
-            ctx.lineTo(0, height);
-            ctx.fill();
-            ctx.restore();
+    let s = this.size;
+    let wingFlap = Math.sin(this.wingPhase) * 2;
 
-            // Draw Window Grid (Simple)
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
-            ctx.lineWidth = 2;
-            const winW = width / CONFIG.windowCols;
-            const winH = height / CONFIG.windowRows;
-            
-            for(let i=1; i<CONFIG.windowCols; i++) {
-                ctx.beginPath();
-                ctx.moveTo(i * winW, 0);
-                ctx.lineTo(i * winW, height);
-                ctx.stroke();
-            }
-            for(let i=1; i<CONFIG.windowRows; i++) {
-                ctx.beginPath();
-                ctx.moveTo(0, i * winH);
-                ctx.lineTo(width, i * winH);
-                ctx.stroke();
-            }
+    // Shadow
+    ctx.restore();
+    ctx.save();
+    let shadowOffset = (H * 0.88 - this.y) * 0.15;
+    ctx.translate(this.x + shadowOffset * 0.3, H * 0.88);
+    ctx.rotate(this.angle);
+    ctx.scale(1 + shadowOffset * 0.002, 0.3);
+    ctx.globalAlpha = 0.15;
+    this.drawPlaneShape(ctx, s, wingFlap);
+    ctx.globalAlpha = 1;
+    ctx.restore();
 
-            // Draw Floor
-            const floorY = height - 20;
-            const floorGrad = ctx.createLinearGradient(0, floorY, 0, height);
-            floorGrad.addColorStop(0, '#8B4513'); // Wood
-            floorGrad.addColorStop(1, '#5D4037');
-            ctx.fillStyle = floorGrad;
-            ctx.fillRect(0, floorY, width, 20);
-            
-            // Balcony Edges
-            ctx.fillStyle = '#FFF';
-            ctx.fillRect(0, 0, 10, height); // Left rail
-            ctx.fillRect(width - 10, 0, 10, height); // Right rail
-        }
+    // Plane
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.angle + this.bank * 0.3);
 
-        function animate() {
-            time++;
-            ctx.clearRect(0, 0, width, height);
+    // Fold flash
+    if (this.foldFlash > 0) {
+      ctx.beginPath();
+      ctx.arc(0, 0, s * 3 * this.foldFlash, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(255, 255, 220, ${this.foldFlash * 0.5})`;
+      ctx.fill();
+    }
 
-            drawBackground();
+    // Scale down during fold
+    if (this.state === 'FOLDING') {
+      let scale = Math.max(0.1, 1 - this.foldTimer * 0.5);
+      ctx.scale(scale, scale);
+    }
 
-            // Update and Draw Dust
-            dustMotes.forEach(d => {
-                d.update();
-                d.draw();
-            });
+    this.drawPlaneShape(ctx, s, wingFlap);
+    ctx.restore();
+  }
 
-            // Update and Draw Planes
-            // Sort by Y for simple depth (optional, but nice)
-            planes.sort((a, b) => a.y - b.y);
-            planes.forEach(p => {
-                p.update();
-                p.draw();
-            });
+  drawPlaneShape(ctx, s, wingFlap) {
+    let c = this.color;
+    // Left wing
+    ctx.beginPath();
+    ctx.moveTo(s * 0.1, 0);
+    ctx.lineTo(-s * 0.8, -s * 0.5 + wingFlap);
+    ctx.lineTo(-s * 0.5, 0);
+    ctx.closePath();
+    ctx.fillStyle = `rgba(${c.r - 15}, ${c.g - 15}, ${c.b - 15}, 0.9)`;
+    ctx.fill();
 
-            requestAnimationFrame(animate);
-        }
+    // Right wing
+    ctx.beginPath();
+    ctx.moveTo(s * 0.1, 0);
+    ctx.lineTo(-s * 0.8, s * 0.5 - wingFlap);
+    ctx.lineTo(-s * 0.5, 0);
+    ctx.closePath();
+    ctx.fillStyle = `rgba(${c.r - 5}, ${c.g - 5}, ${c.b - 5}, 0.85)`;
+    ctx.fill();
 
-        // --- Start ---
-        resize();
-        animate();
+    // Body
+    ctx.beginPath();
+    ctx.moveTo(s * 0.3, 0);
+    ctx.lineTo(-s * 0.6, -s * 0.15);
+    ctx.lineTo(-s * 0.8, 0);
+    ctx.lineTo(-s * 0.6, s * 0.15);
+    ctx.closePath();
+    ctx.fillStyle = `rgba(${c.r}, ${c.g}, ${c.b}, 0.95)`;
+    ctx.fill();
 
-    </script>
+    // Wing highlights
+    ctx.beginPath();
+    ctx.moveTo(s * 0.05, -s * 0.05);
+    ctx.lineTo(-s * 0.5, -s * 0.35 + wingFlap);
+    ctx.lineTo(-s * 0.35, -s * 0.05);
+    ctx.closePath();
+    ctx.fillStyle = `rgba(255, 255, 255, 0.3)`;
+    ctx.fill();
+  }
+}
+
+// --- Planes ---
+let planes = [];
+function initPlanes() {
+  planes = [];
+  let bList = getBalconies();
+  for (let i = 0; i < NUM_PLANES; i++) {
+    let b = bList[i % bList.length];
+    let p = new PaperPlane(b, i);
+    // Stagger initial positions
+    p.x += (Math.random() - 0.5) * 200;
+    p.y += (Math.random() - 0.5) * 100;
+    p.glideTimer = Math.random() * 5;
+    planes.push(p);
+  }
+}
+initPlanes();
+
+// --- Drawing the atrium ---
+function drawAtrium(ctx, time) {
+  // Background gradient
+  let bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+  bgGrad.addColorStop(0, '#1a1510');
+  bgGrad.addColorStop(0.3, '#2a2018');
+  bgGrad.addColorStop(0.7, '#1e1812');
+  bgGrad.addColorStop(1, '#15100a');
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Floor
+  let floorY = H * 0.88;
+  let floorGrad = ctx.createLinearGradient(0, floorY, 0, H);
+  floorGrad.addColorStop(0, '#3a2a1a');
+  floorGrad.addColorStop(0.3, '#2a1e12');
+  floorGrad.addColorStop(1, '#1a120a');
+  ctx.fillStyle = floorGrad;
+  ctx.fillRect(0, floorY, W, H - floorY);
+
+  // Floor lines (perspective)
+  ctx.strokeStyle = 'rgba(60, 45, 30, 0.3)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 15; i++) {
+    let y = floorY + i * (H - floorY) / 15;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(W, y);
+    ctx.stroke();
+  }
+
+  // Left wall
+  let wallGrad = ctx.createLinearGradient(0, 0, W * 0.08, 0);
+  wallGrad.addColorStop(0, '#1a1510');
+  wallGrad.addColorStop(1, 'rgba(26, 21, 16, 0)');
+  ctx.fillStyle = wallGrad;
+  ctx.fillRect(0, 0, W * 0.08, H);
+
+  // Right wall
+  let wallGrad2 = ctx.createLinearGradient(W, 0, W * 0.92, 0);
+  wallGrad2.addColorStop(0, '#1a1510');
+  wallGrad2.addColorStop(1, 'rgba(26, 21, 16, 0)');
+  ctx.fillStyle = wallGrad2;
+  ctx.fillRect(W * 0.92, 0, W * 0.08, H);
+
+  // Balconies
+  balconies.forEach(b => {
+    ctx.save();
+    // Balcony platform
+    ctx.fillStyle = '#2a2018';
+    ctx.fillRect(b.side === 'left' ? b.x - b.width * 0.5 : b.x - b.width * 0.5, b.y - 3, b.width, 6);
+
+    // Railing
+    ctx.strokeStyle = '#3a2a1a';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(b.x - b.width * 0.5, b.y - 3);
+    ctx.lineTo(b.x - b.width * 0.5, b.y - 20);
+    ctx.moveTo(b.x + b.width * 0.5, b.y - 3);
+    ctx.lineTo(b.x + b.width * 0.5, b.y - 20);
+    ctx.moveTo(b.x - b.width * 0.5, b.y - 20);
+    ctx.lineTo(b.x + b.width * 0.5, b.y - 20);
+    ctx.stroke();
+
+    // Railing posts
+    for (let i = 0; i < 3; i++) {
+      let rx = b.x - b.width * 0.5 + (i / 2) * b.width;
+      ctx.beginPath();
+      ctx.moveTo(rx, b.y - 3);
+      ctx.lineTo(rx, b.y - 20);
+      ctx.stroke();
+    }
+    ctx.restore();
+  });
+
+  // Architectural columns
+  for (let i = 0; i < 4; i++) {
+    let cx = W * (0.15 + i * 0.25);
+    let colGrad = ctx.createLinearGradient(cx - 8, 0, cx + 8, 0);
+    colGrad.addColorStop(0, 'rgba(40, 30, 20, 0.5)');
+    colGrad.addColorStop(0.5, 'rgba(50, 38, 25, 0.6)');
+    colGrad.addColorStop(1, 'rgba(40, 30, 20, 0.5)');
+    ctx.fillStyle = colGrad;
+    ctx.fillRect(cx - 6, H * 0.1, 12, H * 0.78);
+  }
+
+  // Thermal indicator (subtle)
+  let thermalCenterX = W * THERMAL_X_RATIO;
+  let thermalPulse = Math.sin(time * 0.5) * 0.5 + 0.5;
+  let thermalGrad = ctx.createRadialGradient(thermalCenterX, H * 0.5, 0, thermalCenterX, H * 0.5, THERMAL_RADIUS);
+  thermalGrad.addColorStop(0, `rgba(255, 200, 100, ${0.01 + thermalPulse * 0.015})`);
+  thermalGrad.addColorStop(1, 'rgba(255, 200, 100, 0)');
+  ctx.fillStyle = thermalGrad;
+  ctx.fillRect(thermalCenterX - THERMAL_RADIUS, 0, THERMAL_RADIUS * 2, H);
+}
+
+// --- Main loop ---
+let lastTime = 0;
+let time = 0;
+
+function animate(timestamp) {
+  let dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+  lastTime = timestamp;
+  time += dt;
+
+  // Update sunbeams
+  sunbeams.forEach(b => b.update(dt));
+
+  // Update dust
+  dustMotes.forEach(d => d.update(dt));
+
+  // Update planes
+  planes.forEach(p => p.update(dt));
+
+  // Check if planes need relaunch from balconies
+  planes.forEach(p => {
+    if (p.state === 'FOLDING' && p.foldTimer > 1.5) {
+      // Will relaunch from balcony
+    }
+  });
+
+  // Draw
+  ctx.clearRect(0, 0, W, H);
+
+  drawAtrium(ctx, time);
+
+  // Sunbeams (behind planes)
+  sunbeams.forEach(b => b.draw(ctx));
+
+  // Dust motes in sunbeams
+  dustMotes.forEach(d => d.draw(ctx));
+
+  // Draw shadows first
+  ctx.save();
+  planes.forEach(p => {
+    let shadowOffset = (H * 0.88 - p.y) * 0.15;
+    let shadowAlpha = Math.max(0.05, 0.2 - (p.y / H) * 0.15);
+    ctx.globalAlpha = shadowAlpha;
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.ellipse(p.x + shadowOffset * 0.3, H * 0.88, p.size * 1.2, p.size * 0.3, 0, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+  ctx.restore();
+
+  // Planes
+  planes.forEach(p => p.draw(ctx));
+
+  // Vignette
+  let vigGrad = ctx.createRadialGradient(W / 2, H / 2, W * 0.3, W / 2, H / 2, W * 0.8);
+  vigGrad.addColorStop(0, 'rgba(0,0,0,0)');
+  vigGrad.addColorStop(1, 'rgba(0,0,0,0.4)');
+  ctx.fillStyle = vigGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Warm overlay
+  ctx.fillStyle = 'rgba(255, 200, 100, 0.02)';
+  ctx.fillRect(0, 0, W, H);
+
+  requestAnimationFrame(animate);
+}
+
+requestAnimationFrame(animate);
+
+// Handle resize
+window.addEventListener('resize', () => {
+  resize();
+  balconies = getBalconies();
+  planes.forEach((p, i) => {
+    if (i < balconies.length) {
+      p.balcony = balconies[i % balconies.length];
+    }
+  });
+});
+</script>
 </body>
 </html>

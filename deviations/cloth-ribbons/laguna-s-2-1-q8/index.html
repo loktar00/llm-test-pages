@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Flowing Cloth Ribbons</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #0d1117;
+      height: 100%;
+      width: 100%;
+    }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    const SEGMENTS = 40;
+    const RIBBON_COUNT = 5;
+
+    function createRibbon(x, colorLow, colorHigh) {
+      const points = [];
+      for (let i = 0; i < SEGMENTS; i++) {
+        points.push({
+          x: x,
+          y: i * (canvas.height / SEGMENTS),
+          oldx: x,
+          oldy: i * (canvas.height / SEGMENTS)
+        });
+      }
+      return {
+        points: points,
+        colorLow: colorLow,
+        colorHigh: colorHigh,
+        baseX: x
+      };
+    }
+
+    const ribbons = [
+      createRibbon(canvas.width * 0.15, '#ff5f57', '#ff9b80'),
+      createRibbon(canvas.width * 0.35, '#f5c543', '#ffe066'),
+      createRibbon(canvas.width * 0.55, '#4cd964', '#8be9a8'),
+      createRibbon(canvas.width * 0.70, '#409cff', '#8cb3e6'),
+      createRibbon(canvas.width * 0.85, '#b86bda', '#d7a4f0')
+    ];
+
+    const gravity = 0.02;
+    const windSpeed = 2.0;
+    let time = 0;
+
+    function animate() {
+      ctx.fillStyle = '#0d1117';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      time += 0.016;
+
+      ribbons.forEach((r, ri) => {
+        const t = time + ri * 0.6;
+        const baseWind = Math.sin(t * 0.7) * windSpeed;
+
+        // Apply forces to all non-root points
+        for (let i = 1; i < r.points.length; i++) {
+          const p = r.points[i];
+          const dx = p.x - p.oldx;
+          const dy = p.y - p.oldy;
+
+          // Verlet integration
+          const nx = p.x + dx + Math.cos(i * 0.3 + t) * baseWind * Math.sin(i * 0.2 + t * 0.5) * 0.2;
+          const ny = p.y + dy + gravity;
+
+          p.oldx = p.x;
+          p.oldy = p.y;
+          p.x = nx;
+          p.y = ny;
+
+          // Constrain distance between segments
+          if (i > 0) {
+            const prev = r.points[i - 1];
+            const distX = p.x - prev.x;
+            const distY = p.y - prev.y;
+            const dist = Math.sqrt(distX * distX + distY * distY);
+            const target = canvas.height / SEGMENTS;
+            const diff = (target - dist) / dist;
+            const offsetX = distX * 0.5 * diff;
+            const offsetY = distY * 0.5 * diff;
+            prev.x -= offsetX;
+            prev.y -= offsetY;
+            p.x += offsetX;
+            p.y += offsetY;
+          }
+        }
+
+        // Fix root point
+        const root = r.points[0];
+        root.x = r.baseX + Math.sin(t * 0.9 + ri) * 2;
+        root.y = 10;
+
+        drawRibbon(ctx, r);
+      });
+
+      requestAnimationFrame(animate);
+    }
+
+    function drawRibbon(ctx, ribbon) {
+      const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+      grad.addColorStop(0, ribbon.colorLow);
+      grad.addColorStop(1, ribbon.colorHigh);
+      ctx.fillStyle = grad;
+      ctx.lineCap = 'round';
+      ctx.shadowBlur = 8;
+      ctx.shadowColor = 'rgba(0,0,0,0.4)';
+
+      for (let i = 1; i < ribbon.points.length; i++) {
+        const prev = ribbon.points[i - 1];
+        const curr = ribbon.points[i];
+
+        const dx = curr.x - prev.x;
+        const dy = curr.y - prev.y;
+        const len = Math.sqrt(dx * dx + dy * dy) || 0.001;
+        const nx = -dy / len;
+        const ny = dx / len;
+
+        const width = 6 + Math.sin(i * 0.3 + time * 0.5) * 2;
+        const brightness = (dx + dy) * 0.05 + 0.5;
+
+        // Shading from orientation
+        const sheen = Math.max(0, Math.min(1, brightness));
+        const shadeColor = lerpColor(ribbon.colorLow, ribbon.colorHigh, sheen);
+        ctx.strokeStyle = shadeColor;
+        ctx.lineWidth = width;
+
+        ctx.beginPath();
+        ctx.moveTo(prev.x + nx * width / 2, prev.y + ny * width / 2);
+        ctx.lineTo(curr.x + nx * width / 2, curr.y + ny * width / 2);
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(prev.x - nx * width / 2, prev.y - ny * width / 2);
+        ctx.lineTo(curr.x - nx * width / 2, curr.y - ny * width / 2);
+        ctx.stroke();
+
+        // Soft sheen where bending toward light
+        if (sheen > 0.5) {
+          ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+          ctx.lineWidth = width * 0.3;
+          ctx.beginPath();
+          ctx.moveTo(prev.x + nx * width * 0.3, prev.y + ny * width * 0.3);
+          ctx.lineTo(curr.x + nx * width * 0.3, curr.y + ny * width * 0.3);
+          ctx.stroke();
+        }
+      }
+    }
+
+    function lerpColor(a, b, t) {
+      const ca = hexToRgb(a);
+      const cb = hexToRgb(b);
+      const r = Math.round(ca.r + (cb.r - ca.r) * t);
+      const g = Math.round(ca.g + (cb.g - ca.g) * t);
+      const bl = Math.round(ca.b + (cb.b - ca.b) * t);
+      return `rgb(${r},${g},${bl})`;
+    }
+
+    function hexToRgb(hex) {
+      hex = hex.replace('#', '');
+      return {
+        r: parseInt(hex.slice(0, 2), 16),
+        g: parseInt(hex.slice(2, 4), 16),
+        b: parseInt(hex.slice(4, 6), 16)
+      };
+    }
+
+    animate();
+  </script>
+</body>
+</html>

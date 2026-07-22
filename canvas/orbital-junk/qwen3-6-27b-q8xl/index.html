@@ -5,8 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Orbital Junk</title>
 <style>
-  body { margin: 0; overflow: hidden; background: #000; }
-  canvas { display: block; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; }
 </style>
 </head>
 <body>
@@ -15,373 +16,567 @@
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 
-let W, H, cx, cy, earthR;
-const objects = [];
-const debris = [];
-const stars = [];
-
-// Configuration
-const MAX_ORBITS = 8;
-const BASE_SPEED = 0.002;
-const DRONE_SPEED = 1.5;
-const DRONE_RANGE = 60;
-const G = 0.05;
+let W, H, earthX, earthY, earthR;
 
 function resize() {
   W = canvas.width = window.innerWidth;
   H = canvas.height = window.innerHeight;
-  cx = W * 0.25;
-  cy = H * 0.75;
-  earthR = Math.min(W, H) * 0.15;
-  initStars();
+  earthX = W * 0.18;
+  earthY = H * 0.78;
+  earthR = Math.min(W, H) * 0.09;
+}
+resize();
+window.addEventListener('resize', resize);
+
+const DEG = Math.PI / 180;
+const TAU = Math.PI * 2;
+
+// Stars
+const stars = [];
+for (let i = 0; i < 400; i++) {
+  stars.push({
+    x: Math.random(),
+    y: Math.random(),
+    r: Math.random() * 1.2 + 0.3,
+    b: Math.random() * 0.5 + 0.5,
+    twinkleSpeed: Math.random() * 2 + 1
+  });
 }
 
-function initStars() {
-  stars.length = 0;
-  for (let i = 0; i < 300; i++) {
-    stars.push({
-      x: Math.random() * W,
-      y: Math.random() * H,
-      size: Math.random() * 1.5,
-      alpha: Math.random() * 0.8 + 0.2,
-      twinkle: Math.random() * 0.02
+// Orbital rings
+const orbitRings = [];
+const minOrbitR = earthR + 40;
+const maxOrbitR = Math.min(W, H) * 0.48;
+const numRings = 12;
+for (let i = 0; i < numRings; i++) {
+  const t = i / (numRings - 1);
+  const r = minOrbitR + (maxOrbitR - minOrbitR) * t;
+  orbitRings.push(r);
+}
+
+// Orbital objects
+const objects = [];
+const fragments = [];
+const explosions = [];
+
+function orbitalSpeed(r) {
+  return 80 / Math.pow(r, 1.5);
+}
+
+function createObject(ringIndex) {
+  const r = orbitRings[ringIndex];
+  const angle = Math.random() * TAU;
+  const speed = orbitalSpeed(r) * (0.95 + Math.random() * 0.1);
+  const size = Math.random() * 2.5 + 1;
+  const type = Math.random() < 0.3 ? 'satellite' : 'debris';
+  const glintPhase = Math.random() * TAU;
+  const glintSpeed = Math.random() * 3 + 2;
+  const inclination = (Math.random() - 0.5) * 0.15;
+  return {
+    ringIndex, r, angle, speed, size, type, glintPhase, glintSpeed,
+    inclination, alive: true, age: 0,
+    color: type === 'satellite'
+      ? `hsl(${Math.random() * 60 + 180}, 60%, ${60 + Math.random() * 30}%)`
+      : `hsl(${Math.random() * 40 + 10}, 30%, ${50 + Math.random() * 30}%)`
+  };
+}
+
+// Initialize objects
+for (let ri = 0; ri < orbitRings.length; ri++) {
+  const count = Math.floor(15 + Math.random() * 25);
+  for (let i = 0; i < count; i++) {
+    objects.push(createObject(ri));
+  }
+}
+
+// Collision fragments
+function spawnExplosion(x, y, count, parentSpeed, parentR) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * TAU;
+    const speed = (Math.random() * 1.5 + 0.3) * parentSpeed * 0.3;
+    const vx = Math.cos(angle) * speed;
+    const vy = Math.sin(angle) * speed;
+    fragments.push({
+      x, y, vx, vy,
+      size: Math.random() * 2 + 0.5,
+      life: 1.0,
+      decay: Math.random() * 0.003 + 0.001,
+      color: `hsl(${Math.random() * 40 + 15}, 80%, ${50 + Math.random() * 40}%)`
     });
   }
+  explosions.push({ x, y, radius: 5, maxRadius: 30 + Math.random() * 20, life: 1.0 });
 }
 
-class Satellite {
-  constructor(orbitIndex) {
-    this.orbitIndex = orbitIndex;
-    this.radius = earthR + 40 + orbitIndex * (Math.min(W, H) * 0.08);
-    this.angle = Math.random() * Math.PI * 2;
-    this.speed = (BASE_SPEED / (orbitIndex + 1)) * (0.8 + Math.random() * 0.4);
-    this.size = 1.5 + Math.random() * 1.5;
-    this.glintPhase = Math.random() * Math.PI * 2;
-    this.glintSpeed = 0.05 + Math.random() * 0.1;
-    this.color = `hsl(${180 + Math.random() * 60}, 70%, 70%)`;
-    this.dead = false;
-  }
+// Cleanup drone
+const drone = {
+  x: W * 0.5,
+  y: H * 0.5,
+  targetX: null,
+  targetY: null,
+  targetObj: null,
+  speed: 1.8,
+  radius: 12,
+  trail: [],
+  searchAngle: 0,
+  state: 'searching' // searching, chasing, returning
+};
 
-  update() {
-    this.angle += this.speed;
-    this.glintPhase += this.glintSpeed;
-    this.x = cx + Math.cos(this.angle) * this.radius;
-    this.y = cy + Math.sin(this.angle) * this.radius;
-  }
+function findTarget() {
+  let best = null;
+  let bestScore = -Infinity;
+  const scanRadius = Math.max(W, H) * 0.4;
 
-  draw() {
-    const glint = 0.5 + 0.5 * Math.sin(this.glintPhase);
-    ctx.fillStyle = this.color;
-    ctx.globalAlpha = 0.4 + glint * 0.6;
-    ctx.beginPath();
-    ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
-    ctx.fill();
-    
-    // Glint effect
-    if (glint > 0.8) {
-      ctx.globalAlpha = (glint - 0.8) * 5;
-      ctx.beginPath();
-      ctx.arc(this.x, this.y, this.size * 2, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-  }
-}
-
-class Debris {
-  constructor(x, y, vx, vy) {
-    this.x = x;
-    this.y = y;
-    this.vx = vx;
-    this.vy = vy;
-    this.life = 1;
-    this.decay = 0.005 + Math.random() * 0.01;
-    this.size = 0.5 + Math.random() * 1.5;
-    this.color = `hsl(${Math.random() * 60 + 20}, 90%, 60%)`;
-  }
-
-  update() {
-    // Slight gravitational pull toward earth
-    const dx = cx - this.x;
-    const dy = cy - this.y;
+  for (const obj of objects) {
+    if (!obj.alive) continue;
+    const ox = earthX + obj.r * Math.cos(obj.angle);
+    const oy = earthY + obj.r * Math.sin(obj.angle);
+    const dx = ox - drone.x;
+    const dy = oy - drone.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
-    const force = G / (dist * 0.01);
-    this.vx += (dx / dist) * force;
-    this.vy += (dy / dist) * force;
-    
-    this.x += this.vx;
-    this.y += this.vy;
-    this.life -= this.decay;
+    if (dist > scanRadius) continue;
+    // Prefer isolated objects (strays) - those with fewer neighbors
+    let neighbors = 0;
+    for (const other of objects) {
+      if (other === obj || !other.alive) continue;
+      const ox2 = earthX + other.r * Math.cos(other.angle);
+      const oy2 = earthY + other.r * Math.sin(other.angle);
+      if (Math.hypot(ox2 - ox, oy2 - oy) < 60) neighbors++;
+    }
+    const score = (30 - dist * 0.01) - neighbors * 5;
+    if (score > bestScore) {
+      bestScore = score;
+      best = obj;
+    }
   }
-
-  draw() {
-    ctx.globalAlpha = this.life;
-    ctx.fillStyle = this.color;
-    ctx.beginPath();
-    ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 1;
-  }
+  return best;
 }
 
-class Drone {
-  constructor() {
-    this.x = cx + earthR + 100;
-    this.y = cy - 100;
-    this.vx = 0;
-    this.vy = 0;
-    this.target = null;
-    this.angle = 0;
-  }
+// Collision detection
+function checkCollisions() {
+  const toRemove = new Set();
+  for (let i = 0; i < objects.length; i++) {
+    if (!objects[i].alive) continue;
+    for (let j = i + 1; j < objects.length; j++) {
+      if (!objects[j].alive) continue;
+      if (objects[i].ringIndex !== objects[j].ringIndex && Math.abs(objects[i].ringIndex - objects[j].ringIndex) > 1) continue;
 
-  update() {
-    // Find nearest object
-    let minDist = Infinity;
-    this.target = null;
-    
-    for (let obj of objects) {
-      const dx = obj.x - this.x;
-      const dy = obj.y - this.y;
+      const x1 = earthX + objects[i].r * Math.cos(objects[i].angle);
+      const y1 = earthY + objects[i].r * Math.sin(objects[i].angle);
+      const x2 = earthX + objects[j].r * Math.cos(objects[j].angle);
+      const y2 = earthY + objects[j].r * Math.sin(objects[j].angle);
+
+      const dx = x2 - x1;
+      const dy = y2 - y1;
       const dist = Math.sqrt(dx * dx + dy * dy);
+      const minDist = objects[i].size + objects[j].size + 3;
+
       if (dist < minDist) {
-        minDist = dist;
-        this.target = obj;
+        toRemove.add(i);
+        toRemove.add(j);
+        const mx = (x1 + x2) / 2;
+        const my = (y1 + y2) / 2;
+        spawnExplosion(mx, my, 8 + Math.floor(Math.random() * 12),
+          Math.max(objects[i].speed, objects[j].speed),
+          (objects[i].r + objects[j].r) / 2);
       }
     }
-
-    if (this.target) {
-      const dx = this.target.x - this.x;
-      const dy = this.target.y - this.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      
-      if (dist > 0) {
-        this.vx += (dx / dist) * 0.1;
-        this.vy += (dy / dist) * 0.1;
-      }
-      
-      if (dist < DRONE_RANGE) {
-        // Collision - absorb object
-        this.target.dead = true;
-        // Create small debris burst
-        for (let i = 0; i < 3; i++) {
-          debris.push(new Debris(
-            this.target.x, 
-            this.target.y, 
-            (Math.random() - 0.5) * 2,
-            (Math.random() - 0.5) * 2
-          ));
-        }
-      }
-    }
-
-    // Limit speed
-    const speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
-    if (speed > DRONE_SPEED) {
-      this.vx = (this.vx / speed) * DRONE_SPEED;
-      this.vy = (this.vy / speed) * DRONE_SPEED;
-    }
-
-    this.x += this.vx;
-    this.y += this.vy;
-    this.angle = Math.atan2(this.vy, this.vx);
   }
-
-  draw() {
-    ctx.save();
-    ctx.translate(this.x, this.y);
-    ctx.rotate(this.angle);
-    
-    // Drone body
-    ctx.fillStyle = '#4a9eff';
-    ctx.globalAlpha = 0.8;
-    ctx.beginPath();
-    ctx.moveTo(8, 0);
-    ctx.lineTo(-4, -4);
-    ctx.lineTo(-2, 0);
-    ctx.lineTo(-4, 4);
-    ctx.closePath();
-    ctx.fill();
-    
-    // Engine glow
-    ctx.globalAlpha = 0.4 + Math.random() * 0.3;
-    ctx.fillStyle = '#88ccff';
-    ctx.beginPath();
-    ctx.arc(-3, 0, 3, 0, Math.PI * 2);
-    ctx.fill();
-    
-    ctx.restore();
-    ctx.globalAlpha = 1;
+  for (const idx of toRemove) {
+    objects[idx].alive = false;
   }
 }
 
-const drone = new Drone();
+// Random collisions
+function randomCollision() {
+  if (objects.length < 2) return;
+  const alive = objects.filter(o => o.alive);
+  if (alive.length < 2) return;
+  const a = alive[Math.floor(Math.random() * alive.length)];
+  let b = alive[Math.floor(Math.random() * alive.length)];
+  if (b === a) return;
+  if (Math.abs(a.ringIndex - b.ringIndex) > 1) return;
 
-function initObjects() {
-  for (let i = 0; i < MAX_ORBITS; i++) {
-    const count = 15 + Math.floor(Math.random() * 20);
-    for (let j = 0; j < count; j++) {
-      objects.push(new Satellite(i));
-    }
+  a.alive = false;
+  b.alive = false;
+  const x1 = earthX + a.r * Math.cos(a.angle);
+  const y1 = earthY + a.r * Math.sin(a.angle);
+  const x2 = earthX + b.r * Math.cos(b.angle);
+  const y2 = earthY + b.r * Math.sin(b.angle);
+  spawnExplosion((x1 + x2) / 2, (y1 + y2) / 2, 10 + Math.floor(Math.random() * 15),
+    Math.max(a.speed, b.speed), (a.r + b.r) / 2);
+}
+
+// Spawn new objects periodically
+let spawnTimer = 0;
+function spawnNewObjects(dt) {
+  spawnTimer += dt;
+  if (spawnTimer > 0.5) {
+    spawnTimer = 0;
+    const ri = Math.floor(Math.random() * orbitRings.length);
+    objects.push(createObject(ri));
   }
 }
 
+// Draw Earth
 function drawEarth() {
   // Atmosphere glow
-  const grad = ctx.createRadialGradient(cx, cy, earthR * 0.9, cx, cy, earthR * 1.4);
-  grad.addColorStop(0, 'rgba(60, 140, 255, 0.3)');
-  grad.addColorStop(0.5, 'rgba(40, 100, 200, 0.1)');
-  grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
-  ctx.fillStyle = grad;
+  const glowGrad = ctx.createRadialGradient(earthX, earthY, earthR, earthX, earthY, earthR * 2.5);
+  glowGrad.addColorStop(0, 'rgba(60, 140, 255, 0.15)');
+  glowGrad.addColorStop(0.5, 'rgba(40, 100, 200, 0.05)');
+  glowGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  ctx.fillStyle = glowGrad;
   ctx.beginPath();
-  ctx.arc(cx, cy, earthR * 1.4, 0, Math.PI * 2);
+  ctx.arc(earthX, earthY, earthR * 2.5, 0, TAU);
   ctx.fill();
 
   // Earth body
-  const earthGrad = ctx.createRadialGradient(cx - earthR * 0.3, cy - earthR * 0.3, 0, cx, cy, earthR);
+  const earthGrad = ctx.createRadialGradient(earthX - earthR * 0.3, earthY - earthR * 0.3, earthR * 0.1, earthX, earthY, earthR);
   earthGrad.addColorStop(0, '#4a9eff');
-  earthGrad.addColorStop(0.3, '#2266cc');
-  earthGrad.addColorStop(0.7, '#1a4488');
-  earthGrad.addColorStop(1, '#0a1a33');
+  earthGrad.addColorStop(0.3, '#2277cc');
+  earthGrad.addColorStop(0.6, '#1a5599');
+  earthGrad.addColorStop(0.85, '#0d3366');
+  earthGrad.addColorStop(1, '#061a33');
   ctx.fillStyle = earthGrad;
   ctx.beginPath();
-  ctx.arc(cx, cy, earthR, 0, Math.PI * 2);
+  ctx.arc(earthX, earthY, earthR, 0, TAU);
   ctx.fill();
 
-  // Continents (simplified)
-  ctx.fillStyle = '#2d8a4e';
-  ctx.globalAlpha = 0.6;
+  // Continents hint
+  ctx.save();
   ctx.beginPath();
-  ctx.ellipse(cx - earthR * 0.2, cy - earthR * 0.3, earthR * 0.3, earthR * 0.4, -0.3, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.ellipse(cx + earthR * 0.4, cy + earthR * 0.2, earthR * 0.2, earthR * 0.25, 0.5, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.globalAlpha = 1;
+  ctx.arc(earthX, earthY, earthR, 0, TAU);
+  ctx.clip();
 
-  // Cloud wisps
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
-  ctx.lineWidth = 2;
-  for (let i = 0; i < 5; i++) {
-    const angle = (i / 5) * Math.PI * 2 + Date.now() * 0.0001;
-    const r = earthR * 0.7;
+  const time = performance.now() * 0.00003;
+  const continents = [
+    { cx: 0.2, cy: -0.2, rx: 0.35, ry: 0.25 },
+    { cx: -0.3, cy: 0.1, rx: 0.2, ry: 0.3 },
+    { cx: 0.1, cy: 0.4, rx: 0.15, ry: 0.2 },
+    { cx: -0.1, cy: -0.5, rx: 0.25, ry: 0.15 },
+  ];
+  for (const c of continents) {
+    ctx.fillStyle = 'rgba(40, 120, 50, 0.35)';
     ctx.beginPath();
-    ctx.arc(cx + Math.cos(angle) * r * 0.5, cy + Math.sin(angle) * r * 0.5, 15, 0, Math.PI);
-    ctx.stroke();
-  }
-}
-
-function drawOrbitLines() {
-  ctx.strokeStyle = 'rgba(100, 150, 255, 0.08)';
-  ctx.lineWidth = 1;
-  for (let i = 0; i < MAX_ORBITS; i++) {
-    const r = earthR + 40 + i * (Math.min(W, H) * 0.08);
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-}
-
-function drawStars() {
-  for (let star of stars) {
-    const twinkle = Math.sin(Date.now() * star.twinkle) * 0.3 + 0.7;
-    ctx.globalAlpha = star.alpha * twinkle;
-    ctx.fillStyle = '#fff';
-    ctx.beginPath();
-    ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
+    ctx.ellipse(
+      earthX + c.cx * earthR + Math.sin(time + c.cx) * earthR * 0.05,
+      earthY + c.cy * earthR,
+      c.rx * earthR, c.ry * earthR,
+      0, 0, TAU
+    );
     ctx.fill();
   }
-  ctx.globalAlpha = 1;
+  ctx.restore();
+
+  // Atmosphere edge
+  ctx.strokeStyle = 'rgba(100, 180, 255, 0.3)';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(earthX, earthY, earthR + 2, 0, TAU);
+  ctx.stroke();
 }
 
-function checkCollisions() {
-  for (let i = 0; i < objects.length; i++) {
-    if (objects[i].dead) continue;
-    for (let j = i + 1; j < objects.length; j++) {
-      if (objects[j].dead) continue;
-      const dx = objects[i].x - objects[j].x;
-      const dy = objects[i].y - objects[j].y;
+// Draw orbit lines
+function drawOrbitLines() {
+  for (const r of orbitRings) {
+    const alpha = 0.04 + 0.02 * Math.sin(performance.now() * 0.0005 + r * 0.01);
+    ctx.strokeStyle = `rgba(100, 160, 255, ${alpha})`;
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.arc(earthX, earthY, r, 0, TAU);
+    ctx.stroke();
+  }
+}
+
+// Draw objects
+function drawObjects(t) {
+  for (const obj of objects) {
+    if (!obj.alive) continue;
+    const x = earthX + obj.r * Math.cos(obj.angle);
+    const y = earthY + obj.r * Math.sin(obj.angle);
+
+    // Skip if off screen
+    if (x < -20 || x > W + 20 || y < -20 || y > H + 20) continue;
+
+    const glint = 0.5 + 0.5 * Math.sin(t * obj.glintSpeed + obj.glintPhase);
+    const alpha = 0.4 + glint * 0.6;
+
+    // Glow
+    if (obj.type === 'satellite') {
+      const glow = ctx.createRadialGradient(x, y, 0, x, y, obj.size * 4);
+      glow.addColorStop(0, `rgba(150, 200, 255, ${alpha * 0.3})`);
+      glow.addColorStop(1, 'rgba(150, 200, 255, 0)');
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(x, y, obj.size * 4, 0, TAU);
+      ctx.fill();
+    }
+
+    // Body
+    ctx.fillStyle = obj.type === 'satellite'
+      ? `rgba(${180 + glint * 75}, ${200 + glint * 55}, 255, ${alpha})`
+      : `rgba(${150 + glint * 50}, ${140 + glint * 40}, ${120 + glint * 30}, ${alpha})`;
+    ctx.beginPath();
+    ctx.arc(x, y, obj.size, 0, TAU);
+    ctx.fill();
+
+    // Satellite solar panel hint
+    if (obj.type === 'satellite' && obj.size > 2) {
+      ctx.strokeStyle = `rgba(100, 180, 255, ${alpha * 0.5})`;
+      ctx.lineWidth = 0.5;
+      const panelW = obj.size * 3;
+      const panelAngle = obj.angle + Math.PI / 2;
+      ctx.beginPath();
+      ctx.moveTo(x - Math.cos(panelAngle) * panelW, y - Math.sin(panelAngle) * panelW);
+      ctx.lineTo(x + Math.cos(panelAngle) * panelW, y + Math.sin(panelAngle) * panelW);
+      ctx.stroke();
+    }
+  }
+}
+
+// Draw fragments
+function drawFragments() {
+  for (const f of fragments) {
+    if (f.life <= 0) continue;
+    ctx.fillStyle = f.color.replace(')', `, ${f.life})`).replace('hsl', 'hsla');
+    ctx.beginPath();
+    ctx.arc(f.x, f.y, f.size * f.life, 0, TAU);
+    ctx.fill();
+  }
+}
+
+// Draw explosions
+function drawExplosions() {
+  for (const e of explosions) {
+    if (e.life <= 0) continue;
+    ctx.strokeStyle = `rgba(255, 200, 100, ${e.life * 0.5})`;
+    ctx.lineWidth = 1.5 * e.life;
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, e.radius, 0, TAU);
+    ctx.stroke();
+
+    const inner = ctx.createRadialGradient(e.x, e.y, 0, e.x, e.y, e.radius);
+    inner.addColorStop(0, `rgba(255, 255, 200, ${e.life * 0.4})`);
+    inner.addColorStop(1, 'rgba(255, 200, 100, 0)');
+    ctx.fillStyle = inner;
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, e.radius, 0, TAU);
+    ctx.fill();
+  }
+}
+
+// Draw drone
+function drawDrone(t) {
+  // Trail
+  ctx.strokeStyle = 'rgba(100, 255, 180, 0.15)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i < drone.trail.length; i++) {
+    const p = drone.trail[i];
+    if (i === 0) ctx.moveTo(p.x, p.y);
+    else ctx.lineTo(p.x, p.y);
+  }
+  ctx.stroke();
+
+  // Drone body
+  const droneGlow = ctx.createRadialGradient(drone.x, drone.y, 0, drone.x, drone.y, drone.radius * 3);
+  droneGlow.addColorStop(0, 'rgba(100, 255, 180, 0.3)');
+  droneGlow.addColorStop(1, 'rgba(100, 255, 180, 0)');
+  ctx.fillStyle = droneGlow;
+  ctx.beginPath();
+  ctx.arc(drone.x, drone.y, drone.radius * 3, 0, TAU);
+  ctx.fill();
+
+  // Core
+  const pulse = 0.7 + 0.3 * Math.sin(t * 4);
+  ctx.fillStyle = `rgba(100, 255, 180, ${pulse})`;
+  ctx.beginPath();
+  ctx.arc(drone.x, drone.y, drone.radius * 0.5, 0, TAU);
+  ctx.fill();
+
+  // Arms
+  ctx.strokeStyle = `rgba(100, 255, 180, ${pulse * 0.6})`;
+  ctx.lineWidth = 1.5;
+  for (let i = 0; i < 4; i++) {
+    const a = t * 2 + i * TAU / 4;
+    ctx.beginPath();
+    ctx.moveTo(drone.x, drone.y);
+    ctx.lineTo(drone.x + Math.cos(a) * drone.radius, drone.y + Math.sin(a) * drone.radius);
+    ctx.stroke();
+  }
+
+  // Label
+  ctx.fillStyle = `rgba(100, 255, 180, ${0.3 + pulse * 0.2})`;
+  ctx.font = '8px monospace';
+  ctx.fillText('CLEANUP', drone.x + 15, drone.y - 10);
+}
+
+// Update
+let lastTime = performance.now();
+let collisionTimer = 0;
+
+function update() {
+  const now = performance.now();
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+  const t = now * 0.001;
+
+  // Update objects
+  for (const obj of objects) {
+    if (!obj.alive) continue;
+    obj.angle += obj.speed * dt;
+    obj.age += dt;
+  }
+
+  // Clean dead objects
+  if (objects.length > 800) {
+    for (const obj of objects) {
+      if (!obj.alive) obj.alive = false; // mark for GC
+    }
+    // Compact
+    const alive = objects.filter(o => o.alive);
+    if (alive.length < 200) {
+      // keep some
+    } else {
+      // Remove oldest dead
+    }
+    // Actually just filter
+    const compacted = [];
+    let count = 0;
+    for (const obj of objects) {
+      if (obj.alive && count < 600) {
+        compacted.push(obj);
+        count++;
+      }
+    }
+    if (compacted.length < objects.length * 0.5) {
+      objects.length = 0;
+      objects.push(...compacted);
+    }
+  }
+
+  // Random collisions
+  collisionTimer += dt;
+  if (collisionTimer > 2 + Math.random() * 3) {
+    collisionTimer = 0;
+    randomCollision();
+  }
+
+  // Check proximity collisions
+  checkCollisions();
+
+  // Spawn new objects
+  spawnNewObjects(dt);
+
+  // Update fragments
+  for (let i = fragments.length - 1; i >= 0; i--) {
+    const f = fragments[i];
+    f.x += f.vx;
+    f.y += f.vy;
+    // Slight gravitational pull toward earth
+    const dx = earthX - f.x;
+    const dy = earthY - f.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > 10) {
+      f.vx += (dx / dist) * 0.02;
+      f.vy += (dy / dist) * 0.02;
+    }
+    f.life -= f.decay;
+    if (f.life <= 0) fragments.splice(i, 1);
+  }
+
+  // Update explosions
+  for (let i = explosions.length - 1; i >= 0; i--) {
+    const e = explosions[i];
+    e.radius += (e.maxRadius - e.radius) * 0.1;
+    e.life -= 0.02;
+    if (e.life <= 0) explosions.splice(i, 1);
+  }
+
+  // Update drone
+  if (drone.state === 'searching') {
+    drone.searchAngle += dt * 0.5;
+    const target = findTarget();
+    if (target) {
+      drone.targetObj = target;
+      const tx = earthX + target.r * Math.cos(target.angle);
+      const ty = earthY + target.r * Math.sin(target.angle);
+      drone.targetX = tx;
+      drone.targetY = ty;
+      drone.state = 'chasing';
+    } else {
+      // Wander
+      drone.targetX = earthX + Math.cos(drone.searchAngle) * (maxOrbitR * 0.5);
+      drone.targetY = earthY + Math.sin(drone.searchAngle) * (maxOrbitR * 0.5);
+    }
+  }
+
+  if (drone.state === 'chasing' && drone.targetObj) {
+    if (!drone.targetObj.alive) {
+      drone.state = 'searching';
+      drone.targetObj = null;
+    } else {
+      drone.targetX = earthX + drone.targetObj.r * Math.cos(drone.targetObj.angle);
+      drone.targetY = earthY + drone.targetObj.r * Math.sin(drone.targetObj.angle);
+
+      const dx = drone.targetX - drone.x;
+      const dy = drone.targetY - drone.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
-      
-      if (dist < objects[i].size + objects[j].size + 2) {
-        // Collision!
-        const midX = (objects[i].x + objects[j].x) / 2;
-        const midY = (objects[i].y + objects[j].y) / 2;
-        
-        // Create debris cloud
-        const numDebris = 8 + Math.floor(Math.random() * 8);
-        for (let k = 0; k < numDebris; k++) {
-          const angle = Math.random() * Math.PI * 2;
-          const speed = 1 + Math.random() * 3;
-          debris.push(new Debris(
-            midX, 
-            midY, 
-            Math.cos(angle) * speed,
-            Math.sin(angle) * speed
-          ));
-        }
-        
-        objects[i].dead = true;
-        objects[j].dead = true;
+
+      if (dist < 15) {
+        drone.targetObj.alive = false;
+        spawnExplosion(drone.targetX, drone.targetY, 5, drone.targetObj.speed, drone.targetObj.r);
+        drone.state = 'searching';
+        drone.targetObj = null;
+      } else {
+        drone.x += (dx / dist) * drone.speed;
+        drone.y += (dy / dist) * drone.speed;
       }
     }
   }
-}
 
-function spawnNewSatellites() {
-  // Occasionally add new satellites to replace destroyed ones
-  if (Math.random() < 0.02) {
-    const orbitIdx = Math.floor(Math.random() * MAX_ORBITS);
-    objects.push(new Satellite(orbitIdx));
-  }
-}
+  // Trail
+  drone.trail.push({ x: drone.x, y: drone.y });
+  if (drone.trail.length > 50) drone.trail.shift();
 
-function animate() {
-  ctx.fillStyle = '#000005';
+  // Draw
+  ctx.fillStyle = '#000810';
   ctx.fillRect(0, 0, W, H);
-  
-  drawStars();
+
+  // Stars
+  for (const s of stars) {
+    const twinkle = 0.5 + 0.5 * Math.sin(t * s.twinkleSpeed + s.x * 100);
+    ctx.fillStyle = `rgba(200, 220, 255, ${s.b * twinkle})`;
+    ctx.beginPath();
+    ctx.arc(s.x * W, s.y * H, s.r, 0, TAU);
+    ctx.fill();
+  }
+
   drawOrbitLines();
   drawEarth();
-  
-  // Update and draw satellites
-  for (let obj of objects) {
-    obj.update();
-    obj.draw();
-  }
-  
-  // Update and draw debris
-  for (let i = debris.length - 1; i >= 0; i--) {
-    debris[i].update();
-    debris[i].draw();
-    if (debris[i].life <= 0) {
-      debris.splice(i, 1);
-    }
-  }
-  
-  // Update and draw drone
-  drone.update();
-  drone.draw();
-  
-  // Check collisions
-  checkCollisions();
-  
-  // Remove dead objects
-  for (let i = objects.length - 1; i >= 0; i--) {
-    if (objects[i].dead) {
-      objects.splice(i, 1);
-    }
-  }
-  
-  // Spawn new satellites
-  spawnNewSatellites();
-  
-  requestAnimationFrame(animate);
+  drawObjects(t);
+  drawFragments();
+  drawExplosions();
+  drawDrone(t);
+
+  // Vignette
+  const vignette = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.7);
+  vignette.addColorStop(0, 'rgba(0,0,0,0)');
+  vignette.addColorStop(1, 'rgba(0,0,0,0.5)');
+  ctx.fillStyle = vignette;
+  ctx.fillRect(0, 0, W, H);
+
+  // HUD
+  const aliveCount = objects.filter(o => o.alive).length;
+  ctx.fillStyle = 'rgba(100, 160, 255, 0.4)';
+  ctx.font = '11px monospace';
+  ctx.fillText(`OBJECTS: ${aliveCount}`, 15, 25);
+  ctx.fillText(`FRAGMENTS: ${fragments.length}`, 15, 42);
+  ctx.fillText(`RINGS: ${orbitRings.length}`, 15, 59);
+
+  requestAnimationFrame(update);
 }
 
-window.addEventListener('resize', resize);
-resize();
-initObjects();
-animate();
+requestAnimationFrame(update);
 </script>
 </body>
 </html>

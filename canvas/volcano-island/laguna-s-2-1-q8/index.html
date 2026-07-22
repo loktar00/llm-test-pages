@@ -1,631 +1,573 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<meta name-equiv="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Volcano Island</title>
 <style>
-  html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
-  canvas { display: block; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background: #000;
+  }
+  canvas {
+    display: block;
+  }
 </style>
 </head>
 <body>
-<canvas id="canvas"></canvas>
+<canvas id="volcanoCanvas"></canvas>
 <script>
 (() => {
-  const canvas = document.getElementById('canvas');
+  const canvas = document.getElementById('volcanoCanvas');
   const ctx = canvas.getContext('2d');
+  
+  // Full-screen canvas setup
+  function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+  window.addEventListener('resize', resize);
+  resize();
 
-  let width = canvas.width = window.innerWidth;
-  let height = canvas.height = window.innerHeight;
-
-  window.addEventListener('resize', () => {
-    width = canvas.width = window.innerWidth;
-    height = canvas.height = window.innerHeight;
-  });
-
-  const TAU = Math.PI * 2;
-
-  // Time tracking
-  let startTime = performance.now();
-  let cycleDuration = 60000; // 60 seconds
-  let lastFrame = startTime;
-
-  // Volcano state
-  const volcano = {
-    x: 0,
-    y: 0,
-    radius: 0,
-    rumblingProgress: 0,
-    ashProgress: 0,
+  // Scene elements
+  const state = {
+    timeOfDay: 0, // 0 to 60 seconds, cycles day/night
+    volcanoPhase: 'rumble', // 'rumble' -> 'ash' -> 'eruption' -> 'lava' -> 'reset'
+    phaseTimer: 0,
     eruptionProgress: 0,
-    lavaFlowProgress: 0,
-    phaseDuration: 15000, // 15s per phase
-    phaseStart: 0
+    steamParticles: [],
+    lavaBombs: [],
+    smokeTrails: [],
+    ashParticles: [],
+    steamBursts: [],
+    palmTrees: [],
+    seabirds: [],
+    dayColor: { r: 135, g: 206, b: 235 },
+    nightColor: { r: 25, g: 25, b: 60 },
+    shorelineExtension: 0,
+    lavaFlows: [],
+    crusts: []
   };
 
-  const lavaBombs = [];
-  const ashParticles = [];
-  const smokeParticles = [];
-  const steamParticles = [];
-  const palmTrees = [];
-  const seabirds = [];
-
-  let shorelineOffset = 0;
-
-  function initScene() {
-    volcano.x = width * 0.7;
-    volcano.y = height * 0.4;
-    volcano.radius = Math.min(width, height) * 0.08;
-
-    // Create palm trees
-    for (let i = 0; i < 8; i++) {
-      palmTrees.push({
-        x: 50 + (i * (width - 100) / 7),
-        y: height * 0.75,
-        sway: Math.random() * TAU,
-        swaySpeed: 0.5 + Math.random() * 0.5,
-        height: 40 + Math.random() * 20
-      });
-    }
-
-    // Create seabirds
-    for (let i = 0; i < 6; i++) {
-      seabirds.push({
-        x: -100 - Math.random() * 200,
-        y: 100 + Math.random() * 50,
-        speed: 1 + Math.random() * 2,
-        flying: false
-      });
-    }
+  // Initialize palm trees
+  for (let i = 0; i < 8; i++) {
+    state.palmTrees.push({
+      x: 100 + Math.random() * (canvas.width - 200),
+      y: canvas.height - 80,
+      sway: Math.random() * Math.PI * 2,
+      height: 40 + Math.random() * 20
+    });
   }
 
-  function resetScene() {
-    lavaBombs.length = 0;
-    ashParticles.length = 0;
-    smokeParticles.length = 0;
-    steamParticles.length = 0;
-    shorelineOffset = 0;
-    volcano.lavaFlowProgress = 0;
+  // Initialize seabirds
+  for (let i = 0; i < 12; i++) {
+    state.seabirds.push({
+      x: Math.random() * canvas.width,
+      y: 100 + Math.random() * 100,
+      speed: 0.5 + Math.random() * 1.5,
+      flying: true
+    });
   }
 
-  function animate(time) {
-    const delta = time - lastFrame;
-    lastFrame = time;
+  // Math helpers
+  function lerp(a, b, t) {
+    return a + (b - a) * t;
+  }
 
-    const totalElapsed = (time - startTime) % cycleDuration;
-
-    // Determine phase
-    const phase = Math.floor(totalElapsed / volcano.phaseDuration);
-    volcano.phaseStart = totalElapsed - phase * volcano.phaseDuration;
-    const phaseProgress = volcano.phaseStart / volcano.phaseDuration;
-
-    // Reset if we've gone through all phases
-    if (phase >= 4) {
-      if (shorelineOffset < 1) {
-        // Continue extending shoreline
-        shorelineOffset = Math.min(1, shorelineOffset + delta * 0.0005);
-      } else {
-        startTime = time;
-      }
+  function hslToRgb(h, s, l) {
+    h /= 360;
+    s /= 100;
+    l /= 100;
+    let r, g, b;
+    if (s === 0) {
+      r = g = b = l;
+    } else {
+      const hue2rgb = (p, q, t) => {
+        if (t < 0) t += 1;
+        if (t > 1) t -= 1;
+        if (t < 1/6) return p + (q - p) * 6 * t;
+        if (t < 1/2) return q;
+        if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+        return p;
+      };
+      const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+      const p = 2 * l - q;
+      r = hue2rgb(p, q, h + 1/3);
+      g = hue2rgb(p, q, h);
+      b = hue2rgb(p, q, h - 1/3);
     }
+    return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+  }
 
-    // Update phase progress values
-    switch(phase) {
-      case 0: // Rumbling
-        volcano.rumblingProgress = phaseProgress;
-        break;
-      case 1: // Ash plumes
-        volcano.ashProgress = phaseProgress;
-        break;
-      case 2: // Eruption
-        volcano.eruptionProgress = phaseProgress;
-        break;
-      case 3: // Lava flows
-        volcano.lavaFlowProgress = phaseProgress;
-        break;
-    }
-
-    updateAshParticles(delta);
-    updateLavaBombs(delta, phase);
-    updateSmokeParticles(delta);
-    updateSteamParticles(delta);
-    updateSeabirds(phase, delta);
+  // Draw functions
+  function drawSky(t) {
+    const dayClr = state.dayColor;
+    const nightClr = state.nightColor;
+    const r = Math.round(lerp(dayClr.r, nightClr.r, t));
+    const g = Math.round(lerp(dayClr.g, nightClr.g, t));
+    const b = Math.round(lerp(dayClr.b, nightClr.b, t));
     
-    render(time, phase, phaseProgress);
-    requestAnimationFrame(animate);
+    const grad = ctx.createLinearGradient(0, 0, 0, canvas.height * 0.6);
+    grad.addColorStop(0, `rgb(${r}, ${g}, ${b})`);
+    grad.addColorStop(1, `rgb(${Math.round(r*0.7)}, ${Math.round(g*0.7)}, ${Math.round(b*0.9)})`);
+    
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
   }
 
-  function updateAshParticles(delta) {
-    if (volcano.ashProgress > 0 || volcano.eruptionProgress > 0) {
-      const rate = (volcano.ashProgress + volcano.eruptionProgress) * 0.5;
-      for (let i = 0; i < rate * 5; i++) {
-        ashParticles.push({
-          x: volcano.x + (Math.random() - 0.5) * volcano.radius * 1.5,
-          y: volcano.y - volcano.radius * 0.8,
-          vx: (Math.random() - 0.5) * 2,
-          vy: -Math.random() * 2 - 0.5,
-          size: Math.random() * 4 + 2,
-          alpha: 0.8
-        });
-      }
-    }
-
-    for (let i = ashParticles.length - 1; i >= 0; i--) {
-      const p = ashParticles[i];
-      p.vx += (Math.random() - 0.5) * 0.1;
-      p.vy += 0.05;
-      p.x += p.vx;
-      p.y += p.vy;
-      p.alpha -= delta * 0.0005;
-      p.size *= 0.99;
-      
-      // Wind effect
-      p.x += Math.sin(time * 0.001 + p.y * 0.01) * 0.5;
-      
-      if (p.alpha <= 0 || p.y > height) {
-        ashParticles.splice(i, 1);
-      }
+  function drawSunMoon(t) {
+    const angle = t * Math.PI * 2;
+    const x = canvas.width/2 + Math.cos(angle) * (canvas.width/3);
+    const y = canvas.height/2 + Math.sin(angle) * (canvas.height/3);
+    
+    if (t < 0.25 || t > 0.75) {
+      // Sun
+      const size = 40 + Math.sin(state.timeOfDay * 0.1) * 5;
+      ctx.fillStyle = '#FFD700';
+      ctx.beginPath();
+      ctx.arc(x, y, size, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      // Moon
+      ctx.fillStyle = '#F0F0F0';
+      ctx.beginPath();
+      ctx.arc(x, y, 25, 0, Math.PI * 2);
+      ctx.fill();
     }
   }
 
-  function updateLavaBombs(delta, phase) {
-    if (volcano.eruptionProgress > 0 && Math.random() < volcano.eruptionProgress * 0.1) {
-      const angle = Math.PI / 2 + (Math.random() - 0.5) * 0.3;
-      const speed = 3 + Math.random() * 4;
-      lavaBombs.push({
-        x: volcano.x,
-        y: volcano.y - volcano.radius,
+  function drawSea() {
+    const waterLevel = canvas.height - 120 + state.shorelineExtension;
+    ctx.fillStyle = '#1a5f7a';
+    ctx.fillRect(0, waterLevel, canvas.width, canvas.height - waterLevel);
+    
+    // Water waves
+    ctx.strokeStyle = '#2a7f9a';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 3; i++) {
+      ctx.beginPath();
+      for (let x = 0; x < canvas.width; x += 20) {
+        const y = waterLevel + Math.sin((x + state.timeOfDay * 5 + i * 30) * 0.03) * 3;
+        if (x === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+  }
+
+  function drawIsland() {
+    const baseY = canvas.height - 100 + state.shorelineExtension;
+    ctx.fillStyle = '#8B4513';
+    ctx.beginPath();
+    ctx.moveTo(0, canvas.height);
+    ctx.lineTo(0, baseY);
+    ctx.quadraticCurveTo(canvas.width/2, baseY - 60, canvas.width, baseY);
+    ctx.lineTo(canvas.width, canvas.height);
+    ctx.fill();
+    
+    // Grass layer
+    ctx.fillStyle = '#228B22';
+    ctx.beginPath();
+    ctx.moveTo(0, baseY);
+    ctx.quadraticCurveTo(canvas.width/2, baseY - 55, canvas.width, baseY);
+    ctx.lineTo(canvas.width, baseY + 5);
+    ctx.lineTo(0, baseY + 5);
+    ctx.fill();
+    
+    return baseY;
+  }
+
+  function drawVolcano(baseY) {
+    const vx = canvas.width * 0.6;
+    const vy = baseY - 80;
+    const size = 80 + state.shorelineExtension * 0.5;
+    
+    // Volcano base
+    ctx.fillStyle = '#3a2a1a';
+    ctx.beginPath();
+    ctx.moveTo(vx - size, vy + size);
+    ctx.lineTo(vx, vy - size * 1.5);
+    ctx.lineTo(vx + size, vy + size);
+    ctx.quadraticCurveTo(vx, vy + size * 1.8, vx - size, vy + size);
+    ctx.fill();
+    
+    // Volcano details
+    ctx.strokeStyle = '#2a1a0a';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(vx - size + 10, vy + size - 10);
+    ctx.lineTo(vx, vy - size * 1.3);
+    ctx.lineTo(vx + size - 10, vy + size - 10);
+    ctx.stroke();
+    
+    // Crater
+    const craterRadius = 15 + Math.sin(state.timeOfDay * 0.2) * 2;
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.arc(vx, vy - size * 1.2, craterRadius, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Crater glow during rumble
+    if (state.volcanoPhase === 'rumble') {
+      const glowIntensity = 0.5 + Math.sin(state.timeOfDay * 0.5) * 0.5;
+      const gradient = ctx.createRadialGradient(vx, vy - size * 1.2, 1, vx, vy - size * 1.2, 30);
+      gradient.addColorStop(0, `rgba(255, 100, 0, ${glowIntensity})`);
+      gradient.addColorStop(1, 'rgba(255, 0, 0, 0)');
+      ctx.fillStyle = gradient;
+      ctx.beginPath();
+      ctx.arc(vx, vy - size * 1.2, 30, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    
+    return { x: vx, y: vy - size * 1.2, size: size };
+  }
+
+  function drawRumble(crater) {
+    if (state.phaseTimer > 100) return;
+    
+    // Sparks from crater
+    for (let i = 0; i < 3; i++) {
+      const angle = (i / 3) * Math.PI * 2 + state.timeOfDay * 0.1;
+      const speed = 1 + Math.sin(state.timeOfDay * 0.3) * 0.5;
+      const px = crater.x + Math.cos(angle) * 8;
+      const py = crater.y + Math.sin(angle) * 8;
+      
+      ctx.fillStyle = `hsl(20, 100%, 60%)`;
+      ctx.beginPath();
+      ctx.arc(px, py, 2 + Math.sin(state.timeOfDay * 0.5) * 1, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    
+    // Rumbling particles
+    for (let i = 0; i < 5; i++) {
+      const x = crater.x + (Math.random() - 0.5) * 30;
+      const y = crater.y + 10 + Math.random() * 10;
+      ctx.fillStyle = `rgba(139, 69, 19, ${0.5 + Math.sin(state.timeOfDay * 0.3) * 0.3})`;
+      ctx.fillRect(x, y, 3, 3);
+    }
+  }
+
+  function drawAsh(crater) {
+    if (state.phaseTimer > 150) return;
+    
+    // Ash emission
+    for (let i = 0; i < 10; i++) {
+      const speed = 0.5 + Math.random() * 1.5;
+      const angle = Math.PI/2 + (Math.random() - 0.5) * 0.5;
+      const particle = {
+        x: crater.x,
+        y: crater.y,
         vx: Math.cos(angle) * speed,
         vy: Math.sin(angle) * speed,
-        trail: [],
-        gravity: 0.15,
-        size: 8 + Math.random() * 6
-      });
-    }
-
-    for (let i = lavaBombs.length - 1; i >= 0; i--) {
-      const b = lavaBombs[i];
-      
-      // Trail
-      if (b.trail.length < 10) {
-        b.trail.push({x: b.x, y: b.y});
-      } else {
-        b.trail.shift();
-        b.trail.push({x: b.x, y: b.y});
-      }
-      
-      b.vx += (Math.random() - 0.5) * 0.1;
-      b.vy += b.gravity;
-      b.x += b.vx;
-      b.y += b.vy;
-      
-      // Check sea collision
-      const seaLevel = height * 0.65;
-      if (b.y > seaLevel) {
-        // Steam burst
-        for (let j = 0; j < 15; j++) {
-          steamParticles.push({
-            x: b.x + (Math.random() - 0.5) * 20,
-            y: seaLevel,
-            vx: (Math.random() - 0.5) * 3,
-            vy: -Math.random() * 3 - 1,
-            size: Math.random() * 8 + 4,
-            alpha: 0.8
-          });
-        }
-        lavaBombs.splice(i, 1);
-      }
+        life: 1,
+        size: 2 + Math.random() * 3
+      };
+      state.ashParticles.push(particle);
     }
   }
 
-  function updateSmokeParticles(delta) {
-    // Smoke trails from active bombs
-    for (const bomb of lavaBombs) {
-      if (bomb.trail.length > 1) {
-        const last = bomb.trail[bomb.trail.length - 1];
-        smokeParticles.push({
-          x: last.x + (Math.random() - 0.5) * 10,
-          y: last.y + (Math.random() - 0.5) * 10,
-          vx: (Math.random() - 0.5) * 1,
-          vy: -Math.random() * 0.5,
-          size: Math.random() * 6 + 3,
-          alpha: 0.6
+  function drawEruption(crater) {
+    if (state.phaseTimer > 200) return;
+    
+    // Lava bomb launch
+    if (state.lavaBombs.length < 20 && Math.random() < 0.3) {
+      const angle = Math.PI/2 + (Math.random() - 0.5) * 0.3;
+      const speed = 3 + Math.random() * 4;
+      state.lavaBombs.push({
+        x: crater.x,
+        y: crater.y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        gravity: 0.15,
+        life: 1,
+        smokeTrail: []
+      });
+    }
+    
+    // Update and draw lava bombs
+    for (let i = state.lavaBombs.length - 1; i >= 0; i--) {
+      const bomb = state.lavaBombs[i];
+      
+      // Smoke trail
+      bomb.smokeTrail.push({ x: bomb.x, y: bomb.y });
+      if (bomb.smokeTrail.length > 10) bomb.smokeTrail.shift();
+      
+      // Draw smoke trail
+      for (let s = 0; s < bomb.smokeTrail.length; s++) {
+        const alpha = s / bomb.smokeTrail.length * 0.4;
+        const size = 2 + s * 0.3;
+        ctx.fillStyle = `rgba(100, 100, 100, ${alpha})`;
+        ctx.beginPath();
+        ctx.arc(bomb.smokeTrail[s].x, bomb.smokeTrail[s].y, size, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      
+      // Update physics
+      bomb.vx += (Math.random() - 0.5) * 0.1;
+      bomb.vy += bomb.gravity;
+      bomb.x += bomb.vx;
+      bomb.y += bomb.vy;
+      
+      // Draw lava bomb
+      const grad = ctx.createRadialGradient(bomb.x, bomb.y, 1, bomb.x, bomb.y, 8);
+      grad.addColorStop(0, '#ff8c00');
+      grad.addColorStop(0.7, '#ff4500');
+      grad.addColorStop(1, '#8b0000');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(bomb.x, bomb.y, 6, 0, Math.PI * 2);
+      ctx.fill();
+      
+      // Check collision with sea
+      const waterLevel = canvas.height - 120 + state.shorelineExtension;
+      if (bomb.y > waterLevel) {
+        // Steam burst
+        for (let s = 0; s < 15; s++) {
+          state.steamBursts.push({
+            x: bomb.x + (Math.random() - 0.5) * 20,
+            y: waterLevel,
+            vx: (Math.random() - 0.5) * 2,
+            vy: -Math.random() * 2,
+            life: 1,
+            size: 3 + Math.random() * 5
+          });
+        }
+        state.lavaBombs.splice(i, 1);
+      }
+    }
+    
+    // Draw steam bursts
+    for (let i = state.steamBursts.length - 1; i >= 0; i--) {
+      const p = state.steamBursts[i];
+      p.life -= 0.02;
+      if (p.life <= 0) {
+        state.steamBursts.splice(i, 1);
+        continue;
+      }
+      p.x += p.vx;
+      p.y += p.vy;
+      
+      ctx.fillStyle = `rgba(255, 255, 255, ${p.life * 0.6})`;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * (1 - p.life), 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function drawLavaFlow(baseY) {
+    if (state.phaseTimer > 250) return;
+    
+    // Create new lava flow
+    if (state.lavaFlows.length < 5 && Math.random() < 0.05) {
+      const flowX = canvas.width * 0.55 + (Math.random() - 0.5) * 60;
+      state.lavaFlows.push({
+        x: flowX,
+        startY: baseY - 60,
+        segments: [{ x: flowX, y: baseY - 60 }],
+        speed: 0.5 + Math.random() * 1,
+        width: 5 + Math.random() * 5
+      });
+    }
+    
+    // Update lava flows
+    for (let i = state.lavaFlows.length - 1; i >= 0; i--) {
+      const flow = state.lavaFlows[i];
+      
+      // Extend flow toward water
+      if (flow.segments.length < 100) {
+        const lastSeg = flow.segments[flow.segments.length - 1];
+        const targetY = baseY - 40 + (canvas.height - 120 + state.shorelineExtension - lastY);
+        const targetX = canvas.width * 0.8;
+        
+        const dx = targetX - lastSeg.x;
+        const dy = (canvas.height - 120 + state.shorelineExtension) - lastSeg.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        
+        if (dist > 2) {
+          flow.segments.push({
+            x: lastSeg.x + (dx / dist) * flow.speed,
+            y: lastSeg.y + (dy / dist) * flow.speed
+          });
+        }
+      }
+      
+      // Draw lava flow
+      ctx.strokeStyle = '#ff4500';
+      ctx.lineWidth = flow.width;
+      ctx.shadowColor = '#ff0000';
+      ctx.shadowBlur = 10;
+      
+      ctx.beginPath();
+      for (let s = 0; s < flow.segments.length; s++) {
+        if (s === 0) ctx.moveTo(flow.segments[s].x, flow.segments[s].y);
+        else ctx.lineTo(flow.segments[s].x, flow.segments[s].y);
+      }
+      ctx.stroke();
+      
+      ctx.shadowBlur = 0;
+      
+      // Cool crust formation
+      if (flow.segments.length > 10 && flow.width > 1) {
+        flow.width -= 0.01;
+      }
+      
+      // Crust over
+      if (flow.segments.length > 50 && Math.random() < 0.02) {
+        state.crusts.push({
+          x: flow.segments[flow.segments.length - 1].x,
+          y: flow.segments[flow.segments.length - 1].y,
+          width: flow.width,
+          life: 1
         });
       }
     }
-
-    for (let i = smokeParticles.length - 1; i >= 0; i--) {
-      const p = smokeParticles[i];
-      p.vx += (Math.random() - 0.5) * 0.1;
-      p.vy += 0.02;
-      p.x += p.vx;
-      p.y += p.vy;
-      p.alpha -= delta * 0.001;
-      p.size *= 1.01;
-      
-      if (p.alpha <= 0 || p.y > height) {
-        smokeParticles.splice(i, 1);
-      }
-    }
-  }
-
-  function updateSteamParticles(delta) {
-    for (let i = steamParticles.length - 1; i >= 0; i--) {
-      const p = steamParticles[i];
-      p.vx += (Math.random() - 0.5) * 0.1;
-      p.vy += 0.01;
-      p.x += p.vx;
-      p.y += p.vy;
-      p.alpha -= delta * 0.0008;
-      p.size *= 1.02;
-      
-      if (p.alpha <= 0 || p.y > height) {
-        steamParticles.splice(i, 1);
-      }
-    }
-  }
-
-  function updateSeabirds(phase, delta) {
-    // Birds flee during eruption, return after
-    const shouldFly = phase === 2 || phase === 3;
     
-    for (const bird of seabirds) {
-      if (shouldFly) {
+    // Draw crusts
+    for (let i = state.crusts.length - 1; i >= 0; i--) {
+      const crust = state.crusts[i];
+      ctx.fillStyle = `rgba(139, 69, 19, ${crust.life})`;
+      ctx.fillRect(crust.x - crust.width/2, crust.y - crust.width/2, crust.width, crust.width);
+      
+      crust.life -= 0.005;
+      if (crust.life <= 0) {
+        state.crusts.splice(i, 1);
+        state.shorelineExtension += 0.01;
+      }
+    }
+  }
+
+  function drawPalmTrees(baseY) {
+    state.palmTrees.forEach(tree => {
+      tree.sway += 0.02;
+      
+      const swayX = Math.sin(tree.sway) * 3;
+      const treeY = baseY - tree.height * 2;
+      
+      // Trunk
+      ctx.strokeStyle = '#8B4513';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(tree.x, treeY + tree.height * 2);
+      ctx.bezierCurveTo(
+        tree.x + swayX, treeY + tree.height * 1.5,
+        tree.x + swayX * 1.5, treeY + tree.height * 0.5,
+        tree.x + swayX, treeY
+      );
+      ctx.stroke();
+      
+      // Leaves
+      ctx.fillStyle = '#228B22';
+      for (let i = 0; i < 5; i++) {
+        const angle = (i / 5) * Math.PI * 2 + tree.sway * 0.3;
+        const leafLength = tree.height;
+        const endX = tree.x + swayX + Math.cos(angle) * leafLength;
+        const endY = treeY + Math.sin(angle) * leafLength * 0.5;
+        
+        ctx.beginPath();
+        ctx.ellipse(
+          tree.x + swayX + Math.cos(angle) * leafLength * 0.3,
+          treeY + Math.sin(angle) * leafLength * 0.2,
+          leafLength * 0.3, leafLength * 0.1,
+          angle, 0, Math.PI * 2
+        );
+        ctx.fill();
+      }
+    });
+  }
+
+  function drawSeabirds() {
+    const flying = state.volcanoPhase !== 'eruption' && state.volcanoPhase !== 'ash';
+    
+    state.seabirds.forEach(bird => {
+      if (flying && !bird.flying) {
         bird.flying = true;
-      } else if (phase === 3 && shorelineOffset > 0.5) {
-        // Start returning
-      } else if (phase === 0) {
+      } else if (!flying && bird.flying) {
         bird.flying = false;
       }
       
       if (bird.flying) {
-        bird.x += bird.speed * (1 + phase * 0.5);
-        if (bird.x > width + 100) {
-          bird.x = -100;
-          bird.y = 80 + Math.random() * 60;
+        bird.x += bird.speed;
+        if (bird.x > canvas.width + 20) {
+          bird.x = -20;
+          bird.y = 100 + Math.random() * 150;
         }
-      } else {
-        // Coastal flying pattern
-        bird.x += bird.speed * 0.3;
-        bird.y = 120 + Math.sin(bird.x * 0.01) * 10;
-        if (bird.x > width + 50) {
-          bird.x = -50;
-        }
-      }
-    }
-  }
-
-  function render(time, phase, phaseProgress) {
-    // Day-night cycle
-    const dayFactor = (Math.sin((time - startTime) / cycleDuration * TAU - Math.PI / 2) + 1) / 2;
-    
-    const skyColor = [
-      Math.floor(100 + dayFactor * 100),
-      Math.floor(120 + dayFactor * 80),
-      Math.floor(180 + dayFactor * 50)
-    ];
-    
-    // Clear with sky gradient
-    const skyGrad = ctx.createLinearGradient(0, 0, 0, height * 0.7);
-    skyGrad.addColorStop(0, `rgb(${skyColor[0]}, ${skyColor[1]}, ${skyColor[2]})`);
-    skyGrad.addColorStop(1, `rgb(${Math.floor(skyColor[0]*0.7)}, ${Math.floor(skyColor[1]*0.7)}, ${Math.floor(skyColor[2]*0.7)})`);
-    ctx.fillStyle = skyGrad;
-    ctx.fillRect(0, 0, width, height);
-
-    // Sun/moon
-    const sunX = width * 0.2 + Math.cos((time - startTime) / cycleDuration * TAU) * width * 0.3;
-    const sunY = height * 0.3 + Math.sin((time - startTime) / cycleDuration * TAU) * height * 0.2;
-    
-    ctx.fillStyle = dayFactor > 0.5 ? '#FFD700' : '#F0F0F0';
-    ctx.beginPath();
-    ctx.arc(sunX, sunY, 15 + dayFactor * 10, 0, TAU);
-    ctx.fill();
-
-    // Ocean
-    const seaLevel = height * 0.65;
-    const oceanGrad = ctx.createLinearGradient(0, seaLevel, 0, height);
-    oceanGrad.addColorStop(0, `rgb(${Math.floor(60 + dayFactor * 40)}, ${Math.floor(100 + dayFactor * 50)}, ${Math.floor(160 + dayFactor * 40)})`);
-    oceanGrad.addColorStop(1, `rgb(${Math.floor(30 + dayFactor * 20)}, ${Math.floor(60 + dayFactor * 30)}, ${Math.floor(100 + dayFactor * 30)})`);
-    ctx.fillStyle = oceanGrad;
-    ctx.fillRect(0, seaLevel, width, height - seaLevel);
-
-    // Ocean waves
-    ctx.strokeStyle = `rgba(255, 255, 255, ${0.3 * dayFactor + 0.1})`;
-    ctx.lineWidth = 1 + Math.sin(time * 0.01) * 0.5;
-    ctx.beginPath();
-    for (let x = 0; x < width; x += 20) {
-      const waveY = seaLevel + Math.sin(time * 0.003 + x * 0.02) * 5;
-      if (x === 0) ctx.moveTo(x, waveY);
-      else ctx.lineTo(x, waveY);
-    }
-    ctx.stroke();
-
-    // Beach with extended shoreline
-    const beachHeight = height * 0.1;
-    const shorelineX = width * 0.65 + shorelineOffset * width * 0.05;
-    
-    ctx.fillStyle = '#E6D3A7';
-    ctx.beginPath();
-    ctx.moveTo(shorelineX, seaLevel);
-    ctx.lineTo(width, seaLevel);
-    ctx.lineTo(width, seaLevel + beachHeight);
-    ctx.lineTo(shorelineX + 10, seaLevel + beachHeight);
-    ctx.closePath();
-    ctx.fill();
-
-    // Volcano
-    drawVolcano(time, phase, phaseProgress, dayFactor);
-
-    // Palm trees
-    drawPalmTrees(time, phase, dayFactor);
-
-    // Particles
-    drawAshParticles();
-    drawSmokeParticles();
-    drawLavaBombs(time, phase, dayFactor);
-    drawSteamParticles();
-
-    // Seabirds
-    drawSeabirds(dayFactor, phase);
-  }
-
-  function drawVolcano(time, phase, phaseProgress, dayFactor) {
-    ctx.save();
-    ctx.translate(volcano.x, volcano.y);
-    
-    // Volcano base
-    const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, volcano.radius * 2);
-    grad.addColorStop(0, '#8B4513');
-    grad.addColorStop(0.5, '#654321');
-    grad.addColorStop(1, '#4a2c0e');
-    ctx.fillStyle = grad;
-    
-    ctx.beginPath();
-    ctx.arc(0, 0, volcano.radius, 0, TAU);
-    ctx.fill();
-    
-    // Crater
-    ctx.fillStyle = '#222';
-    ctx.beginPath();
-    ctx.arc(0, volcano.radius * 0.2, volcano.radius * 0.4, 0, TAU);
-    ctx.fill();
-    
-    // Rumbling effect - cracks glow
-    if (phase === 0) {
-      const glowIntensity = phaseProgress * 0.8;
-      ctx.fillStyle = `rgba(255, 100, 0, ${glowIntensity})`;
-      for (let i = 0; i < 5; i++) {
-        const angle = (i / 5) * TAU;
-        const crackLen = volcano.radius * 0.3 * (0.5 + 0.5 * Math.sin(time * 0.01 + i));
+        
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 1.5;
         ctx.beginPath();
-        ctx.moveTo(0, 0);
-        ctx.lineTo(Math.cos(angle) * volcano.radius, Math.sin(angle) * volcano.radius);
-        ctx.lineWidth = 2 + 3 * phaseProgress;
-        ctx.strokeStyle = `rgba(255, 100, 0, ${glowIntensity})`;
+        ctx.moveTo(bird.x, bird.y);
+        ctx.quadraticCurveTo(bird.x + 5, bird.y - 5, bird.x + 10, bird.y);
+        ctx.quadraticCurveTo(bird.x + 15, bird.y + 5, bird.x + 20, bird.y);
         ctx.stroke();
-      }
-    }
-    
-    // Ash plume base
-    if (phase === 1 || phase === 2) {
-      const ashAmount = phase === 1 ? phaseProgress : 1;
-      const plumeHeight = 80 + phaseProgress * 50;
-      const plumeWidth = 30 + phaseProgress * 20;
-      
-      ctx.fillStyle = `rgba(80, 80, 80, ${0.6 * ashAmount})`;
-      ctx.beginPath();
-      ctx.moveTo(-volcano.radius * 0.3, -volcano.radius * 0.6);
-      ctx.bezierCurveTo(
-        -plumeWidth, -plumeHeight,
-        plumeWidth, -plumeHeight * 0.8,
-        volcano.radius * 0.3, -volcano.radius * 0.6
-      );
-      ctx.fill();
-    }
-    
-    // Eruption flames
-    if (phase === 2) {
-      const flameHeight = 60 + phaseProgress * 100;
-      const grad = ctx.createRadialGradient(0, -volcano.radius, 0, 0, -volcano.radius, flameHeight);
-      grad.addColorStop(0, '#FF4500');
-      grad.addColorStop(0.5, '#FF8C00');
-      grad.addColorStop(1, 'rgba(255, 140, 0, 0)');
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.moveTo(-volcano.radius * 0.3, -volcano.radius * 0.8);
-      ctx.bezierCurveTo(
-        -volcano.radius * 0.8, -volcano.radius - flameHeight,
-        volcano.radius * 0.8, -volcano.radius - flameHeight * 0.7,
-        volcano.radius * 0.3, -volcano.radius * 0.8
-      );
-      ctx.fill();
-    }
-    
-    // Lava flow
-    if (phase === 3) {
-      const flowAmount = phaseProgress;
-      const flowLength = flowAmount * 120;
-      
-      // Main flow
-      ctx.fillStyle = '#FF4500';
-      ctx.beginPath();
-      ctx.moveTo(-volcano.radius * 0.2, volcano.radius * 0.5);
-      ctx.bezierCurveTo(
-        -volcano.radius * 0.4, volcano.radius * 0.8,
-        -flowLength * 0.5, volcano.radius * 0.8,
-        -flowLength, height * 0.3
-      );
-      ctx.lineTo(-flowLength - 30, height * 0.3 + 10);
-      ctx.bezierCurveTo(
-        -flowLength * 0.5, volcano.radius * 0.8,
-        -volcano.radius * 0.4, volcano.radius * 0.8,
-        -volcano.radius * 0.2, volcano.radius * 0.5
-      );
-      ctx.fill();
-      
-      // Glowing effect
-      ctx.fillStyle = '#FFA500';
-      ctx.globalAlpha = 0.7;
-      ctx.beginPath();
-      ctx.moveTo(-volcano.radius * 0.15, volcano.radius * 0.5);
-      ctx.bezierCurveTo(
-        -volcano.radius * 0.3, volcano.radius * 0.7,
-        -flowLength * 0.4, volcano.radius * 0.7,
-        -flowLength, height * 0.3
-      );
-      ctx.lineTo(-5, height * 0.3 + 5);
-      ctx.bezierCurveTo(
-        -volcano.radius * 0.2, volcano.radius * 0.6,
-        -volcano.radius * 0.15, volcano.radius * 0.5,
-        -volcano.radius * 0.15, volcano.radius * 0.5
-      );
-      ctx.fill();
-      ctx.globalAlpha = 1.0;
-      
-      // Crust formation
-      if (flowAmount > 0.5) {
-        const crustProgress = (flowAmount - 0.5) * 2;
-        ctx.fillStyle = '#8B4513';
-        ctx.globalAlpha = crustProgress * 0.7;
-        const crustY = height * 0.3 + 5 - crustProgress * 3;
-        ctx.fillRect(-flowLength - 25, crustY, flowLength + 25, 5);
-        ctx.globalAlpha = 1.0;
-      }
-    }
-    
-    ctx.restore();
-  }
-
-  function drawPalmTrees(time, phase, dayFactor) {
-    for (const tree of palmTrees) {
-      const swayAmount = Math.sin(time * 0.001 * tree.swaySpeed + tree.sway) * 0.3;
-      
-      ctx.save();
-      ctx.translate(tree.x, tree.y);
-      ctx.rotate(swayAmount);
-      
-      // Trunk
-      ctx.fillStyle = '#8B4513';
-      ctx.fillRect(-3, 0, 6, tree.height);
-      
-      // Fronds
-      ctx.fillStyle = '#228B22';
-      ctx.beginPath();
-      ctx.moveTo(0, -5);
-      ctx.lineTo(-15, 10);
-      ctx.lineTo(-5, 12);
-      ctx.lineTo(-18, 18);
-      ctx.lineTo(-2, 15);
-      ctx.lineTo(-15, 25);
-      ctx.lineTo(0, 18);
-      ctx.lineTo(15, 25);
-      ctx.lineTo(2, 15);
-      ctx.lineTo(18, 18);
-      ctx.lineTo(5, 12);
-      ctx.lineTo(15, 10);
-      ctx.closePath();
-      ctx.fill();
-      
-      // Shadow
-      ctx.fillStyle = `rgba(0, 0, 0, ${0.2 * dayFactor})`;
-      ctx.fillRect(-6, tree.height, 12, 5);
-      
-      ctx.restore();
-    }
-  }
-
-  function drawAshParticles() {
-    for (const p of ashParticles) {
-      ctx.fillStyle = `rgba(100, 100, 100, ${p.alpha})`;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.size, 0, TAU);
-      ctx.fill();
-    }
-  }
-
-  function drawSmokeParticles() {
-    for (const p of smokeParticles) {
-      ctx.fillStyle = `rgba(150, 150, 150, ${p.alpha})`;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.size, 0, TAU);
-      ctx.fill();
-    }
-  }
-
-  function drawLavaBombs(time, phase, dayFactor) {
-    for (const b of lavaBombs) {
-      // Trail
-      if (b.trail.length > 1) {
-        for (let i = 1; i < b.trail.length; i++) {
-          const alpha = i / b.trail.length * 0.6;
-          ctx.fillStyle = `rgba(100, 100, 100, ${alpha})`;
-          ctx.beginPath();
-          ctx.arc(b.trail[i].x, b.trail[i].y, b.size * 0.3, 0, TAU);
-          ctx.fill();
+      } else {
+        // Reset birds to flying positions when safe
+        if (state.phaseTimer > 0 && state.phaseTimer < 50) {
+          bird.flying = true;
+          bird.x = -20;
+          bird.y = 100 + Math.random() * 100;
         }
       }
-      
-      // Glow
-      ctx.fillStyle = '#FF4500';
-      ctx.beginPath();
-      ctx.arc(b.x, b.y, b.size, 0, TAU);
-      ctx.fill();
-      
-      // Core
-      ctx.fillStyle = '#FFA500';
-      ctx.beginPath();
-      ctx.arc(b.x, b.y, b.size * 0.6, 0, TAU);
-      ctx.fill();
-    }
+    });
   }
 
-  function drawSteamParticles() {
-    for (const p of steamParticles) {
-      ctx.fillStyle = `rgba(200, 200, 220, ${p.alpha})`;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.size, 0, TAU);
-      ctx.fill();
+  function update() {
+    // Update time of day
+    state.timeOfDay += 0.016; // ~60fps
+    if (state.timeOfDay >= 60) state.timeOfDay = 0;
+    const dayT = (state.timeOfDay % 60) / 60;
+    
+    // Sky transition smoother
+    const smoothDay = Math.pow(Math.sin(dayT * Math.PI), 2);
+    
+    // Update phase timer
+    state.phaseTimer += 1.5;
+    
+    // Phase transitions
+    if (state.phaseTimer > 350) {
+      state.volcanoPhase = 'rumble';
+      state.phaseTimer = 0;
+      state.shorelineExtension = 0;
+      state.lavaFlows = [];
+      state.crusts = [];
+    } else if (state.phaseTimer > 300) {
+      state.volcanoPhase = 'reset';
+    } else if (state.phaseTimer > 250) {
+      state.volcanoPhase = 'lava';
+    } else if (state.phaseTimer > 200) {
+      state.volcanoPhase = 'eruption';
+    } else if (state.phaseTimer > 150) {
+      state.volcanoPhase = 'ash';
+    } else if (state.phaseTimer > 100) {
+      state.volcanoPhase = 'rumble';
     }
+    
+    // Draw everything
+    drawSky(smoothDay);
+    drawSunMoon(smoothDay);
+    drawSea();
+    
+    const baseY = drawIsland();
+    const crater = drawVolcano(baseY);
+    
+    // Draw based on phase
+    if (state.volcanoPhase === 'rumble') drawRumble(crater);
+    if (state.volcanoPhase === 'ash' || state.volcanoPhase === 'eruption') drawAsh(crater);
+    if (state.volcanoPhase === 'eruption') drawEruption(crater);
+    if (state.volcanoPhase === 'lava') drawLavaFlow(baseY);
+    
+    drawPalmTrees(baseY);
+    drawSeabirds();
+    
+    // Reset ash particles
+    state.ashParticles = [];
+    
+    requestAnimationFrame(update);
   }
-
-  function drawSeabirds(dayFactor, phase) {
-    for (const bird of seabirds) {
-      ctx.save();
-      ctx.translate(bird.x, bird.y);
-      
-      ctx.strokeStyle = phase === 2 || phase === 3 ? '#000' : `rgba(0, 0, 0, ${0.7 * dayFactor})`;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      
-      // Wing position based on flight
-      const wingFlap = bird.flying ? Math.sin(bird.x * 0.1) * 5 : 0;
-      
-      // Body
-      ctx.moveTo(-8, 0);
-      ctx.lineTo(0, -4);
-      ctx.lineTo(0, 4);
-      ctx.closePath();
-      ctx.stroke();
-      
-      // Wings
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.lineTo(6, wingFlap);
-      ctx.lineTo(12, 0);
-      ctx.stroke();
-      
-      ctx.restore();
-    }
-  }
-
-  // Initialize and start
-  time = 0;
-  initScene();
-  requestAnimationFrame(function f(t) {
-    time = t;
-    animate(t);
-  });
+  
+  // Start animation
+  update();
 })();
 </script>
 </body>

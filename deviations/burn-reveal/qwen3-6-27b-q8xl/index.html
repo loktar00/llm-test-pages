@@ -1,432 +1,462 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Infinite Burn Reveal</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background-color: #000;
-        }
-        canvas {
-            display: block;
-        }
-    </style>
+<meta charset="utf-8">
+<style>*{margin:0;padding:0}body{overflow:hidden;background:#000}canvas{display:block}</style>
 </head>
 <body>
-    <canvas id="canvas"></canvas>
-    <script>
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d', { alpha: false });
+<canvas id="c"></canvas>
+<script>
+const canvas=document.getElementById('c'),ctx=canvas.getContext('2d');
+let W,H,gridW,gridH,cellSize=5;
+let patternA,patternB,topPattern,bottomPattern;
+let burnGrid,charredGrid,clearTimer;
+let sparks=[];
+let burnPhase=0,burnRadius=0,burnSpeed=1.2;
+let igniteX,igniteY;
+let noiseOffset=Math.random()*1000;
+let transitionAlpha=0;
+let cycleTimer=0;
 
-        // Configuration
-        const BURN_SPEED = 2.5; // How fast the fire spreads
-        const SPARK_COUNT = 3; // Sparks generated per frame per burn pixel (approx)
-        const CHARS_LIFE = 120; // Frames before char disappears
-        const PATTERN_SEED_CHANGE = 2000; // Randomness seed for new patterns
+function resize(){
+  W=canvas.width=window.innerWidth;
+  H=canvas.height=window.innerHeight;
+  gridW=Math.ceil(W/cellSize);
+  gridH=Math.ceil(H/cellSize);
+}
 
-        let width, height;
-        let imageData, bufferData;
-        let grid; // 2D array tracking state of every pixel
-        let sparks = [];
-        let frameCount = 0;
-        let patternSeed = Math.random() * 10000;
-        let nextPatternSeed = Math.random() * 10000;
+// Simplex-like noise
+function hash(x,y){
+  let n=Math.sin(x*127.1+y*311.7+noiseOffset)*43758.5453;
+  return n-Math.floor(n);
+}
+
+function smoothNoise(x,y){
+  let ix=Math.floor(x),iy=Math.floor(y);
+  let fx=x-ix,fy=y-iy;
+  fx=fx*fx*(3-2*fx);fy=fy*fy*(3-2*fy);
+  let a=hash(ix,iy),b=hash(ix+1,iy),c=hash(ix,iy+1),d=hash(ix+1,iy+1);
+  return a+(b-a)*fx+(c-a)*fy+(a-b-c+d)*fx*fy;
+}
+
+function fbm(x,y,octaves){
+  let val=0,amp=1,freq=1,max=0;
+  for(let i=0;i<octaves;i++){
+    val+=smoothNoise(x*freq,y*freq)*amp;
+    max+=amp;amp*=0.5;freq*=2;
+  }
+  return val/max;
+}
+
+function generatePattern(alt){
+  let c=document.createElement('canvas');
+  c.width=W;c.height=H;
+  let g=c.getContext('2d');
+  
+  if(alt===0){
+    // Pattern A: layered geometric mandala
+    let grd=g.createRadialGradient(W/2,H/2,0,W/2,H/2,W*0.7);
+    grd.addColorStop(0,'#1a0533');
+    grd.addColorStop(0.5,'#0d1b2a');
+    grd.addColorStop(1,'#050510');
+    g.fillStyle=grd;g.fillRect(0,0,W,H);
+    
+    for(let ring=0;ring<12;ring++){
+      let r=30+ring*45;
+      let sides=6+ring*2;
+      let hue=(ring*30+noiseOffset*0.1)%360;
+      g.save();g.translate(W/2,H/2);
+      for(let i=0;i<sides;i++){
+        let a=(i/sides)*Math.PI*2;
+        g.rotate(a);
+        g.beginPath();
+        g.moveTo(0,0);
+        g.lineTo(r*Math.cos(a*0.3),r*Math.sin(a*0.3));
+        g.lineTo(r*1.3*Math.cos(a*0.3+0.4),r*1.3*Math.sin(a*0.3+0.4));
+        g.closePath();
+        g.fillStyle=`hsla(${hue},${60+ring*3}%,${25+ring*2}%,${0.4+ring*0.03})`;
+        g.fill();
+        g.strokeStyle=`hsla(${hue+40},80%,60%,0.3)`;
+        g.lineWidth=1;g.stroke();
+      }
+      g.restore();
+    }
+    
+    // Add noise texture
+    let id=g.getImageData(0,0,W,H);
+    for(let i=0;i<id.data.length;i+=4){
+      let px=i/4%W,py=Math.floor(i/4/W);
+      let n=fbm(px*0.02,py*0.02,4)*30;
+      id.data[i]+=n;id.data[i+1]+=n*0.7;id.data[i+2]+=n*1.3;
+    }
+    g.putImageData(id,0,0);
+  } else if(alt===1){
+    // Pattern B: crystalline grid
+    let grd=g.createLinearGradient(0,0,W,H);
+    grd.addColorStop(0,'#0a1628');
+    grd.addColorStop(0.5,'#1a0a2e');
+    grd.addColorStop(1,'#0a0a1a');
+    g.fillStyle=grd;g.fillRect(0,0,W,H);
+    
+    let sz=60;
+    for(let y=0;y<H+sz;y+=sz){
+      for(let x=0;x<W+sz;x+=sz){
+        let n=fbm(x*0.005,y*0.005,3);
+        let hue=200+n*120;
+        let sat=50+n*40;
+        let lit=15+n*25;
+        g.save();g.translate(x,y);
+        g.rotate(n*Math.PI*0.25);
+        g.beginPath();
+        for(let i=0;i<6;i++){
+          let a=(i/6)*Math.PI*2;
+          let r=sz*0.45*(0.7+n*0.3);
+          if(i===0)g.moveTo(Math.cos(a)*r,Math.sin(a)*r);
+          else g.lineTo(Math.cos(a)*r,Math.sin(a)*r);
+        }
+        g.closePath();
+        g.fillStyle=`hsla(${hue},${sat}%,${lit}%,0.6)`;
+        g.fill();
+        g.strokeStyle=`hsla(${hue+30},70%,50%,0.4)`;
+        g.lineWidth=1.5;g.stroke();
         
-        // State constants for grid
-        const STATE_INTACT = 0;
-        const STATE_BURNING = 1;
-        const STATE_CHAR = 2;
-
-        // Resize handler
-        function resize() {
-            width = canvas.width = window.innerWidth;
-            height = canvas.height = window.innerHeight;
-            initGrid();
-            startNewBurn();
+        // Inner detail
+        g.beginPath();
+        for(let i=0;i<6;i++){
+          let a=(i/6)*Math.PI*2+Math.PI/6;
+          let r=sz*0.2*(0.5+n*0.5);
+          if(i===0)g.moveTo(Math.cos(a)*r,Math.sin(a)*r);
+          else g.lineTo(Math.cos(a)*r,Math.sin(a)*r);
         }
+        g.closePath();
+        g.fillStyle=`hsla(${hue+60},80%,40%,0.3)`;
+        g.fill();
+        g.restore();
+      }
+    }
+    
+    let id=g.getImageData(0,0,W,H);
+    for(let i=0;i<id.data.length;i+=4){
+      let px=i/4%W,py=Math.floor(i/4/W);
+      let n=fbm(px*0.03,py*0.03,3)*20;
+      id.data[i]+=n;id.data[i+1]+=n*0.5;id.data[i+2]+=n*1.5;
+    }
+    g.putImageData(id,0,0);
+  } else {
+    // Pattern C: flowing organic waves
+    let grd=g.createRadialGradient(W*0.3,H*0.4,0,W*0.7,H*0.6,W);
+    grd.addColorStop(0,'#1a0a0a');
+    grd.addColorStop(0.5,'#0a1a0a');
+    grd.addColorStop(1,'#0a0a1a');
+    g.fillStyle=grd;g.fillRect(0,0,W,H);
+    
+    for(let layer=0;layer<8;layer++){
+      g.beginPath();
+      let yBase=H*0.1+layer*H*0.12;
+      for(let x=0;x<=W;x+=3){
+        let y=yBase+Math.sin(x*0.008+layer*1.5)*40+Math.sin(x*0.02+layer)*20+fbm(x*0.005,layer,3)*50;
+        if(x===0)g.moveTo(x,y);else g.lineTo(x,y);
+      }
+      g.lineTo(W,H);g.lineTo(0,H);g.closePath();
+      let hue=120+layer*30+noiseOffset*0.05;
+      g.fillStyle=`hsla(${hue},50%,${15+layer*3}%,0.25)`;
+      g.fill();
+      g.strokeStyle=`hsla(${hue+20},70%,40%,0.15)`;
+      g.lineWidth=2;g.stroke();
+    }
+    
+    // Scatter dots
+    for(let i=0;i<200;i++){
+      let x=Math.random()*W,y=Math.random()*H;
+      let r=1+Math.random()*4;
+      let hue=Math.random()*360;
+      g.beginPath();g.arc(x,y,r,0,Math.PI*2);
+      g.fillStyle=`hsla(${hue},60%,50%,${0.1+Math.random()*0.2})`;
+      g.fill();
+    }
+  }
+  return c;
+}
 
-        // Initialize the tracking grid
-        function initGrid() {
-            // Using a 1D array for performance, mapped to 2D coordinates
-            grid = new Uint8Array(width * height);
+function initBurn(){
+  burnGrid=new Float32Array(gridW*gridH);
+  charredGrid=new Float32Array(gridW*gridH);
+  clearTimer=new Float32Array(gridW*gridH);
+  sparks=[];
+  burnRadius=0;
+  burnPhase=0;
+  igniteX=Math.random()*W;
+  igniteY=Math.random()*H;
+  noiseOffset=Math.random()*1000;
+  transitionAlpha=0;
+  cycleTimer=0;
+}
+
+function spawnSpark(x,y){
+  sparks.push({
+    x:x,y:y,
+    vx:(Math.random()-0.5)*3-Math.random()*2,
+    vy:-Math.random()*4-1,
+    life:1,
+    decay:0.008+Math.random()*0.015,
+    size:1+Math.random()*3,
+    hue:20+Math.random()*30
+  });
+}
+
+function updateBurn(dt){
+  if(burnPhase===0){
+    // Active burning phase
+    burnRadius+=burnSpeed*dt*60;
+    
+    let noiseScale=0.015;
+    let maxBurn=burnRadius;
+    
+    for(let gy=0;gy<gridH;gy++){
+      for(let gx=0;gx<gridW;gx++){
+        let idx=gy*gridW+gx;
+        if(burnGrid[idx]>0)continue;
+        
+        let px=gx*cellSize+cellSize/2;
+        let py=gy*cellSize+cellSize/2;
+        
+        let dx=px-igniteX,dy=py-igniteY;
+        let dist=Math.sqrt(dx*dx+dy*dy);
+        
+        // Noise-based irregularity
+        let n1=fbm(px*noiseScale,py*noiseScale,4);
+        let n2=fbm(px*noiseScale*2.3+100,py*noiseScale*2.3+100,3);
+        let n3=fbm(px*noiseScale*0.5+200,py*noiseScale*0.5+200,3);
+        
+        let noiseOffset1=(n1-0.5)*maxBurn*0.6;
+        let noiseOffset2=(n2-0.5)*maxBurn*0.3;
+        let noiseOffset3=(n3-0.5)*maxBurn*0.15;
+        let totalNoise=noiseOffset1+noiseOffset2+noiseOffset3;
+        
+        let effectiveDist=dist+totalNoise;
+        
+        if(effectiveDist<maxBurn){
+          let frontDist=Math.abs(effectiveDist-maxBurn);
+          if(frontDist<cellSize*3){
+            burnGrid[idx]=1; // burning front
+            // Spawn sparks
+            if(Math.random()<0.08){
+              spawnSpark(px,py);
+            }
+          } else {
+            burnGrid[idx]=2; // charred
+            charredGrid[idx]=1;
+            clearTimer[idx]=3+Math.random()*4; // seconds before clearing
+          }
         }
-
-        // Fast pseudo-random noise for procedural generation
-        function noise(x, y, seed) {
-            const n = Math.sin(x * 12.9898 + y * 78.233 + seed) * 43758.5453;
-            return n - Math.floor(n);
+      }
+    }
+    
+    // Update charred clear timers
+    let allCleared=true;
+    for(let i=0;i<burnGrid.length;i++){
+      if(burnGrid[i]>0){
+        allCleared=false;
+        if(burnGrid[i]===2){
+          clearTimer[i]-=dt;
+          if(clearTimer[i]<=0){
+            burnGrid[i]=0;
+            charredGrid[i]=0;
+          }
         }
+      }
+    }
+    
+    // Check if burn is mostly done
+    let burningCount=0;
+    for(let i=0;i<burnGrid.length;i++){
+      if(burnGrid[i]===1)burningCount++;
+    }
+    if(burningCount<50 && burnRadius>Math.max(W,H)*0.8){
+      burnPhase=1;
+      cycleTimer=0;
+    }
+  } else {
+    // Transition phase - fade out remaining charred
+    cycleTimer+=dt;
+    transitionAlpha=Math.min(1,cycleTimer/2);
+    
+    if(transitionAlpha>=1){
+      // Swap patterns
+      let temp=topPattern;
+      topPattern=bottomPattern;
+      bottomPattern=temp;
+      initBurn();
+    }
+  }
+}
 
-        // Generate the "Top" pattern (The one burning away)
-        function drawTopPattern(ctx, seed) {
-            // We draw directly to the canvas buffer logic, but for the "Top" layer,
-            // we actually just need to define its colors per pixel.
-            // However, to keep it simple and performant, we will draw the "Bottom" pattern
-            // to an offscreen canvas or just redraw it every frame? 
-            // Redrawing every frame is expensive.
-            // Strategy: 
-            // 1. Draw Bottom Pattern to a persistent ImageData object.
-            // 2. Draw Top Pattern to a persistent ImageData object.
-            // 3. Composite them based on the Grid state.
+function updateSparks(dt){
+  for(let i=sparks.length-1;i>=0;i--){
+    let s=sparks[i];
+    s.x+=s.vx;
+    s.y+=s.vy;
+    s.vy-=0.02; // slight upward drift
+    s.vx*=0.99;
+    s.life-=s.decay;
+    if(s.life<=0)sparks.splice(i,1);
+  }
+}
+
+function render(){
+  ctx.fillStyle='#000';
+  ctx.fillRect(0,0,W,H);
+  
+  // Draw bottom pattern (revealed underneath)
+  ctx.globalAlpha=1;
+  ctx.drawImage(bottomPattern,0,0);
+  
+  // Draw top pattern with burn mask
+  // We'll draw the top pattern only where not burned
+  let topCtx=topPattern.getContext('2d');
+  
+  // Create a temporary canvas for the masked top pattern
+  let tmpCanvas=document.createElement('canvas');
+  tmpCanvas.width=W;tmpCanvas.height=H;
+  let tmpCtx=tmpCanvas.getContext('2d');
+  tmpCtx.drawImage(topPattern,0,0);
+  
+  // Get image data for masking
+  let imgData=tmpCtx.getImageData(0,0,W,H);
+  let data=imgData.data;
+  
+  let noiseScale=0.015;
+  
+  for(let gy=0;gy<gridH;gy++){
+    for(let gx=0;gx<gridW;gx++){
+      let idx=gy*gridW+gx;
+      let state=burnGrid[idx];
+      
+      if(state===0)continue; // unburned - leave as is
+      
+      let px0=gx*cellSize;
+      let py0=gy*cellSize;
+      let px1=Math.min(px0+cellSize,W);
+      let py1=Math.min(py0+cellSize,H);
+      
+      let cx=px0+cellSize/2;
+      let cy=py0+cellSize/2;
+      
+      if(state===1){
+        // Burning front - draw glow
+        let dx=cx-igniteX,dy=cy-igniteY;
+        let dist=Math.sqrt(dx*dx+dy*dy);
+        let n=fbm(cx*noiseScale,cy*noiseScale,4);
+        let glowIntensity=0.8+Math.sin(Date.now()*0.01+dist*0.05)*0.2;
+        
+        for(let py=py0;py<py1;py++){
+          for(let px=px0;px<px1;px++){
+            let pidx=(py*W+px)*4;
+            data[pidx]=Math.min(255,data[pidx]*0.3+255*glowIntensity);
+            data[pidx+1]=Math.min(255,data[pidx+1]*0.1+180*glowIntensity);
+            data[pidx+2]=Math.min(255,data[pidx+2]*0.05+60*glowIntensity);
+            data[pidx+3]=255;
+          }
         }
-
-        // Offscreen canvases for the patterns
-        const topCanvas = document.createElement('canvas');
-        const topCtx = topCanvas.getContext('2d');
-        const botCanvas = document.createElement('canvas');
-        const botCtx = botCanvas.getContext('2d');
-
-        function generatePattern(context, w, h, seed, colorBase) {
-            context.fillStyle = '#000';
-            context.fillRect(0, 0, w, h);
-            
-            // Procedural Geometry
-            const count = Math.floor(w * h / 4000);
-            for (let i = 0; i < count; i++) {
-                const x = Math.random() * w;
-                const y = Math.random() * h;
-                const size = Math.random() * 50 + 10;
-                
-                context.beginPath();
-                // Random shapes
-                if (Math.random() > 0.5) {
-                    context.arc(x, y, size, 0, Math.PI * 2);
-                } else {
-                    context.rect(x, y, size, size);
-                }
-                
-                // Color variation based on seed
-                const hue = (seed + i) % 360;
-                const sat = 50 + Math.random() * 50;
-                const light = 20 + Math.random() * 40;
-                context.fillStyle = `hsl(${hue}, ${sat}%, ${light}%)`;
-                context.fill();
-            }
-            
-            // Add some texture/noise
-            const imgData = context.getImageData(0, 0, w, h);
-            const data = imgData.data;
-            for (let i = 0; i < data.length; i += 4) {
-                const noiseVal = (Math.random() - 0.5) * 20;
-                data[i] += noiseVal;
-                data[i+1] += noiseVal;
-                data[i+2] += noiseVal;
-            }
-            context.putImageData(imgData, 0, 0);
+      } else if(state===2){
+        // Charred
+        let charAlpha=Math.max(0,clearTimer[idx]/7);
+        let charFade=1-charAlpha*0.3;
+        
+        for(let py=py0;py<py1;py++){
+          for(let px=px0;px<px1;px++){
+            let pidx=(py*W+px)*4;
+            data[pidx]=Math.floor(data[pidx]*0.15*charFade);
+            data[pidx+1]=Math.floor(data[pidx+1]*0.08*charFade);
+            data[pidx+2]=Math.floor(data[pidx+2]*0.05*charFade);
+            data[pidx+3]=255;
+          }
         }
+      }
+    }
+  }
+  
+  tmpCtx.putImageData(imgData,0,0);
+  ctx.drawImage(tmpCanvas,0,0);
+  
+  // Draw burn front glow overlay
+  ctx.save();
+  ctx.globalCompositeOperation='lighter';
+  
+  for(let gy=0;gy<gridH;gy++){
+    for(let gx=0;gx<gridW;gx++){
+      let idx=gy*gridW+gx;
+      if(burnGrid[idx]!==1)continue;
+      
+      let px=gx*cellSize+cellSize/2;
+      let py=gy*cellSize+cellSize/2;
+      
+      let dx=px-igniteX,dy=py-igniteY;
+      let dist=Math.sqrt(dx*dx+dy*dy);
+      let flicker=Math.sin(Date.now()*0.02+dist*0.1+gx*0.5+gy*0.3)*0.3+0.7;
+      
+      let grad=ctx.createRadialGradient(px,py,0,px,py,cellSize*2.5);
+      grad.addColorStop(0,`rgba(255,255,220,${0.6*flicker})`);
+      grad.addColorStop(0.3,`rgba(255,180,50,${0.4*flicker})`);
+      grad.addColorStop(0.7,`rgba(255,80,10,${0.15*flicker})`);
+      grad.addColorStop(1,'rgba(255,30,0,0)');
+      ctx.fillStyle=grad;
+      ctx.fillRect(px-cellSize*3,py-cellSize*3,cellSize*6,cellSize*6);
+    }
+  }
+  ctx.restore();
+  
+  // Draw sparks
+  ctx.save();
+  ctx.globalCompositeOperation='lighter';
+  for(let s of sparks){
+    let alpha=s.life;
+    let grad=ctx.createRadialGradient(s.x,s.y,0,s.x,s.y,s.size*2);
+    grad.addColorStop(0,`rgba(255,255,200,${alpha})`);
+    grad.addColorStop(0.4,`rgba(255,${150+Math.floor(s.hue*2)},0,${alpha*0.7})`);
+    grad.addColorStop(1,'rgba(255,50,0,0)');
+    ctx.fillStyle=grad;
+    ctx.fillRect(s.x-s.size*2,s.y-s.size*2,s.size*4,s.size*4);
+  }
+  ctx.restore();
+  
+  // Transition fade
+  if(transitionAlpha>0){
+    ctx.fillStyle=`rgba(0,0,0,${transitionAlpha*0.5})`;
+    ctx.fillRect(0,0,W,H);
+  }
+}
 
-        function startNewBurn() {
-            // Resize offscreen canvases
-            topCanvas.width = width;
-            topCanvas.height = height;
-            botCanvas.width = width;
-            botCanvas.height = height;
+let lastTime=0;
+function loop(time){
+  let dt=Math.min((time-lastTime)/1000,0.05);
+  lastTime=time;
+  
+  updateBurn(dt);
+  updateSparks(dt);
+  render();
+  
+  requestAnimationFrame(loop);
+}
 
-            // Generate patterns
-            generatePattern(topCtx, width, height, patternSeed);
-            generatePattern(botCtx, width, height, nextPatternSeed);
+function init(){
+  resize();
+  patternA=generatePattern(0);
+  patternB=generatePattern(1);
+  topPattern=patternA;
+  bottomPattern=patternB;
+  initBurn();
+  requestAnimationFrame(loop);
+}
 
-            // Store pixel data for fast access
-            const topData = topCtx.getImageData(0, 0, width, height).data;
-            const botData = botCtx.getImageData(0, 0, width, height).data;
+window.addEventListener('resize',()=>{
+  resize();
+  topPattern=generatePattern(0);
+  bottomPattern=generatePattern(1);
+  initBurn();
+});
 
-            // Reset Grid
-            for (let i = 0; i < grid.length; i++) {
-                grid[i] = STATE_INTACT;
-            }
-
-            // Ignite random point
-            const startX = Math.floor(Math.random() * width);
-            const startY = Math.floor(Math.random() * height);
-            
-            // Ignite a small cluster
-            for(let dx = -5; dx <= 5; dx++) {
-                for(let dy = -5; dy <= 5; dy++) {
-                    if (dx*dx + dy*dy < 25) {
-                        const x = startX + dx;
-                        const y = startY + dy;
-                        if (x >= 0 && x < width && y >= 0 && y < height) {
-                            grid[y * width + x] = STATE_BURNING;
-                        }
-                    }
-                }
-            }
-
-            sparks = [];
-        }
-
-        // Spark Particle Class
-        class Spark {
-            constructor(x, y) {
-                this.x = x;
-                this.y = y;
-                const angle = Math.random() * Math.PI * 2;
-                const speed = Math.random() * 2 + 0.5;
-                this.vx = Math.cos(angle) * speed;
-                this.vy = Math.sin(angle) * speed - 1; // Tend upwards
-                this.life = 1.0;
-                this.decay = Math.random() * 0.02 + 0.01;
-                this.size = Math.random() * 2 + 1;
-            }
-
-            update() {
-                this.x += this.vx;
-                this.y += this.vy;
-                this.vy -= 0.02; // Gravity (negative is up in canvas usually, but let's say sparks float up)
-                // Actually canvas y increases downwards. So gravity is +. Upward force is -.
-                // Let's make them drift up.
-                this.vy += 0.02; // Gravity pulls down
-                this.life -= this.decay;
-            }
-
-            draw(ctx) {
-                ctx.globalAlpha = Math.max(0, this.life);
-                ctx.fillStyle = `rgb(255, ${Math.floor(this.life * 200)}, 0)`;
-                ctx.beginPath();
-                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
-                ctx.fill();
-                ctx.globalAlpha = 1.0;
-            }
-        }
-
-        function updateBurn() {
-            // We iterate through the grid. 
-            // To make it look organic, we only check neighbors of burning pixels.
-            // But iterating the whole array is fast enough for modern JS on reasonable resolutions.
-            // To optimize, we can iterate a subset or use a list of active fire pixels, 
-            // but let's try full scan first with a stride or simple logic.
-            
-            // Actually, scanning 1080p (2M pixels) every frame is heavy if logic is complex.
-            // Let's use a "Fire Front" list approach implicitly by checking neighbors.
-            // But for simplicity in a single file, let's just iterate and use random chance for spread.
-            
-            // Optimization: Only iterate pixels that are likely to change or checking neighbors.
-            // A simple grid scan is O(W*H). Let's do it.
-            
-            // We need to read the pixel data from the canvases to composite.
-            // Instead of getImageData every frame (slow), we keep the data in memory?
-            // No, let's just draw the Bottom Canvas to the main canvas first.
-            
-            // Wait, the requirement is "Reveal next pattern".
-            // So: 
-            // 1. Draw Bottom Pattern (The revealed one).
-            // 2. Draw Top Pattern (The burning one) ONLY where grid is INTACT.
-            // 3. Draw Fire effects where grid is BURNING.
-            // 4. Draw Char where grid is CHAR.
-            
-            // But drawing 2 million rects is slow.
-            // We should use `putImageData`.
-            
-            // Let's create a final ImageData buffer.
-            // Copy Bottom Pattern data.
-            // Overlay Top Pattern data where intact.
-            // Modify pixels where burning/charred.
-            
-            // This is the most performant way.
-            
-            // Get data once
-            const topData = topCtx.getImageData(0, 0, width, height).data;
-            const botData = botCtx.getImageData(0, 0, width, height).data;
-            
-            // Create a mutable copy of the bottom data (this will be our output)
-            // We can't modify botData directly if we want to keep it clean, but we are regenerating patterns only on loop.
-            // Actually, for the "Reveal" effect, the bottom pattern is static until the loop resets.
-            // So we can use botData as the base.
-            
-            // NOTE: In a real loop, we need to preserve the bottom pattern.
-            // Let's clone it.
-            // Actually, `new Uint8ClampedArray(botData)` is expensive every frame.
-            // Let's just draw the bottom canvas to the main canvas using `drawImage` first.
-            // Then we only draw the changes on top?
-            // No, `drawImage` is fast.
-            // 1. ctx.drawImage(botCanvas, 0, 0);
-            // 2. We need to draw the Top Pattern ONLY on intact pixels.
-            //    This requires pixel manipulation.
-            
-            // Let's go back to the ImageData approach. It's the only way to get per-pixel burn control.
-            // We will maintain a `currentOutput` buffer.
-            
-            if (!window.outputBuffer) {
-                window.outputBuffer = ctx.createImageData(width, height);
-            }
-            const output = window.outputBuffer.data;
-            
-            // Logic:
-            // Iterate y, x.
-            // If Intact: Copy Top Pattern pixel.
-            // If Burning: Calculate fire color.
-            // If Char: Calculate char color (fade to bottom pattern?).
-            // If Burnt (Gone): Copy Bottom Pattern pixel.
-            
-            // To handle the "Charred residue briefly remains before clearing"
-            // We need a state for "Charred" that transitions to "Gone" (showing bottom).
-            // Let's add STATE_GONE = 3.
-            
-            // Optimization: Only process pixels that are not GONE?
-            // No, we need to draw the bottom pattern where it's gone.
-            
-            // Let's optimize the loop.
-            // We can use a 1D loop.
-            
-            const len = width * height;
-            
-            // Pre-calculate some values
-            const time = Date.now() * 0.001;
-            
-            for (let i = 0; i < len; i++) {
-                const state = grid[i];
-                const pIdx = i * 4;
-                
-                if (state === STATE_INTACT) {
-                    // Copy from Top
-                    output[pIdx] = topData[pIdx];
-                    output[pIdx+1] = topData[pIdx+1];
-                    output[pIdx+2] = topData[pIdx+2];
-                    output[pIdx+3] = 255;
-                    
-                    // Check for spread
-                    // Only check spread for a subset of pixels to save perf? 
-                    // Or check neighbors.
-                    // Let's check neighbors.
-                    // To avoid boundary checks, pad the loop or check indices.
-                    const x = i % width;
-                    const y = (i - x) / width;
-                    
-                    // Simple spread logic:
-                    // If any neighbor is BURNING, chance to become BURNING.
-                    // Noise affects spread speed.
-                    
-                    let isNeighborBurning = false;
-                    
-                    // Check 4 neighbors
-                    if (x > 0 && grid[i-1] === STATE_BURNING) isNeighborBurning = true;
-                    else if (x < width-1 && grid[i+1] === STATE_BURNING) isNeighborBurning = true;
-                    else if (y > 0 && grid[i-width] === STATE_BURNING) isNeighborBurning = true;
-                    else if (y < height-1 && grid[i+width] === STATE_BURNING) isNeighborBurning = true;
-                    
-                    if (isNeighborBurning) {
-                        // Noise threshold for organic edge
-                        const xNoise = noise(x, y, time * 10);
-                        if (xNoise > 0.98) { // 2% chance per frame if neighbor is burning
-                             grid[i] = STATE_BURNING;
-                             // Update output for this frame to show it burning? 
-                             // No, next frame it will be processed as burning.
-                             // But to make it instant, let's process it now? 
-                             // No, standard cellular automata step.
-                        }
-                    }
-
-                } else if (state === STATE_BURNING) {
-                    // Fire Color
-                    // Oscillate between Orange, Yellow, White
-                    const flicker = Math.random();
-                    const r = 255;
-                    const g = Math.floor(100 + flicker * 155);
-                    const b = Math.floor(flicker * 100);
-                    
-                    output[pIdx] = r;
-                    output[pIdx+1] = g;
-                    output[pIdx+2] = b;
-                    output[pIdx+3] = 255;
-                    
-                    // Spawn sparks
-                    if (Math.random() < 0.05) { // Limit spark spawn rate
-                        sparks.push(new Spark(i % width, (i - (i%width))/width));
-                    }
-                    
-                    // Transition to Char
-                    if (Math.random() < 0.1) {
-                        grid[i] = STATE_CHAR;
-                    }
-
-                } else if (state === STATE_CHAR) {
-                    // Charred look: Dark, reddish/black
-                    // Fade out to reveal bottom pattern?
-                    // Or just stay dark for a bit then switch to "Gone"
-                    
-                    // Let's make it look like burnt paper/wood
-                    const r = 20 + Math.random() * 30;
-                    const g = 10 + Math.random() * 10;
-                    const b = 10 + Math.random() * 10;
-                    
-                    output[pIdx] = r;
-                    output[pIdx+1] = g;
-                    output[pIdx+2] = b;
-                    output[pIdx+3] = 255;
-                    
-                    // Transition to Gone (Reveal Bottom)
-                    // We need a counter for char life. 
-                    // Since we don't store per-pixel life in the grid (it's Uint8),
-                    // we can use a global "Char Decay" or just random chance.
-                    // Random chance is easier but less controlled.
-                    // Let's use a simple random chance to clear it.
-                    if (Math.random() < 0.05) {
-                        grid[i] = 3; // STATE_GONE
-                    }
-
-                } else {
-                    // STATE_GONE (3) or default
-                    // Reveal Bottom Pattern
-                    output[pIdx] = botData[pIdx];
-                    output[pIdx+1] = botData[pIdx+1];
-                    output[pIdx+2] = botData[pIdx+2];
-                    output[pIdx+3] = 255;
-                }
-            }
-            
-            ctx.putImageData(window.outputBuffer, 0, 0);
-        }
-
-        function updateSparks() {
-            for (let i = sparks.length - 1; i >= 0; i--) {
-                const s = sparks[i];
-                s.update();
-                s.draw(ctx);
-                if (s.life <= 0) {
-                    sparks.splice(i, 1);
-                }
-            }
-        }
-
-        function checkLoop() {
-            // Check if almost everything is gone
-            // Simple check: count intact pixels? Expensive.
-            // Just use a timer or check center point?
-            // Let's check a random sample of pixels.
-            
-            let intactCount = 0;
-            const sampleSize = 100;
-            for(let k=0; k<sampleSize; k++) {
-                const idx = Math.floor(Math.random() * grid.length);
-                if (grid[idx] === STATE_INTACT) intactCount++;
-            }
-            
-            // If very few intact pixels left, restart
-            if (intactCount < 5) {
-                patternSeed = nextPatternSeed;
-                nextPatternSeed = Math.random() * 10000;
-                startNewBurn();
-            }
-        }
-
-        function loop() {
-            updateBurn();
-            updateSparks();
-            checkLoop();
-            requestAnimationFrame(loop);
-        }
-
-        // Init
-        window.addEventListener('resize', resize);
-        resize();
-        loop();
-
-    </script>
+init();
+</script>
 </body>
 </html>

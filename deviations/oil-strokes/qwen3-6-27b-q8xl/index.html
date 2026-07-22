@@ -1,399 +1,757 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Procedural Oil Painter</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            background-color: #1a1a1a;
-            overflow: hidden;
-            font-family: 'Courier New', Courier, monospace;
-        }
-        canvas {
-            display: block;
-        }
-        #ui {
-            position: absolute;
-            bottom: 20px;
-            left: 20px;
-            color: rgba(255, 255, 255, 0.5);
-            font-size: 12px;
-            pointer-events: none;
-            mix-blend-mode: difference;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Self-Painting Oil Canvas</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #1a1a1a; }
+canvas { display: block; width: 100%; height: 100%; }
+</style>
 </head>
 <body>
-    <div id="ui">Generating Landscape...</div>
-    <canvas id="canvas"></canvas>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
 
-    <script>
-        /**
-         * PROCEDURAL OIL PAINTER
-         * 
-         * Logic:
-         * 1. Generate a procedural "underpainting" map (Sky, Hills, Ground).
-         * 2. Define "Strokes" based on geometry.
-         * 3. Animate the drawing of strokes with impasto/bristle textures.
-         */
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
 
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        const ui = document.getElementById('ui');
+// Color utilities
+function hsl(h, s, l, a = 1) { return `hsla(${h},${s}%,${l}%,${a})`; }
+function rand(min, max) { return Math.random() * (max - min) + min; }
+function randInt(min, max) { return Math.floor(rand(min, max + 1)); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
-        let width, height;
-        let strokes = [];
-        let currentStrokeIndex = 0;
-        let animationId;
-        let isPainting = false;
-        
-        // Palette Generator
-        const Palettes = {
-            sunset: {
-                sky: ['#2b1d42', '#5c2c4d', '#9e4658', '#d67d55', '#f5b365'],
-                ground: ['#1a1510', '#2d241b', '#4a3b2a', '#6b5744', '#8c7355'],
-                accent: ['#fff0d4', '#ffcc80']
-            },
-            gloom: {
-                sky: ['#0f172a', '#1e293b', '#334155', '#475569', '#64748b'],
-                ground: ['#020617', '#0f172a', '#1e293b', '#334155', '#475569'],
-                accent: ['#cbd5e1', '#94a3b8']
-            },
-            spring: {
-                sky: ['#87CEEB', '#4682B4', '#5F9EA0', '#20B2AA', '#008B8B'],
-                ground: ['#556B2F', '#6B8E23', '#8FBC8F', '#2E8B57', '#006400'],
-                accent: ['#98FB98', '#F0FFF0']
-            }
-        };
+// Noise
+function hash(x, y) {
+  let h = x * 374761393 + y * 668265263;
+  h = (h ^ (h >> 13)) * 1274126177;
+  return ((h ^ (h >> 16)) & 0x7fffffff) / 0x7fffffff;
+}
+function smoothNoise(x, y) {
+  const ix = Math.floor(x), iy = Math.floor(y);
+  const fx = x - ix, fy = y - iy;
+  const sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
+  const n00 = hash(ix, iy), n10 = hash(ix + 1, iy);
+  const n01 = hash(ix, iy + 1), n11 = hash(ix + 1, iy + 1);
+  return lerp(lerp(n00, n10, sx), lerp(n01, n11, sx), sy);
+}
+function fbm(x, y, octaves = 5) {
+  let v = 0, a = 0.5, f = 1;
+  for (let i = 0; i < octaves; i++) { v += a * smoothNoise(x * f, y * f); a *= 0.5; f *= 2; }
+  return v;
+}
 
-        function resize() {
-            width = canvas.width = window.innerWidth;
-            height = canvas.height = window.innerHeight;
+// Landscape parameters (procedural seed)
+let seed = Math.random() * 10000;
+function seededRand() { seed = (seed * 16807 + 0) % 2147483647; return (seed - 1) / 2147483646; }
+
+let landscape = {};
+function generateLandscape() {
+  seed = Math.random() * 10000;
+  const skyHue = seededRand() * 360;
+  const timeOfDay = seededRand(); // 0=dawn, 0.5=noon, 1=dusk
+  const mountainCount = randInt(2, 4);
+  const hasWater = seededRand() > 0.4;
+  const treeCount = randInt(3, 12);
+  const cloudCount = randInt(2, 8);
+
+  const skyTop = hsl(skyHue, 50 + timeOfDay * 20, 20 + timeOfDay * 30);
+  const skyBot = hsl(skyHue + 20, 60 + timeOfDay * 30, 50 + timeOfDay * 20);
+  const sunHue = (skyHue + 30) % 360;
+  const sunY = H * (0.15 + timeOfDay * 0.35);
+  const sunX = W * (0.2 + seededRand() * 0.6);
+
+  const groundHue = (skyHue + 120) % 360;
+
+  const mountains = [];
+  for (let i = 0; i < mountainCount; i++) {
+    mountains.push({
+      peakX: W * (0.1 + i * 0.25 + seededRand() * 0.15),
+      peakY: H * (0.25 + seededRand() * 0.2),
+      width: W * (0.2 + seededRand() * 0.3),
+      hue: (groundHue + seededRand() * 40 - 20) % 360,
+      lightness: 25 + i * 8 + seededRand() * 10,
+      saturation: 20 + seededRand() * 20,
+      layer: i
+    });
+  }
+  mountains.sort((a, b) => a.layer - b.layer);
+
+  const trees = [];
+  for (let i = 0; i < treeCount; i++) {
+    trees.push({
+      x: W * (0.05 + seededRand() * 0.9),
+      baseY: H * (0.55 + seededRand() * 0.2),
+      height: H * (0.08 + seededRand() * 0.15),
+      width: H * (0.04 + seededRand() * 0.06),
+      hue: (groundHue + seededRand() * 30 - 15) % 360,
+      lightness: 20 + seededRand() * 25
+    });
+  }
+
+  const clouds = [];
+  for (let i = 0; i < cloudCount; i++) {
+    clouds.push({
+      x: W * seededRand(),
+      y: H * (0.05 + seededRand() * 0.25),
+      width: W * (0.08 + seededRand() * 0.15),
+      height: H * (0.02 + seededRand() * 0.04),
+      lightness: 70 + seededRand() * 25
+    });
+  }
+
+  landscape = {
+    skyHue, skyTop, skyBot, sunHue, sunX, sunY, timeOfDay,
+    groundHue, mountains, trees, clouds, hasWater,
+    waterY: H * 0.65,
+    groundY: H * 0.55
+  };
+}
+
+// Brush stroke rendering
+function drawBrushStroke(x1, y1, x2, y2, color, width, alpha = 1, bristleCount = 5, impasto = true) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const len = Math.sqrt(dx * dx + dy * dy);
+  if (len < 1) return;
+  const nx = -dy / len, ny = dx / len;
+  const halfW = width / 2;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+
+  // Base stroke
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  // Slight curve for organic feel
+  const cx = (x1 + x2) / 2 + nx * rand(-width * 0.3, width * 0.3);
+  const cy = (y1 + y2) / 2 + ny * rand(-width * 0.3, width * 0.3);
+  ctx.quadraticCurveTo(cx, cy, x2, y2);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+
+  // Bristle streaks
+  if (bristleCount > 0) {
+    const bristleAlpha = 0.15 + Math.random() * 0.2;
+    for (let b = 0; b < bristleCount; b++) {
+      const offset = (b / (bristleCount - 1) - 0.5) * width * 0.8;
+      const bx1 = x1 + nx * offset + rand(-1, 1);
+      const by1 = y1 + ny * offset + rand(-1, 1);
+      const bx2 = x2 + nx * offset + rand(-1, 1);
+      const by2 = y2 + ny * offset + rand(-1, 1);
+
+      ctx.beginPath();
+      ctx.moveTo(bx1, by1);
+      ctx.quadraticCurveTo(
+        (bx1 + bx2) / 2 + nx * rand(-2, 2),
+        (by1 + by2) / 2 + ny * rand(-2, 2),
+        bx2, by2
+      );
+      ctx.strokeStyle = impasto
+        ? hsl(
+            parseFloat(color.match(/\d+/)?.[0] || 0),
+            parseFloat(color.match(/(\d+)%/)?.[1] || 50) + rand(-10, 10),
+            parseFloat(color.match(/(\d+)%/)?.[2] || 50) + rand(-8, 5),
+            bristleAlpha
+          )
+        : color;
+      ctx.lineWidth = width * (0.15 + Math.random() * 0.2);
+      ctx.lineCap = 'round';
+      ctx.globalAlpha = alpha * bristleAlpha;
+      ctx.stroke();
+    }
+  }
+
+  // Impasto highlight
+  if (impasto) {
+    ctx.beginPath();
+    ctx.moveTo(x1 + nx * halfW * 0.2, y1 + ny * halfW * 0.2);
+    ctx.quadraticCurveTo(
+      (x1 + x2) / 2 + nx * halfW * 0.1,
+      (y1 + y2) / 2 + ny * halfW * 0.1,
+      x2 + nx * halfW * 0.2, y2 + ny * halfW * 0.2
+    );
+    ctx.strokeStyle = `rgba(255,255,255,${0.04 + Math.random() * 0.06})`;
+    ctx.lineWidth = width * 0.25;
+    ctx.lineCap = 'round';
+    ctx.globalAlpha = alpha * 0.5;
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+function drawDotStroke(x, y, color, size, alpha = 1) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.beginPath();
+  ctx.arc(x + rand(-size * 0.3, size * 0.3), y + rand(-size * 0.3, size * 0.3), size * 0.5, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+  // Impasto dot
+  ctx.beginPath();
+  ctx.arc(x + rand(-size * 0.1, size * 0.1), y + rand(-size * 0.1, size * 0.1), size * 0.2, 0, Math.PI * 2);
+  ctx.fillStyle = `rgba(255,255,255,${0.1 + Math.random() * 0.15})`;
+  ctx.fill();
+  ctx.restore();
+}
+
+// Stroke generation
+function generateStrokes() {
+  const strokes = [];
+  const { skyHue, skyTop, skyBot, sunHue, sunX, sunY, timeOfDay, groundHue, mountains, trees, clouds, hasWater, waterY, groundY } = landscape;
+
+  // === PASS 1: Broad underpainting ===
+  const pass1 = [];
+
+  // Sky underpainting - broad horizontal strokes
+  const skyRows = 12;
+  for (let i = 0; i < skyRows; i++) {
+    const y = (i / skyRows) * groundY;
+    const t = i / skyRows;
+    const hue = lerp(skyHue, skyHue + 20, t);
+    const lightness = lerp(25 + timeOfDay * 25, 55 + timeOfDay * 15, t);
+    const sat = lerp(40 + timeOfDay * 20, 60 + timeOfDay * 20, t);
+    const color = hsl(hue, sat, lightness);
+    const sw = W * (0.25 + seededRand() * 0.35);
+    const sh = H * (0.03 + seededRand() * 0.04);
+    const count = Math.ceil(W / sw) + 1;
+    for (let j = 0; j < count; j++) {
+      const x = j * sw - sh + rand(-sw * 0.3, sw * 0.3);
+      pass1.push({
+        x1: x, y1: y + rand(-sh * 0.5, sh * 0.5),
+        x2: x + sw + rand(-sh, sh), y2: y + rand(-sh * 0.3, sh * 0.3),
+        color, width: sh * 2, bristleCount: 3, impasto: false, alpha: 0.85
+      });
+    }
+  }
+
+  // Sun underpainting
+  const sunR = H * (0.06 + timeOfDay * 0.04);
+  for (let i = 0; i < 8; i++) {
+    const angle = (i / 8) * Math.PI * 2;
+    const r = sunR * rand(0.5, 1.2);
+    const color = hsl(sunHue, 70, 60 + rand(-10, 10));
+    pass1.push({
+      x1: sunX + Math.cos(angle) * r * 0.5,
+      y1: sunY + Math.sin(angle) * r * 0.5,
+      x2: sunX + Math.cos(angle) * r * 1.5,
+      y2: sunY + Math.sin(angle) * r * 1.5,
+      color, width: sunR * 0.6, bristleCount: 4, impasto: false, alpha: 0.7
+    });
+  }
+
+  // Mountain underpainting
+  mountains.forEach(m => {
+    const steps = Math.ceil(m.width / (W * 0.08));
+    for (let i = 0; i < steps; i++) {
+      const t = i / steps;
+      const x = m.peakX - m.width / 2 + t * m.width;
+      const y = m.peakY + Math.abs(Math.sin(t * Math.PI)) * (H * 0.4 - m.peakY) * 0.3;
+      const color = hsl(m.hue, m.saturation, m.lightness - 5);
+      const sw = W * 0.1;
+      const dir = (x - m.peakX) / m.width;
+      pass1.push({
+        x1: x - sw * 0.5, y1: y - H * 0.02,
+        x2: x + sw * 0.5 + dir * sw * 0.3, y2: y + H * 0.06,
+        color, width: H * 0.04, bristleCount: 3, impasto: false, alpha: 0.8
+      });
+    }
+  });
+
+  // Ground underpainting - vertical strokes
+  const groundRows = 10;
+  for (let i = 0; i < groundRows; i++) {
+    const y = groundY + (i / groundRows) * (H - groundY);
+    const t = i / groundRows;
+    const hue = (groundHue + t * 20) % 360;
+    const lightness = lerp(30, 15, t);
+    const color = hsl(hue, 30 + t * 15, lightness);
+    const sh = W * (0.04 + seededRand() * 0.06);
+    const sw = H * (0.06 + seededRand() * 0.08);
+    const count = Math.ceil(W / sh) + 1;
+    for (let j = 0; j < count; j++) {
+      const x = j * sh - sw * 0.3 + rand(-sh * 0.3, sh * 0.3);
+      pass1.push({
+        x1: x + rand(-2, 2), y1: y - sw * 0.5,
+        x2: x + rand(-4, 4), y2: y + sw * 0.5,
+        color, width: sh * 1.5, bristleCount: 3, impasto: false, alpha: 0.8
+      });
+    }
+  }
+
+  // Water underpainting
+  if (hasWater) {
+    const waterRows = 6;
+    for (let i = 0; i < waterRows; i++) {
+      const y = waterY + (i / waterRows) * (H - waterY);
+      const color = hsl(skyHue + 180, 25, 25 + i * 3);
+      const sw = W * (0.15 + seededRand() * 0.2);
+      const count = Math.ceil(W / sw) + 1;
+      for (let j = 0; j < count; j++) {
+        const x = j * sw - sw * 0.3 + rand(-sw * 0.2, sw * 0.2);
+        pass1.push({
+          x1: x, y1: y + rand(-2, 2),
+          x2: x + sw, y2: y + rand(-3, 3),
+          color, width: H * 0.03, bristleCount: 2, impasto: false, alpha: 0.75
+        });
+      }
+    }
+  }
+
+  // Cloud underpainting
+  clouds.forEach(c => {
+    for (let i = 0; i < 5; i++) {
+      const color = hsl(skyHue + 10, 15, c.lightness - 10);
+      pass1.push({
+        x1: c.x - c.width * 0.5 + rand(-10, 10),
+        y1: c.y + rand(-c.height, c.height),
+        x2: c.x + c.width * 0.5 + rand(-10, 10),
+        y2: c.y + rand(-c.height, c.height),
+        color, width: c.height * 2, bristleCount: 3, impasto: false, alpha: 0.6
+      });
+    }
+  });
+
+  // === PASS 2: Refining layers ===
+  const pass2 = [];
+
+  // Sky refinement - more defined horizontal strokes
+  const skyRefRows = 20;
+  for (let i = 0; i < skyRefRows; i++) {
+    const y = (i / skyRefRows) * groundY;
+    const t = i / skyRefRows;
+    const hue = lerp(skyHue, skyHue + 25, t);
+    const lightness = lerp(30 + timeOfDay * 20, 60 + timeOfDay * 15, t);
+    const sat = lerp(45 + timeOfDay * 25, 65 + timeOfDay * 20, t);
+    const color = hsl(hue, sat, lightness);
+    const sw = W * (0.12 + seededRand() * 0.2);
+    const sh = H * (0.015 + seededRand() * 0.02);
+    const count = Math.ceil(W / (sw * 0.7)) + 1;
+    for (let j = 0; j < count; j++) {
+      const x = j * sw * 0.7 - sh + rand(-sw * 0.2, sw * 0.2);
+      pass2.push({
+        x1: x, y1: y + rand(-sh, sh),
+        x2: x + sw + rand(-sh, sh), y2: y + rand(-sh, sh),
+        color, width: sh * 2.5, bristleCount: 5, impasto: true, alpha: 0.75
+      });
+    }
+  }
+
+  // Sun refinement
+  for (let i = 0; i < 15; i++) {
+    const angle = (i / 15) * Math.PI * 2 + rand(-0.2, 0.2);
+    const r = sunR * rand(0.3, 1.0);
+    const lightness = 65 + rand(-5, 10);
+    const color = hsl(sunHue + rand(-10, 10), 75, lightness);
+    pass2.push({
+      x1: sunX + Math.cos(angle) * r * 0.3,
+      y1: sunY + Math.sin(angle) * r * 0.3,
+      x2: sunX + Math.cos(angle) * r * 1.2,
+      y2: sunY + Math.sin(angle) * r * 1.2,
+      color, width: sunR * 0.35, bristleCount: 6, impasto: true, alpha: 0.7
+    });
+  }
+
+  // Mountain refinement
+  mountains.forEach(m => {
+    const steps = Math.ceil(m.width / (W * 0.04));
+    for (let i = 0; i < steps; i++) {
+      const t = i / steps;
+      const x = m.peakX - m.width / 2 + t * m.width;
+      const slope = Math.sin(t * Math.PI);
+      const y = m.peakY + slope * (H * 0.35 - m.peakY) * 0.5;
+      const lightness = m.lightness + slope * 15;
+      const color = hsl(m.hue + rand(-5, 5), m.saturation + 10, lightness);
+      const sw = W * 0.05;
+      const dir = (x - m.peakX) / m.width;
+      pass2.push({
+        x1: x - sw * 0.4, y1: y - H * 0.015,
+        x2: x + sw * 0.4 + dir * sw * 0.5, y2: y + H * 0.04,
+        color, width: H * 0.025, bristleCount: 5, impasto: true, alpha: 0.75
+      });
+    }
+    // Snow caps
+    if (m.peakY < H * 0.35) {
+      for (let i = 0; i < 6; i++) {
+        const sx = m.peakX + rand(-m.width * 0.1, m.width * 0.1);
+        const sy = m.peakY + rand(-H * 0.01, H * 0.03);
+        pass2.push({
+          x1: sx, y1: sy,
+          x2: sx + rand(-10, 10), y2: sy + rand(-5, 8),
+          color: hsl(40, 10, 85 + rand(-5, 5)),
+          width: H * 0.015, bristleCount: 4, impasto: true, alpha: 0.8
+        });
+      }
+    }
+  });
+
+  // Ground refinement - vertical strokes with more variation
+  const groundRefRows = 15;
+  for (let i = 0; i < groundRefRows; i++) {
+    const y = groundY + (i / groundRefRows) * (H - groundY);
+    const t = i / groundRows;
+    const hue = (groundHue + t * 30 + rand(-10, 10)) % 360;
+    const lightness = lerp(35, 18, t) + rand(-3, 3);
+    const sat = 35 + t * 20 + rand(-5, 5);
+    const color = hsl(hue, sat, lightness);
+    const sh = W * (0.02 + seededRand() * 0.04);
+    const sw = H * (0.04 + seededRand() * 0.06);
+    const count = Math.ceil(W / (sh * 0.6)) + 1;
+    for (let j = 0; j < count; j++) {
+      const x = j * sh * 0.6 - sw * 0.2 + rand(-sh * 0.2, sh * 0.2);
+      pass2.push({
+        x1: x + rand(-1, 1), y1: y - sw * 0.4,
+        x2: x + rand(-3, 3), y2: y + sw * 0.4,
+        color, width: sh * 1.8, bristleCount: 5, impasto: true, alpha: 0.7
+      });
+    }
+  }
+
+  // Water refinement
+  if (hasWater) {
+    const waterRefRows = 10;
+    for (let i = 0; i < waterRefRows; i++) {
+      const y = waterY + (i / waterRefRows) * (H - waterY);
+      const t = i / waterRefRows;
+      const hue = (skyHue + 180 + rand(-10, 10)) % 360;
+      const lightness = 30 + t * 15 + rand(-3, 3);
+      const color = hsl(hue, 20 + rand(-5, 5), lightness);
+      const sw = W * (0.08 + seededRand() * 0.15);
+      const count = Math.ceil(W / (sw * 0.6)) + 1;
+      for (let j = 0; j < count; j++) {
+        const x = j * sw * 0.6 - sw * 0.2 + rand(-sw * 0.15, sw * 0.15);
+        pass2.push({
+          x1: x, y1: y + rand(-1, 1),
+          x2: x + sw, y2: y + rand(-2, 2),
+          color, width: H * 0.02, bristleCount: 4, impasto: true, alpha: 0.65
+        });
+      }
+    }
+    // Water reflections
+    for (let i = 0; i < 20; i++) {
+      const rx = rand(0, W);
+      const ry = waterY + rand(0, H - waterY);
+      const color = hsl(sunHue + rand(-20, 20), 40, 50 + rand(-10, 10));
+      pass2.push({
+        x1: rx, y1: ry,
+        x2: rx + rand(-30, 30), y2: ry + rand(-1, 1),
+        color, width: H * 0.008, bristleCount: 3, impasto: true, alpha: 0.4
+      });
+    }
+  }
+
+  // Cloud refinement
+  clouds.forEach(c => {
+    for (let i = 0; i < 10; i++) {
+      const color = hsl(skyHue + 10 + rand(-5, 5), 10 + rand(-3, 3), c.lightness + rand(-5, 5));
+      pass2.push({
+        x1: c.x - c.width * 0.5 + rand(-c.width * 0.1, c.width * 0.1),
+        y1: c.y + rand(-c.height * 1.2, c.height * 1.2),
+        x2: c.x + c.width * 0.5 + rand(-c.width * 0.1, c.width * 0.1),
+        y2: c.y + rand(-c.height * 1.2, c.height * 1.2),
+        color, width: c.height * 2.5, bristleCount: 5, impasto: true, alpha: 0.55
+      });
+    }
+  });
+
+  // Trees
+  trees.forEach(tr => {
+    // Trunk
+    for (let i = 0; i < 4; i++) {
+      pass2.push({
+        x1: tr.x + rand(-3, 3), y1: tr.baseY,
+        x2: tr.x + rand(-3, 3), y2: tr.baseY - tr.height * 0.4,
+        color: hsl(25, 30, 20 + rand(-5, 5)),
+        width: tr.width * 0.4, bristleCount: 4, impasto: true, alpha: 0.8
+      });
+    }
+    // Foliage
+    for (let i = 0; i < 8; i++) {
+      const fx = tr.x + rand(-tr.width, tr.width);
+      const fy = tr.baseY - tr.height * 0.3 - rand(0, tr.height * 0.7);
+      const color = hsl(tr.hue + rand(-10, 10), 35 + rand(-5, 5), tr.lightness + rand(-5, 5));
+      pass2.push({
+        x1: fx, y1: fy,
+        x2: fx + rand(-tr.width * 0.6, tr.width * 0.6),
+        y2: fy + rand(-tr.height * 0.15, tr.height * 0.15),
+        color, width: tr.width * 1.2, bristleCount: 5, impasto: true, alpha: 0.7
+      });
+    }
+  });
+
+  // === PASS 3: Highlight flecks ===
+  const pass3 = [];
+
+  // Sky highlights
+  for (let i = 0; i < 40; i++) {
+    const x = rand(0, W);
+    const y = rand(0, groundY * 0.7);
+    const t = y / groundY;
+    const hue = lerp(skyHue, skyHue + 30, t) + rand(-10, 10);
+    const color = hsl(hue, 50 + rand(0, 20), 65 + rand(-5, 15));
+    pass3.push({
+      x1: x, y1: y,
+      x2: x + rand(-15, 15), y2: y + rand(-2, 2),
+      color, width: rand(2, 6), bristleCount: 2, impasto: true, alpha: 0.6
+    });
+  }
+
+  // Sun glow flecks
+  for (let i = 0; i < 30; i++) {
+    const angle = rand(0, Math.PI * 2);
+    const dist = rand(sunR * 0.5, sunR * 2.5);
+    const x = sunX + Math.cos(angle) * dist;
+    const y = sunY + Math.sin(angle) * dist;
+    const color = hsl(sunHue + rand(-15, 15), 80, 70 + rand(-10, 15));
+    pass3.push({
+      x1: x, y1: y,
+      x2: x + Math.cos(angle) * rand(3, 12),
+      y2: y + Math.sin(angle) * rand(3, 12),
+      color, width: rand(1.5, 4), bristleCount: 2, impasto: true, alpha: 0.5
+    });
+  }
+
+  // Mountain highlights (ridge edges)
+  mountains.forEach(m => {
+    for (let i = 0; i < 15; i++) {
+      const t = rand(0, 1);
+      const x = m.peakX - m.width / 2 + t * m.width;
+      const slope = Math.sin(t * Math.PI);
+      const y = m.peakY + slope * (H * 0.35 - m.peakY) * 0.5 - H * 0.01;
+      const color = hsl(m.hue + rand(-5, 5), m.saturation + 15, m.lightness + 20 + rand(-3, 3));
+      const dir = (x - m.peakX) / m.width;
+      pass3.push({
+        x1: x, y1: y,
+        x2: x + dir * rand(5, 20), y2: y + rand(-2, 5),
+        color, width: rand(2, 5), bristleCount: 3, impasto: true, alpha: 0.65
+      });
+    }
+  });
+
+  // Grass highlights - vertical flecks
+  for (let i = 0; i < 60; i++) {
+    const x = rand(0, W);
+    const y = groundY + rand(0, (H - groundY) * 0.5);
+    const hue = (groundHue + rand(-15, 15)) % 360;
+    const color = hsl(hue, 40 + rand(0, 20), 40 + rand(-5, 15));
+    pass3.push({
+      x1: x, y1: y,
+      x2: x + rand(-2, 2), y2: y - rand(5, 20),
+      color, width: rand(1.5, 4), bristleCount: 2, impasto: true, alpha: 0.55
+    });
+  }
+
+  // Water sparkles
+  if (hasWater) {
+    for (let i = 0; i < 35; i++) {
+      const x = rand(0, W);
+      const y = waterY + rand(0, H - waterY);
+      const color = hsl(sunHue + rand(-20, 20), 50 + rand(0, 30), 60 + rand(-5, 20));
+      pass3.push({
+        x1: x, y1: y,
+        x2: x + rand(-12, 12), y2: y + rand(-1, 1),
+        color, width: rand(1, 3), bristleCount: 2, impasto: true, alpha: 0.5
+      });
+    }
+  }
+
+  // Cloud highlights
+  clouds.forEach(c => {
+    for (let i = 0; i < 8; i++) {
+      const x = c.x + rand(-c.width * 0.4, c.width * 0.4);
+      const y = c.y + rand(-c.height, c.height);
+      const color = hsl(skyHue + 15, 10, 90 + rand(-5, 5));
+      pass3.push({
+        x1: x, y1: y,
+        x2: x + rand(-8, 8), y2: y + rand(-3, 3),
+        color, width: rand(2, 5), bristleCount: 2, impasto: true, alpha: 0.45
+      });
+    }
+  });
+
+  // Tree highlights
+  trees.forEach(tr => {
+    for (let i = 0; i < 6; i++) {
+      const fx = tr.x + rand(-tr.width * 0.5, tr.width * 0.5);
+      const fy = tr.baseY - tr.height * 0.4 - rand(0, tr.height * 0.5);
+      const color = hsl(tr.hue + rand(-5, 5), 45, tr.lightness + 20 + rand(-3, 3));
+      pass3.push({
+        x1: fx, y1: fy,
+        x2: fx + rand(-tr.width * 0.3, tr.width * 0.3),
+        y2: fy + rand(-3, 3),
+        color, width: rand(2, 5), bristleCount: 3, impasto: true, alpha: 0.55
+      });
+    }
+  });
+
+  return [pass1, pass2, pass3];
+}
+
+// Animation state
+let allStrokes = [];
+let currentPass = 0;
+let strokeIndex = 0;
+let animPhase = 'painting'; // 'painting', 'signature', 'reset'
+let signatureProgress = 0;
+let strokesDrawn = 0;
+let totalStrokes = 0;
+let cycleTimer = 0;
+let resetTimer = 0;
+
+function initCycle() {
+  generateLandscape();
+  allStrokes = generateStrokes();
+  totalStrokes = allStrokes.reduce((s, p) => s + p.length, 0);
+  currentPass = 0;
+  strokeIndex = 0;
+  animPhase = 'painting';
+  strokesDrawn = 0;
+  signatureProgress = 0;
+  cycleTimer = 0;
+  resetTimer = 0;
+
+  // Fill canvas with canvas texture
+  ctx.fillStyle = '#e8dcc8';
+  ctx.fillRect(0, 0, W, H);
+  // Canvas grain
+  for (let i = 0; i < W * H * 0.001; i++) {
+    ctx.fillStyle = `rgba(${randInt(200, 230)},${randInt(190, 220)},${randInt(170, 200)},0.3)`;
+    ctx.fillRect(rand(0, W), rand(0, H), rand(1, 3), rand(1, 3));
+  }
+}
+
+// Signature drawing
+function drawSignature(progress) {
+  const sigX = W * 0.78;
+  const sigY = H * 0.92;
+  const chars = ['A', 'r', 't', 'i', 's', 't', 'e'];
+  const totalLen = chars.length * 20;
+  const drawnLen = progress * totalLen;
+
+  ctx.save();
+  ctx.translate(sigX, sigY);
+  ctx.font = `italic ${H * 0.035}px Georgia, serif`;
+  ctx.fillStyle = `rgba(30, 20, 15, ${0.6 + progress * 0.3})`;
+  ctx.strokeStyle = `rgba(20, 15, 10, ${0.4 + progress * 0.3})`;
+  ctx.lineWidth = 1;
+
+  // Draw characters progressively
+  let xOff = 0;
+  for (let i = 0; i < chars.length; i++) {
+    const charX = xOff;
+    if (drawnLen > i * 20) {
+      const charProgress = Math.min(1, (drawnLen - i * 20) / 20);
+      ctx.globalAlpha = charProgress;
+      ctx.fillText(chars[i], charX, 0);
+      ctx.strokeText(chars[i], charX, 0);
+    }
+    xOff += 20;
+  }
+
+  // Flourish underline
+  if (progress > 0.7) {
+    const lineProgress = (progress - 0.7) / 0.3;
+    ctx.beginPath();
+    ctx.moveTo(-10, H * 0.015);
+    ctx.quadraticCurveTo(
+      (xOff / 2) * lineProgress, H * 0.025 + Math.sin(lineProgress * Math.PI) * 5,
+      xOff * lineProgress, H * 0.015
+    );
+    ctx.strokeStyle = `rgba(30, 20, 15, ${0.5 * lineProgress})`;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Flourish swirl
+    if (progress > 0.85) {
+      const swirlProgress = (progress - 0.85) / 0.15;
+      ctx.beginPath();
+      ctx.arc(xOff * lineProgress + 10, H * 0.01, 8 * swirlProgress, 0, Math.PI * 2 * swirlProgress);
+      ctx.strokeStyle = `rgba(30, 20, 15, ${0.4 * swirlProgress})`;
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+    }
+  }
+
+  ctx.restore();
+}
+
+// Main loop
+let lastTime = 0;
+function animate(time) {
+  const dt = Math.min((time - lastTime) / 1000, 0.05);
+  lastTime = time;
+
+  if (animPhase === 'painting') {
+    cycleTimer += dt;
+
+    // Speed increases slightly over time
+    const speed = 3 + cycleTimer * 0.3;
+    const strokesThisFrame = Math.max(1, Math.floor(speed));
+
+    for (let s = 0; s < strokesThisFrame; s++) {
+      if (currentPass >= allStrokes.length) {
+        animPhase = 'signature';
+        break;
+      }
+
+      if (strokeIndex >= allStrokes[currentPass].length) {
+        currentPass++;
+        strokeIndex = 0;
+        if (currentPass >= allStrokes.length) {
+          animPhase = 'signature';
+          break;
         }
+        continue;
+      }
 
-        window.addEventListener('resize', resize);
-        resize();
+      const stroke = allStrokes[currentPass][strokeIndex];
+      drawBrushStroke(stroke.x1, stroke.y1, stroke.x2, stroke.y2, stroke.color, stroke.width, stroke.alpha, stroke.bristleCount, stroke.impasto);
+      strokeIndex++;
+      strokesDrawn++;
+    }
 
-        // --- Geometry & Noise ---
+    // Pass transition: slight pause
+    if (strokeIndex >= allStrokes[currentPass]?.length && currentPass < allStrokes.length - 1) {
+      currentPass++;
+      strokeIndex = 0;
+    }
+  }
 
-        // Simple pseudo-random noise for hills
-        function noise(x) {
-            return Math.sin(x * 0.01) * 100 + Math.sin(x * 0.03) * 50 + Math.sin(x * 0.1) * 20;
-        }
+  if (animPhase === 'signature') {
+    signatureProgress += dt * 0.4;
+    if (signatureProgress >= 1) {
+      signatureProgress = 1;
+      animPhase = 'reset';
+      resetTimer = 0;
+    }
+    drawSignature(signatureProgress);
+  }
 
-        function generateTerrain() {
-            const paletteKey = Object.keys(Palettes)[Math.floor(Math.random() * Object.keys(Palettes).length)];
-            const colors = Palettes[paletteKey];
-            const horizonY = height * 0.4 + (Math.random() * 100 - 50);
-            
-            // Generate Stroke Data
-            strokes = [];
+  if (animPhase === 'reset') {
+    resetTimer += dt;
+    if (resetTimer > 3) {
+      initCycle();
+    }
+  }
 
-            // 1. SKY LAYERS (Horizontal)
-            // We divide the sky into bands
-            const skySteps = 8;
-            for (let y = 0; y < horizonY; y += (horizonY / skySteps)) {
-                const colorIdx = Math.floor((y / horizonY) * (colors.sky.length - 1));
-                const c = colors.sky[colorIdx];
-                const nextC = colors.sky[Math.min(colorIdx + 1, colors.sky.length - 1)];
-                
-                // Create broad horizontal strokes
-                const strokeW = width / (Math.random() * 2 + 3); 
-                const strokeH = (horizonY / skySteps) * 1.5; // Overlap
-                
-                for (let x = 0; x < width; x += strokeW * 0.7) {
-                    strokes.push({
-                        type: 'sky',
-                        x: x,
-                        y: y,
-                        w: strokeW + Math.random() * 50,
-                        h: strokeH,
-                        color: lerpColor(c, nextC, Math.random()),
-                        angle: (Math.random() - 0.5) * 0.05, // Mostly horizontal
-                        layer: 0
-                    });
-                }
-            }
+  requestAnimationFrame(animate);
+}
 
-            // 2. HILLS (Contour-ish)
-            const hillLayers = 3;
-            for (let h = 0; h < hillLayers; h++) {
-                const baseY = horizonY + (h * (height - horizonY) / hillLayers);
-                const colorIdx = Math.floor((h / hillLayers) * (colors.ground.length - 1));
-                const c = colors.ground[colorIdx];
-                
-                // Draw a strip of strokes following the noise curve
-                const sliceHeight = (height - horizonY) / hillLayers * 1.5;
-                
-                for (let x = 0; x < width; x += 40 + Math.random() * 30) {
-                    const n = noise(x + h * 500);
-                    const yPos = baseY + n;
-                    
-                    strokes.push({
-                        type: 'hill',
-                        x: x,
-                        y: yPos,
-                        w: 50 + Math.random() * 40,
-                        h: sliceHeight / 2,
-                        color: c,
-                        angle: Math.atan2(noise(x + 5) - noise(x - 5), 10), // Tangent to slope
-                        layer: 1
-                    });
-                }
-            }
-
-            // 3. FOREGROUND (Vertical/Diagonal texture)
-            const fgY = height * 0.75;
-            const fgColor = colors.ground[colors.ground.length - 1];
-            
-            for (let y = fgY; y < height; y += 20) {
-                for (let x = 0; x < width; x += 30) {
-                    // Only paint if we are "below" the hills (simple depth check)
-                    const hillHeight = horizonY + noise(x) + (height-horizonY)/3; // Approximate front hill
-                    if (y > hillHeight) {
-                        strokes.push({
-                            type: 'grass',
-                            x: x,
-                            y: y,
-                            w: 10 + Math.random() * 15,
-                            h: 40 + Math.random() * 60,
-                            color: lerpColor(fgColor, colors.accent[0], Math.random() * 0.3),
-                            angle: (Math.random() - 0.5) * 0.5, // Mostly vertical
-                            layer: 2
-                        });
-                    }
-                }
-            }
-
-            // 4. HIGHLIGHTS / FLECKS (Impasto)
-            for(let i=0; i<50; i++) {
-                const x = Math.random() * width;
-                const y = Math.random() * height;
-                strokes.push({
-                    type: 'fleck',
-                    x: x,
-                    y: y,
-                    w: 5 + Math.random() * 10,
-                    h: 5 + Math.random() * 10,
-                    color: colors.accent[Math.floor(Math.random()*colors.accent.length)],
-                    angle: Math.random() * Math.PI,
-                    layer: 3
-                });
-            }
-            
-            // Sort by layer
-            strokes.sort((a, b) => a.layer - b.layer);
-        }
-
-        // --- Drawing Utilities ---
-
-        function hexToRgb(hex) {
-            const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-            return result ? {
-                r: parseInt(result[1], 16),
-                g: parseInt(result[2], 16),
-                b: parseInt(result[3], 16)
-            } : null;
-        }
-
-        function lerpColor(c1, c2, t) {
-            const rgb1 = hexToRgb(c1);
-            const rgb2 = hexToRgb(c2);
-            const r = Math.round(rgb1.r + (rgb2.r - rgb1.r) * t);
-            const g = Math.round(rgb1.g + (rgb2.g - rgb1.g) * t);
-            const b = Math.round(rgb1.b + (rgb2.b - rgb1.b) * t);
-            return `rgb(${r},${g},${b})`;
-        }
-
-        function drawBristleStroke(ctx, stroke, progress) {
-            ctx.save();
-            ctx.translate(stroke.x, stroke.y);
-            ctx.rotate(stroke.angle);
-
-            // Clip to reveal progress
-            ctx.beginPath();
-            ctx.rect(-stroke.w/2, -stroke.h/2, stroke.w * progress, stroke.h);
-            ctx.clip();
-
-            // Base color
-            ctx.fillStyle = stroke.color;
-            ctx.fillRect(-stroke.w/2, -stroke.h/2, stroke.w, stroke.h);
-
-            // Impasto / Texture Effect
-            // We draw darker/lighter streaks to simulate bristles
-            ctx.globalCompositeOperation = 'source-atop';
-            
-            const bristleCount = Math.floor(stroke.w / 3);
-            for(let i=0; i<bristleCount; i++) {
-                const bx = (Math.random() - 0.5) * stroke.w;
-                const bh = (Math.random() * 0.8 + 0.2) * stroke.h;
-                
-                // Shadow (bristle gap)
-                ctx.fillStyle = 'rgba(0,0,0,0.15)';
-                ctx.fillRect(bx, -stroke.h/2, 1, bh);
-                
-                // Highlight (paint ridge)
-                ctx.fillStyle = 'rgba(255,255,255,0.1)';
-                ctx.fillRect(bx + 1, -stroke.h/2, 1, bh);
-            }
-
-            // Soften edges slightly (canvas doesn't have perfect blending for this, but we can try)
-            ctx.globalCompositeOperation = 'source-over';
-            
-            ctx.restore();
-        }
-
-        function drawSignature(ctx) {
-            ctx.save();
-            ctx.translate(width - 150, height - 50);
-            ctx.strokeStyle = '#111';
-            ctx.lineWidth = 2;
-            ctx.lineCap = 'round';
-            ctx.lineJoin = 'round';
-            
-            // Procedural scribble signature
-            ctx.beginPath();
-            ctx.moveTo(0, 0);
-            ctx.bezierCurveTo(20, -20, 40, 20, 60, 0);
-            ctx.bezierCurveTo(80, -20, 100, 20, 120, 0);
-            ctx.stroke();
-            
-            ctx.font = "italic 14px serif";
-            ctx.fillStyle = "#111";
-            ctx.fillText("AI Painter", 10, 30);
-            ctx.restore();
-        }
-
-        // --- Animation Loop ---
-
-        function animate() {
-            if (!isPainting) return;
-
-            // Clear only if starting a new cycle (handled in reset)
-            
-            // Paint logic
-            // We paint in batches to speed it up
-            const batchSize = 3 + Math.floor(currentStrokeIndex / 100); // Speed up as we go
-            
-            for (let i = 0; i < batchSize && currentStrokeIndex < strokes.length; i++) {
-                const s = strokes[currentStrokeIndex];
-                
-                // If stroke is new, init its progress
-                if (!s.progress) s.progress = 0;
-                
-                // Animate progress
-                s.progress += 0.1;
-                
-                // Draw the stroke
-                // To make it look like it's building up, we redraw the whole stroke 
-                // but clipped to the progress width? 
-                // Actually, simpler: Draw the stroke fully, but mask it?
-                // Or just draw segments.
-                
-                // Let's use a simpler approach: Draw the stroke fully. 
-                // To simulate "writing", we can just draw it. 
-                // But the prompt asks for "emerges".
-                
-                // Optimized approach: Just draw the stroke. 
-                // To make it look like a stroke being laid down, we draw the rect.
-                
-                ctx.save();
-                ctx.translate(s.x, s.y);
-                ctx.rotate(s.angle);
-                
-                // The visual of the stroke
-                // We simulate the "wet paint" look by drawing slightly larger with shadow
-                ctx.shadowColor = "rgba(0,0,0,0.2)";
-                ctx.shadowBlur = 4;
-                ctx.shadowOffsetX = 2;
-                ctx.shadowOffsetY = 2;
-
-                ctx.fillStyle = s.color;
-                
-                // Draw main body
-                ctx.beginPath();
-                // Slightly irregular rect for brush feel
-                ctx.moveTo(-s.w/2, -s.h/2);
-                ctx.lineTo(s.w/2, -s.h/2 + (Math.random()*4-2));
-                ctx.lineTo(s.w/2, s.h/2);
-                ctx.lineTo(-s.w/2, s.h/2 + (Math.random()*4-2));
-                ctx.fill();
-
-                // Bristles (Impasto detail)
-                ctx.shadowColor = "transparent"; // Remove shadow for details
-                ctx.globalCompositeOperation = 'source-atop';
-                
-                // Add texture lines
-                const numLines = Math.floor(s.w / 4);
-                for(let k=0; k<numLines; k++) {
-                    const lx = (Math.random() - 0.5) * s.w;
-                    const lh = s.h * (0.5 + Math.random() * 0.5);
-                    
-                    // Shadow line
-                    ctx.fillStyle = 'rgba(0,0,0,0.1)';
-                    ctx.fillRect(lx, -s.h/2, 2, lh);
-                    
-                    // Highlight line
-                    ctx.fillStyle = 'rgba(255,255,255,0.15)';
-                    ctx.fillRect(lx + 1, -s.h/2, 1, lh);
-                }
-                
-                ctx.restore();
-
-                currentStrokeIndex++;
-            }
-
-            if (currentStrokeIndex >= strokes.length) {
-                // Finished painting
-                isPainting = false;
-                drawSignature(ctx);
-                ui.innerText = "Completed. Resetting in 5s...";
-                
-                setTimeout(() => {
-                    resetCanvas();
-                }, 5000);
-            } else {
-                animationId = requestAnimationFrame(animate);
-            }
-        }
-
-        function resetCanvas() {
-            if (animationId) cancelAnimationFrame(animationId);
-            
-            // Fade out effect
-            ctx.fillStyle = 'rgba(245, 240, 230, 0.1)'; // Canvas paper color
-            ctx.fillRect(0, 0, width, height);
-            
-            // If fully faded or just reset immediately? Let's reset immediately for flow
-            ctx.fillStyle = '#f5f0e6'; // Off-white canvas
-            ctx.fillRect(0, 0, width, height);
-            
-            // Add canvas texture noise
-            const imageData = ctx.getImageData(0, 0, width, height);
-            const data = imageData.data;
-            for (let i = 0; i < data.length; i += 4) {
-                const noise = (Math.random() - 0.5) * 10;
-                data[i] += noise;
-                data[i+1] += noise;
-                data[i+2] += noise;
-            }
-            ctx.putImageData(imageData, 0, 0);
-
-            currentStrokeIndex = 0;
-            generateTerrain();
-            isPainting = true;
-            ui.innerText = "Painting...";
-            animate();
-        }
-
-        // Start
-        resetCanvas();
-
-    </script>
+initCycle();
+requestAnimationFrame(animate);
+</script>
 </body>
 </html>

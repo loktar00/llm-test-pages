@@ -1,333 +1,455 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Game of Life Factory</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            background-color: #050505;
-            overflow: hidden;
-        }
-        canvas {
-            display: block;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Game of Life Factory</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; width: 100%; height: 100%; }
+</style>
 </head>
 <body>
-<canvas id="lifeCanvas"></canvas>
+<canvas id="c"></canvas>
 <script>
-/**
- * Conway's Game of Life - Factory Mode
- * Features:
- * - Fullscreen Canvas
- * - Known patterns (Glider Guns, Puffers, Spaceships)
- * - Age-based coloring
- * - Activity threshold for reset
- * - Wipe transition effect
- * - Toroidal (wrapping) grid
- */
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
 
-const canvas = document.getElementById('lifeCanvas');
-const ctx = canvas.getContext('2d', { alpha: false });
-
-// Configuration
-const CELL_SIZE = 4;
-const FPS_TARGET = 60;
-const ACTIVITY_THRESHOLD = 0.0005; // Percentage of population change to trigger reset
-const RESET_COOLDOWN = 180; // Frames before next reset check
-const WIPE_SPEED = 20; // Pixels per frame
-
-// State
-let width, height, cols, rows;
-let grid, nextGrid;
-let cellAge; // Stores age of living cells
-let population = 0;
-let lastPopulation = 0;
-let frameCount = 0;
-let wipeY = 0;
-let isWiping = false;
-let wipeDirection = 1; // 1 for down, -1 for up
-let generationTimer = 0;
-
-// Patterns
-const patterns = {
-    gliderGun: [
-        "                   O  ",
-        "                  O O ",
-        "        OO       O    ",
-        "       O  O      O    ",
-        "OO      O  O      OOO ",
-        " OO     OO        O   ",
-        "  O O            O    ",
-        "   O             O    ",
-        "    OO            OO  "
-    ],
-    lwss: [ // Light Weight Spaceship
-        " O  O",
-        "  O  ",
-        "  O  ",
-        "  OOO"
-    ],
-    puffer: [ // Simple Puffer
-        "  OO  ",
-        " O  O ",
-        "OO    ",
-        "  OO  ",
-        "  OO  ",
-        " O  O ",
-        "  OO  "
-    ]
-};
+let W, H, cols, rows, cellSize;
+let grid, nextGrid, ages, nextAges;
+let generation = 0;
+let activityHistory = [];
+const HISTORY_LEN = 120;
+const ACTIVITY_THRESHOLD = 150;
+const QUIET_FRAMES = 180;
+let quietCounter = 0;
+let sweeping = false;
+let sweepY = 0;
+let sweepSpeed = 4;
+let sweepPhase = 0;
+let fadeAlpha = 0;
+let seedTimer = 0;
 
 function resize() {
-    width = window.innerWidth;
-    height = window.innerHeight;
-    canvas.width = width;
-    canvas.height = height;
-    cols = Math.floor(width / CELL_SIZE);
-    rows = Math.floor(height / CELL_SIZE);
-    initGrids();
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  cellSize = Math.max(3, Math.min(Math.floor(W / 250), Math.floor(H / 160)));
+  cols = Math.ceil(W / cellSize);
+  rows = Math.ceil(H / cellSize);
+  initGrid();
+  seedFactory();
 }
 
-function initGrids() {
-    grid = new Uint8Array(cols * rows);
-    nextGrid = new Uint8Array(cols * rows);
-    cellAge = new Int16Array(cols * rows); // 16-bit signed is enough for this
-    populateRandomFactory();
+function initGrid() {
+  const size = cols * rows;
+  grid = new Uint8Array(size);
+  nextGrid = new Uint8Array(size);
+  ages = new Uint16Array(size);
+  nextAges = new Uint16Array(size);
+  generation = 0;
+  activityHistory = [];
+  quietCounter = 0;
+  sweeping = false;
+  sweepY = 0;
+  fadeAlpha = 0;
 }
 
 function idx(x, y) {
-    return y * cols + x;
+  return ((y % rows) + rows) % rows * cols + ((x % cols) + cols) % cols;
 }
 
-function getCell(x, y) {
-    // Wrap coordinates
-    const wx = (x + cols) % cols;
-    const wy = (y + rows) % rows;
-    return grid[idx(wx, wy)];
+function setCell(x, y, v) {
+  const i = idx(x, y);
+  grid[i] = v;
+  if (v) ages[i] = 0;
 }
 
-function setCell(x, y, val, age = 1) {
-    const wx = (x + cols) % cols;
-    const wy = (y + rows) % rows;
-    const i = idx(wx, wy);
-    grid[i] = val;
-    if (val) cellAge[i] = age;
-    else cellAge[i] = 0;
+function countLive() {
+  let count = 0;
+  for (let i = 0; i < grid.length; i++) {
+    if (grid[i]) count++;
+  }
+  return count;
 }
 
-// Parse pattern string to grid data
-function parsePattern(patternKey, startX, startY) {
-    const pat = patterns[patternKey];
-    if (!pat) return;
+// Pattern definitions
+const patterns = {
+  glider: [[0,1],[1,2],[2,0],[2,1],[2,2]],
+  lwss: [[0,1],[0,3],[1,4],[2,0],[2,4],[3,0],[3,1],[3,2],[3,3]],
+  mwss: [[0,1],[0,3],[0,4],[1,4],[2,0],[2,4],[3,0],[3,1],[3,2],[3,3],[4,0],[4,1],[4,2],[4,3]],
+  hwss: [[0,1],[0,3],[0,4],[0,5],[1,4],[1,5],[2,0],[2,5],[3,0],[3,1],[3,2],[3,3],[4,0],[4,1],[4,2],[4,3]],
+  block: [[0,0],[0,1],[1,0],[1,1]],
+  beehive: [[0,1],[0,2],[1,0],[1,3],[2,1],[2,2]],
+  loaf: [[0,1],[0,2],[1,0],[1,3],[2,1],[2,3],[3,2]],
+  tub: [[0,1],[1,0],[1,2],[2,1]],
+  blinker: [[0,0],[0,1],[0,2]],
+  toad: [[0,1],[0,2],[0,3],[1,0],[1,1],[1,2]],
+  beacon: [[0,0],[0,1],[1,0],[1,1],[2,2],[2,3],[3,2],[3,3]],
+};
 
-    pat.forEach((rowStr, y) => {
-        for (let x = 0; x < rowStr.length; x++) {
-            if (rowStr[x] === 'O') {
-                setCell(startX + x, startY + y, 1);
-            }
+// Gosper Glider Gun
+const gosperGun = [
+  [0,4],[0,5],[1,4],[1,5],
+  [10,4],[10,5],[10,6],[11,3],[11,7],[12,2],[12,8],[13,2],[13,8],
+  [14,5],[15,3],[15,7],[16,4],[16,5],[16,6],[17,5],
+  [20,2],[20,3],[20,4],[21,2],[21,3],[21,4],[22,1],[22,5],[24,0],[24,1],[24,5],[24,6],
+  [34,2],[34,3],[35,2],[35,3]
+];
+
+// R-pentomino (chaotic)
+const rPentomino = [[0,1],[0,2],[1,0],[1,1],[2,0]];
+
+// Acorn (long-lived)
+const acorn = [[0,1],[1,3],[2,0],[2,1],[2,4],[2,5],[2,6]];
+
+// Diehard (dies after 130 gens)
+const diehard = [[0,6],[1,0],[1,1],[2,1],[2,5],[2,6],[2,7]];
+
+// Pulsar (period 3 oscillator)
+const pulsar = [];
+const pRow = [1,2,3,5,6,7,9,10,11];
+for (const r of pRow) {
+  pulsar.push([r, 0]); pulsar.push([r, 8]);
+}
+for (const c of pRow) {
+  pulsar.push([0, c]); pulsar.push([8, c]);
+}
+for (const r of [4]) {
+  for (const c of [1,2,3,5,6,7]) {
+    pulsar.push([r, c]);
+  }
+}
+
+function placePattern(pat, ox, oy) {
+  for (const [dx, dy] of pat) {
+    setCell(ox + dx, oy + dy, 1);
+  }
+}
+
+function randomPos(margin) {
+  return {
+    x: margin + Math.floor(Math.random() * (cols - 2 * margin)),
+    y: margin + Math.floor(Math.random() * (rows - 2 * margin))
+  };
+}
+
+function seedFactory() {
+  grid.fill(0);
+  ages.fill(0);
+  generation = 0;
+
+  const margin = 20;
+
+  // Place 2-3 glider guns at different angles
+  const gunCount = 2 + Math.floor(Math.random() * 2);
+  for (let g = 0; g < gunCount; g++) {
+    const pos = randomPos(margin + 20);
+    const flipped = Math.random() > 0.5;
+    const rotated = Math.random() > 0.5;
+    for (const [dx, dy] of gosperGun) {
+      let fx = dx, fy = dy;
+      if (flipped) { fx = dx; fy = -dy; }
+      if (rotated) { const t = fx; fx = fy; fy = t; }
+      setCell(pos.x + fx, pos.y + fy, 1);
+    }
+  }
+
+  // Place spaceships
+  const shipTypes = ['lwss', 'mwss', 'hwss'];
+  for (let i = 0; i < 4 + Math.floor(Math.random() * 4); i++) {
+    const type = shipTypes[Math.floor(Math.random() * shipTypes.length)];
+    const pos = randomPos(margin);
+    const dir = Math.floor(Math.random() * 4);
+    for (const [dx, dy] of patterns[type]) {
+      let fx = dx, fy = dy;
+      for (let r = 0; r < dir; r++) { const t = fx; fx = -fy; fy = t; }
+      setCell(pos.x + fx, pos.y + fy, 1);
+    }
+  }
+
+  // Place gliders aimed at each other
+  for (let i = 0; i < 8 + Math.floor(Math.random() * 8); i++) {
+    const pos = randomPos(margin);
+    const dir = Math.floor(Math.random() * 4);
+    for (const [dx, dy] of patterns.glider) {
+      let fx = dx, fy = dy;
+      for (let r = 0; r < dir; r++) { const t = fx; fx = -fy; fy = t; }
+      setCell(pos.x + fx, pos.y + fy, 1);
+    }
+  }
+
+  // Place some chaotic seeds
+  for (let i = 0; i < 3; i++) {
+    const pos = randomPos(margin + 10);
+    const chaosType = Math.random() > 0.5 ? rPentomino : acorn;
+    for (const [dx, dy] of chaosType) {
+      setCell(pos.x + dx, pos.y + dy, 1);
+    }
+  }
+
+  // Place some oscillators for visual interest
+  for (let i = 0; i < 5; i++) {
+    const pos = randomPos(margin);
+    const oscTypes = ['beehive', 'loaf', 'tub', 'beacon'];
+    for (const [dx, dy] of patterns[oscTypes[Math.floor(Math.random() * oscTypes.length)]]) {
+      setCell(pos.x + dx, pos.y + dy, 1);
+    }
+  }
+
+  // Scatter some random debris
+  for (let i = 0; i < 30; i++) {
+    setCell(Math.floor(Math.random() * cols), Math.floor(Math.random() * rows), 1);
+  }
+}
+
+function step() {
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const i = idx(x, y);
+      let neighbors = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          if (grid[idx(x + dx, y + dy)]) neighbors++;
         }
-    });
-}
-
-function populateRandomFactory() {
-    // Clear grids
-    grid.fill(0);
-    cellAge.fill(0);
-    
-    // Seed a factory layout
-    // 1. Glider Gun on the left
-    parsePattern('gliderGun', 10, Math.floor(rows / 2) - 5);
-    
-    // 2. Spaceships in the middle to collide
-    parsePattern('lwss', Math.floor(cols / 2) - 20, Math.floor(rows / 3));
-    parsePattern('lwss', Math.floor(cols / 2) - 20, Math.floor(rows / 3) + 10);
-    
-    // 3. Puffer on the right
-    parsePattern('puffer', cols - 40, Math.floor(rows / 2));
-
-    // 4. Random debris
-    for (let i = 0; i < 50; i++) {
-        setCell(
-            Math.floor(Math.random() * cols),
-            Math.floor(Math.random() * rows),
-            1
-        );
+      }
+      const alive = grid[i];
+      if (alive) {
+        nextGrid[i] = (neighbors === 2 || neighbors === 3) ? 1 : 0;
+        if (nextGrid[i]) nextAges[i] = ages[i] + 1;
+      } else {
+        nextGrid[i] = (neighbors === 3) ? 1 : 0;
+        if (nextGrid[i]) nextAges[i] = 0;
+      }
     }
-    
-    population = countPopulation();
-    lastPopulation = population;
-    frameCount = 0;
+  }
+  // Swap
+  const tg = grid; grid = nextGrid; nextGrid = tg;
+  const ta = ages; ages = nextAges; nextAges = ta;
+  generation++;
 }
 
-function countPopulation() {
-    let p = 0;
-    for (let i = 0; i < grid.length; i++) {
-        if (grid[i]) p++;
-    }
-    return p;
+function getAgeColor(age, alpha) {
+  // Fresh: bright cyan/white -> orange -> red -> deep blue -> dark
+  const maxAge = 200;
+  const t = Math.min(age / maxAge, 1);
+
+  let r, g, b;
+  if (t < 0.05) {
+    // Fresh: bright white-cyan
+    const s = t / 0.05;
+    r = 200 + 55 * s;
+    g = 240 + 15 * s;
+    b = 255;
+  } else if (t < 0.15) {
+    // Young: cyan to yellow
+    const s = (t - 0.05) / 0.1;
+    r = 255;
+    g = 255 - 50 * s;
+    b = 255 - 200 * s;
+  } else if (t < 0.35) {
+    // Mid: yellow to orange-red
+    const s = (t - 0.15) / 0.2;
+    r = 255;
+    g = 205 - 155 * s;
+    b = 55 - 55 * s;
+  } else if (t < 0.6) {
+    // Old: red to purple
+    const s = (t - 0.35) / 0.25;
+    r = 255 - 155 * s;
+    g = 50 - 50 * s;
+    b = 55 + 50 * s;
+  } else {
+    // Very old: purple to dark blue
+    const s = (t - 0.6) / 0.4;
+    r = 100 - 80 * s;
+    g = 0;
+    b = 105 - 60 * s;
+  }
+
+  return `rgba(${Math.floor(r)},${Math.floor(g)},${Math.floor(b)},${alpha})`;
 }
 
-function computeNextGen() {
-    let newPop = 0;
-    
-    for (let y = 0; y < rows; y++) {
-        for (let x = 0; x < cols; x++) {
-            const i = idx(x, y);
-            const current = grid[i];
-            
-            // Count neighbors
-            let neighbors = 0;
-            for (let dy = -1; dy <= 1; dy++) {
-                for (let dx = -1; dx <= 1; dx++) {
-                    if (dx === 0 && dy === 0) continue;
-                    if (getCell(x + dx, y + dy)) neighbors++;
-                }
-            }
+function render() {
+  // Background
+  ctx.fillStyle = '#050510';
+  ctx.fillRect(0, 0, W, H);
 
-            // Rules
-            if (current) {
-                if (neighbors === 2 || neighbors === 3) {
-                    nextGrid[i] = 1;
-                    cellAge[i]++;
-                    newPop++;
-                } else {
-                    nextGrid[i] = 0;
-                    cellAge[i] = 0;
-                }
-            } else {
-                if (neighbors === 3) {
-                    nextGrid[i] = 1;
-                    cellAge[i] = 1;
-                    newPop++;
-                } else {
-                    nextGrid[i] = 0;
-                    cellAge[i] = 0;
-                }
-            }
-        }
-    }
-    
-    // Swap buffers
-    let temp = grid;
-    grid = nextGrid;
-    nextGrid = temp;
-    
-    population = newPop;
-}
+  // Draw subtle grid lines
+  ctx.strokeStyle = 'rgba(30,30,60,0.3)';
+  ctx.lineWidth = 0.5;
+  for (let x = 0; x <= cols; x++) {
+    ctx.beginPath();
+    ctx.moveTo(x * cellSize, 0);
+    ctx.lineTo(x * cellSize, H);
+    ctx.stroke();
+  }
+  for (let y = 0; y <= rows; y++) {
+    ctx.beginPath();
+    ctx.moveTo(0, y * cellSize);
+    ctx.lineTo(W, y * cellSize);
+    ctx.stroke();
+  }
 
-function getColor(age) {
-    // Color ramp: Fresh (White/Yellow) -> Middle (Cyan) -> Old (Deep Blue/Black)
-    const maxAge = 20; 
-    const t = Math.min(age, maxAge) / maxAge;
-    
-    // R, G, B components
-    let r, g, b;
-    
-    if (t < 0.2) {
-        // White to Yellow
-        r = 255;
-        g = 255;
-        b = Math.floor(255 * (1 - t * 5)); 
-    } else if (t < 0.5) {
-        // Yellow to Cyan
-        const t2 = (t - 0.2) * 3.33;
-        r = Math.floor(255 * (1 - t2));
-        g = 255;
-        b = 255;
-    } else {
-        // Cyan to Deep Blue
-        const t3 = (t - 0.5) * 2;
-        r = 0;
-        g = Math.floor(255 * (1 - t3));
-        b = 255;
-    }
-    
-    return `rgb(${r},${g},${b})`;
-}
+  // Draw cells
+  const pad = cellSize > 4 ? 0.5 : 0;
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const i = idx(x, y);
+      if (grid[i]) {
+        const age = ages[i];
+        const alpha = age < 5 ? 1 : Math.max(0.3, 1 - age / 250);
+        ctx.fillStyle = getAgeColor(age, alpha);
 
-function draw() {
-    // Handle Wipe Effect
-    if (isWiping) {
-        // Draw black rectangle for the wipe
-        ctx.fillStyle = "#050505";
-        if (wipeDirection === 1) {
-            ctx.fillRect(0, 0, width, wipeY);
+        // Glow effect for fresh cells
+        if (age < 8) {
+          ctx.shadowColor = getAgeColor(age, 1);
+          ctx.shadowBlur = 8 - age;
         } else {
-            ctx.fillRect(0, wipeY, width, height - wipeY);
+          ctx.shadowBlur = 0;
         }
-        
-        wipeY += WIPE_SPEED;
-        
-        if (wipeY >= height) {
-            isWiping = false;
-            wipeY = 0;
-            wipeDirection = 1;
-            populateRandomFactory();
-        }
-        return; // Skip drawing grid during wipe
-    }
 
-    // Clear background
-    ctx.fillStyle = "#050505";
-    ctx.fillRect(0, 0, width, height);
-
-    // Draw Cells
-    // Optimization: Only iterate over living cells? 
-    // For full screen 60fps, iterating all might be heavy if grid is huge.
-    // But canvas fillRect is fast. Let's try simple iteration.
-    
-    // To optimize, we can skip drawing dead cells.
-    // We need to access the grid directly.
-    
-    for (let i = 0; i < grid.length; i++) {
-        if (grid[i]) {
-            const x = (i % cols) * CELL_SIZE;
-            const y = Math.floor(i / cols) * CELL_SIZE;
-            const age = cellAge[i];
-            
-            ctx.fillStyle = getColor(age);
-            // Draw slightly smaller than cell size for grid effect, or full for solid
-            ctx.fillRect(x, y, CELL_SIZE, CELL_SIZE);
-        }
+        ctx.fillRect(x * cellSize + pad, y * cellSize + pad, cellSize - pad * 2, cellSize - pad * 2);
+      }
     }
+  }
+  ctx.shadowBlur = 0;
+
+  // Sweep effect
+  if (sweeping) {
+    // Glow trail
+    const grad = ctx.createLinearGradient(0, sweepY - 40, 0, sweepY + 5);
+    grad.addColorStop(0, 'rgba(0,200,255,0)');
+    grad.addColorStop(0.7, 'rgba(0,200,255,0.15)');
+    grad.addColorStop(1, 'rgba(0,200,255,0.6)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, sweepY - 40, W, 45);
+
+    // Bright line
+    ctx.fillStyle = 'rgba(100,220,255,0.9)';
+    ctx.fillRect(0, sweepY, W, 2);
+
+    // Sparkle particles along sweep line
+    for (let i = 0; i < 8; i++) {
+      const sx = (Math.random() * W);
+      const sy = sweepY + (Math.random() - 0.5) * 20;
+      const sr = 1 + Math.random() * 2;
+      ctx.beginPath();
+      ctx.arc(sx, sy, sr, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(150,230,255,${0.3 + Math.random() * 0.5})`;
+      ctx.fill();
+    }
+  }
+
+  // Fade overlay during transition
+  if (fadeAlpha > 0) {
+    ctx.fillStyle = `rgba(5,5,16,${fadeAlpha})`;
+    ctx.fillRect(0, 0, W, H);
+  }
 }
 
-function loop() {
-    if (!isWiping) {
-        computeNextGen();
-        frameCount++;
-        
-        // Check for stagnation
-        if (frameCount > RESET_COOLDOWN) {
-            const change = Math.abs(population - lastPopulation);
-            const activity = change / (population + 1); // Avoid div by zero
-            
-            // If activity is extremely low or population is zero
-            if (activity < ACTIVITY_THRESHOLD || population === 0) {
-                isWiping = true;
-                wipeY = 0;
-                wipeDirection = 1;
-            }
-        }
-        
-        lastPopulation = population;
-    }
+function checkActivity() {
+  const liveCount = countLive();
+  activityHistory.push(liveCount);
+  if (activityHistory.length > HISTORY_LEN) activityHistory.shift();
 
-    draw();
-    requestAnimationFrame(loop);
+  if (activityHistory.length >= HISTORY_LEN) {
+    const recent = activityHistory.slice(-30);
+    const avgRecent = recent.reduce((a, b) => a + b, 0) / recent.length;
+    const earliest = activityHistory.slice(0, 30);
+    const avgEarly = earliest.reduce((a, b) => a + b, 0) / earliest.length;
+
+    if (avgRecent < ACTIVITY_THRESHOLD && avgRecent < avgEarly * 0.3) {
+      quietCounter++;
+      if (quietCounter >= QUIET_FRAMES) {
+        startSweep();
+      }
+    } else {
+      quietCounter = Math.max(0, quietCounter - 2);
+    }
+  }
 }
 
-// Init
+function startSweep() {
+  sweeping = true;
+  sweepY = -5;
+  sweepPhase = 0;
+}
+
+function updateSweep() {
+  if (!sweeping) return;
+
+  sweepY += sweepSpeed;
+
+  // Clear cells in sweep zone
+  const clearY1 = Math.floor((sweepY - 30) / cellSize);
+  const clearY2 = Math.floor(sweepY / cellSize);
+  for (let y = clearY1; y <= clearY2; y++) {
+    for (let x = 0; x < cols; x++) {
+      const i = idx(x, y);
+      grid[i] = 0;
+      ages[i] = 0;
+    }
+  }
+
+  if (sweepY > H + 20) {
+    sweeping = false;
+    fadeAlpha = 1;
+    seedTimer = 60;
+  }
+}
+
+function updateFade() {
+  if (fadeAlpha > 0 && !sweeping) {
+    fadeAlpha -= 0.015;
+    if (fadeAlpha <= 0) {
+      fadeAlpha = 0;
+      if (seedTimer > 0) {
+        seedTimer--;
+        if (seedTimer === 0) {
+          seedFactory();
+        }
+      }
+    }
+  }
+}
+
+// Info display
+function drawInfo() {
+  ctx.fillStyle = 'rgba(100,180,255,0.4)';
+  ctx.font = '11px monospace';
+  ctx.fillText(`GEN ${generation}`, 10, H - 10);
+  ctx.fillText(`LIVE ${countLive()}`, 10, H - 25);
+  if (quietCounter > 0) {
+    ctx.fillStyle = `rgba(255,100,100,${0.2 + quietCounter / QUIET_FRAMES * 0.5})`;
+    ctx.fillText(`QUIET ${quietCounter}/${QUIET_FRAMES}`, W - 120, H - 10);
+  }
+}
+
+let lastStep = 0;
+const STEP_INTERVAL = 1000 / 40; // 40fps simulation
+
+function loop(timestamp) {
+  requestAnimationFrame(loop);
+
+  if (!sweeping && fadeAlpha <= 0) {
+    if (timestamp - lastStep >= STEP_INTERVAL) {
+      step();
+      lastStep = timestamp;
+      checkActivity();
+    }
+  }
+
+  updateSweep();
+  updateFade();
+  render();
+  drawInfo();
+}
+
 window.addEventListener('resize', resize);
 resize();
-loop();
-
+requestAnimationFrame(loop);
 </script>
 </body>
 </html>

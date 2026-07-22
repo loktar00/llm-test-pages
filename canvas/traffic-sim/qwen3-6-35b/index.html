@@ -1,732 +1,1246 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Traffic Intersection Simulation</title>
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            overflow: hidden;
-            background-color: #1a1a1a;
-        }
-        canvas {
-            display: block;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Traffic Intersection</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; }
+</style>
 </head>
 <body>
-    <canvas id="simCanvas"></canvas>
-    <script>
-        const canvas = document.getElementById('simCanvas');
-        const ctx = canvas.getContext('2d');
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
 
-        // Configuration
-        let width, height;
-        const ROAD_WIDTH = 120;
-        const LANE_WIDTH = ROAD_WIDTH / 2;
-        const HALF_LANE = LANE_WIDTH / 2;
-        const INTERSECTION_SIZE = 140;
-        const CAR_LENGTH = 35;
-        const CAR_WIDTH = 18;
-        const MAX_SPEED = 4;
-        const ACCELERATION = 0.1;
-        const BRAKING = 0.2;
-        const SAFE_DISTANCE = 50; // Distance to start braking
-        const STOP_DISTANCE = 10; // Distance to actually stop
-        
-        // Colors
-        const COLORS = {
-            road: '#333333',
-            roadLine: '#555555',
-            roadMarking: '#aaaaaa',
-            grass: '#1a2e1a',
-            sidewalk: '#555',
-            carColors: ['#e74c3c', '#3498db', '#f1c40f', '#ecf0f1', '#9b59b6', '#e67e22'],
-            bus: '#f39c12',
-            busStripe: '#fff'
-        };
+let W, H, cx, cy;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  cx = W / 2;
+  cy = H / 2;
+}
+resize();
+window.addEventListener('resize', resize);
 
-        // State
-        let cars = [];
-        let pedestrians = [];
-        let nextCarTime = 0;
-        let frame = 0;
+// Road config
+const ROAD_W = Math.min(W, H) * 0.18;
+const LANE_W = ROAD_W / 2;
+const SIDE = Math.min(W, H) * 0.42;
+const INTERSECT_CENTER = { x: cx, y: cy };
 
-        // Directions
-        const DIR = {
-            UP: 0,
-            RIGHT: 1,
-            DOWN: 2,
-            LEFT: 3
-        };
+// Colors
+const SKY_TOP = '#0a0a2e';
+const SKY_BOT = '#1a1a3e';
+const ROAD_COLOR = '#2a2a2a';
+const ROAD_LINE = '#555';
+const SIDEWALK = '#3a3a3a';
+const CURB = '#4a4a4a';
+const CROSSWALK = '#cccccc';
+const GRASS = '#0d1f0d';
 
-        // Lane definitions relative to center (0,0)
-        const LANE_CONFIG = {
-            [DIR.UP]: { x: -HALF_LANE, y: -INTERSECTION_SIZE, dir: DIR.UP, turnType: 'straight', stopY: -INTERSECTION_SIZE },
-            [DIR.UP + 4]: { x: -HALF_LANE - LANE_WIDTH, y: -INTERSECTION_SIZE, dir: DIR.UP, turnType: 'left', stopY: -INTERSECTION_SIZE }, // Left turn lane
-            [DIR.DOWN]: { x: HALF_LANE, y: INTERSECTION_SIZE, dir: DIR.DOWN, turnType: 'straight', stopY: INTERSECTION_SIZE },
-            [DIR.DOWN + 4]: { x: HALF_LANE + LANE_WIDTH, y: INTERSECTION_SIZE, dir: DIR.DOWN, turnType: 'left', stopY: INTERSECTION_SIZE }, // Left turn lane
-            [DIR.RIGHT]: { x: INTERSECTION_SIZE, y: HALF_LANE, dir: DIR.RIGHT, turnType: 'straight', stopX: INTERSECTION_SIZE },
-            [DIR.RIGHT + 4]: { x: INTERSECTION_SIZE, y: HALF_LANE + LANE_WIDTH, dir: DIR.RIGHT, turnType: 'left', stopX: INTERSECTION_SIZE },
-            [DIR.LEFT]: { x: -INTERSECTION_SIZE, y: -HALF_LANE, dir: DIR.LEFT, turnType: 'straight', stopX: -INTERSECTION_SIZE },
-            [DIR.LEFT + 4]: { x: -INTERSECTION_SIZE, y: -HALF_LANE - LANE_WIDTH, dir: DIR.LEFT, turnType: 'left', stopX: -INTERSECTION_SIZE }
-        };
+// Traffic light phases
+const PHASE = {
+  NS_GREEN: 0,
+  NS_YELLOW: 1,
+  ALL_RED: 2,
+  EW_GREEN: 3,
+  EW_YELLOW: 4
+};
 
-        class TrafficLight {
-            constructor(roadDir) {
-                this.roadDir = roadDir;
-                this.state = 'RED'; // RED, YELLOW, GREEN
-                this.timer = 0;
-                this.queue = 0;
-                this.queueHistory = [];
-            }
+// Directions
+const DIR = { N: 0, E: 1, S: 2, W: 3 };
 
-            update() {
-                // Count cars in queue
-                let count = 0;
-                cars.forEach(car => {
-                    if (car.roadDir === this.roadDir && car.state === 'WAITING') {
-                        count++;
-                    }
-                });
-                this.queue = count;
-                this.queueHistory.push(count);
-                if (this.queueHistory.length > 60) this.queueHistory.shift();
-            }
+// State
+let phase = PHASE.NS_GREEN;
+let phaseTimer = 0;
+const GREEN_MIN = 4;
+const GREEN_MAX = 16;
+const YELLOW_TIME = 2.5;
+const ALL_RED_TIME = 1.5;
+let lateYellow = false;
+let lateYellowTimer = 0;
 
-            getAverageQueue() {
-                return this.queueHistory.reduce((a, b) => a + b, 0) / this.queueHistory.length;
-            }
+let cars = [];
+let pedestrians = [];
+let buses = [];
+let particles = [];
+let spawnTimers = [0, 0, 0, 0];
+let pedSpawnTimers = [0, 0, 0, 0];
 
-            getStateForCar(car) {
-                if (this.state === 'GREEN') return 'GREEN';
-                if (this.state === 'YELLOW') return 'YELLOW';
-                return 'RED';
-            }
+function getGreenTime(direction) {
+  let queue = 0;
+  for (const c of cars) {
+    if (c.dir === direction && c.state === 'stopped' || c.state === 'approaching') {
+      queue++;
+    }
+  }
+  for (const b of buses) {
+    if (b.dir === direction && b.stopped) queue += 2;
+  }
+  return Math.max(GREEN_MIN, Math.min(GREEN_MAX, queue * 2.5));
+}
+
+function getQueueLength(dir) {
+  let count = 0;
+  for (const c of cars) {
+    if (c.dir === dir) {
+      const stopDist = getStopDistance(dir);
+      if (c.state === 'stopped' || c.state === 'approaching') {
+        count++;
+      }
+    }
+  }
+  return count;
+}
+
+function getStopDistance(dir) {
+  const d = LANE_W * 0.5;
+  switch(dir) {
+    case DIR.N: return cy - SIDE + d;
+    case DIR.S: return cy + SIDE - d;
+    case DIR.E: return cx + SIDE - d;
+    case DIR.W: return cx - SIDE + d;
+  }
+}
+
+function isRed(dir) {
+  if (dir === DIR.N || dir === DIR.S) {
+    return phase === PHASE.EW_GREEN || phase === PHASE.EW_YELLOW;
+  }
+  return phase === PHASE.NS_GREEN || phase === PHASE.NS_YELLOW;
+}
+
+function isWalkSignal(dir) {
+  // Walk signal is green when cross traffic is red
+  if (dir === DIR.N || dir === DIR.S) {
+    return phase === PHASE.EW_GREEN || phase === PHASE.EW_YELLOW;
+  }
+  return phase === PHASE.NS_GREEN || phase === PHASE.NS_YELLOW;
+}
+
+function getWalkDir(dir) {
+  if (dir === 0) return { dx: 0, dy: 1 }; // N side, cross east
+  if (dir === 1) return { dx: -1, dy: 0 }; // E side, cross west
+  if (dir === 2) return { dx: 0, dy: -1 }; // S side, cross east
+  return { dx: 1, dy: 0 }; // W side, cross east
+}
+
+// Car class
+class Car {
+  constructor(dir, lane) {
+    this.dir = dir;
+    this.lane = lane; // 0 = left lane, 1 = right lane
+    this.speed = 0;
+    this.maxSpeed = 2.5 + Math.random() * 1.5;
+    this.accel = 0.08 + Math.random() * 0.04;
+    this.brake = 0.15;
+    this.length = 18 + Math.random() * 8;
+    this.width = LANE_W * 0.55;
+    this.color = this.randomColor();
+    this.headlights = true;
+    this.turning = false;
+    this.turnDir = 0;
+    this.turnProgress = 0;
+    this.turnRadius = LANE_W * 2.5;
+    this.stopped = false;
+    this.state = 'approaching';
+    this.waiting = 0;
+    this.passed = false;
+    this.isBus = false;
+    this.trail = [];
+    this.setStartPos();
+  }
+
+  randomColor() {
+    const colors = ['#c0392b','#2980b9','#27ae60','#f39c12','#8e44ad','#2c3e50','#d35400','#1abc9c','#e74c3c','#3498db','#ecf0f1','#95a5a6'];
+    return colors[Math.floor(Math.random() * colors.length)];
+  }
+
+  setStartPos() {
+    const offset = (this.lane === 0 ? -LANE_W * 0.5 : LANE_W * 0.5);
+    const startDist = SIDE + 60 + Math.random() * 40;
+    switch(this.dir) {
+      case DIR.N: this.x = cx + offset; this.y = cy - SIDE + LANE_W - 2 - startDist; break;
+      case DIR.S: this.x = cx + offset; this.y = cy + SIDE - LANE_W + 2 + startDist; break;
+      case DIR.E: this.x = cx + SIDE - LANE_W + 2 + startDist; this.y = cy + offset; break;
+      case DIR.W: this.x = cx - SIDE + LANE_W - 2 - startDist; this.y = cy + offset; break;
+    }
+  }
+
+  update(dt) {
+    if (this.turning) {
+      this.updateTurn(dt);
+      return;
+    }
+
+    const stopDist = getStopDistance(this.dir);
+    const red = isRed(this.dir);
+
+    // Check car ahead
+    let carAheadDist = Infinity;
+    for (const other of cars) {
+      if (other === this) continue;
+      if (other.dir !== this.dir) continue;
+      if (other.turning) continue;
+      const dist = this.getDistTo(other);
+      if (dist > 0 && dist < carAheadDist) {
+        carAheadDist = dist;
+      }
+    }
+
+    // Check bus ahead
+    for (const bus of buses) {
+      if (bus.dir !== this.dir) continue;
+      const dist = this.getDistTo(bus);
+      if (dist > 0 && dist < carAheadDist) {
+        carAheadDist = dist;
+      }
+    }
+
+    let desiredSpeed = this.maxSpeed;
+
+    // Brake for car ahead
+    if (carAheadDist < this.length + 8) {
+      const gap = carAheadDist - this.length;
+      if (gap < 30) {
+        desiredSpeed = Math.max(0, (gap / 30) * this.maxSpeed);
+      }
+    }
+
+    // Brake for red light
+    if (red) {
+      const distToStop = this.getDistToStopLine();
+      if (distToStop > 0 && distToStop < 80) {
+        desiredSpeed = Math.min(desiredSpeed, (distToStop / 80) * this.maxSpeed);
+      } else if (distToStop <= 0) {
+        desiredSpeed = 0;
+      }
+    }
+
+    // Slow down for intersection
+    const nearIntersect = this.getDistToStopLine();
+    if (nearIntersect > 0 && nearIntersect < 120) {
+      desiredSpeed = Math.min(desiredSpeed, this.maxSpeed * 0.7);
+    }
+
+    // Accelerate / decelerate
+    if (this.speed < desiredSpeed) {
+      this.speed = Math.min(this.speed + this.accel * dt * 60, desiredSpeed);
+    } else if (this.speed > desiredSpeed) {
+      this.speed = Math.max(this.speed - this.brake * dt * 60, 0);
+    }
+
+    if (this.speed < 0.01) this.speed = 0;
+
+    // Move
+    const move = this.speed * dt * 60;
+    switch(this.dir) {
+      case DIR.N: this.y -= move; break;
+      case DIR.S: this.y += move; break;
+      case DIR.E: this.x += move; break;
+      case DIR.W: this.x -= move; break;
+    }
+
+    // Start left turn if in left lane and approaching intersection
+    if (this.lane === 0 && !this.turning && !red && this.getDistToStopLine() < 10 && this.getDistToStopLine() > -10) {
+      this.turning = true;
+      this.turnProgress = 0;
+    }
+
+    // Remove if far off screen
+    const margin = SIDE + 200;
+    if (this.dir === DIR.N && this.y < -margin) this.remove = true;
+    if (this.dir === DIR.S && this.y > H + margin) this.remove = true;
+    if (this.dir === DIR.E && this.x > W + margin) this.remove = true;
+    if (this.dir === DIR.W && this.x < -margin) this.remove = true;
+
+    // Trail for headlights
+    if (this.speed > 0.5) {
+      this.trail.push({ x: this.x, y: this.y, alpha: 0.3 });
+      if (this.trail.length > 5) this.trail.shift();
+    } else {
+      if (this.trail.length > 0) this.trail.shift();
+    }
+  }
+
+  updateTurn(dt) {
+    this.turnProgress += dt * 0.8;
+    if (this.turnProgress >= 1) {
+      this.turning = false;
+      this.passed = true;
+      switch(this.dir) {
+        case DIR.N: this.dir = DIR.E; break;
+        case DIR.S: this.dir = DIR.W; break;
+        case DIR.E: this.dir = DIR.S; break;
+        case DIR.W: this.dir = DIR.N; break;
+      }
+      this.setStartPos();
+      this.speed = this.maxSpeed * 0.5;
+      return;
+    }
+
+    const t = this.turnProgress;
+    const r = this.turnRadius;
+    let startX, startY, angle;
+
+    switch(this.dir) {
+      case DIR.N:
+        startX = cx - LANE_W * 0.5; startY = cy - LANE_W * 0.5;
+        angle = Math.PI;
+        this.x = startX + r * Math.cos(angle + t * Math.PI / 2);
+        this.y = startY + r * Math.sin(angle + t * Math.PI / 2);
+        break;
+      case DIR.S:
+        startX = cx + LANE_W * 0.5; startY = cy + LANE_W * 0.5;
+        angle = 0;
+        this.x = startX + r * Math.cos(angle + t * Math.PI / 2);
+        this.y = startY + r * Math.sin(angle + t * Math.PI / 2);
+        break;
+      case DIR.E:
+        startX = cx + LANE_W * 0.5; startY = cy - LANE_W * 0.5;
+        angle = -Math.PI / 2;
+        this.x = startX + r * Math.cos(angle + t * Math.PI / 2);
+        this.y = startY + r * Math.sin(angle + t * Math.PI / 2);
+        break;
+      case DIR.W:
+        startX = cx - LANE_W * 0.5; startY = cy + LANE_W * 0.5;
+        angle = Math.PI / 2;
+        this.x = startX + r * Math.cos(angle + t * Math.PI / 2);
+        this.y = startY + r * Math.sin(angle + t * Math.PI / 2);
+        break;
+    }
+  }
+
+  getDistTo(other) {
+    if (this.dir === DIR.N || this.dir === DIR.S) {
+      return this.dir === DIR.N ? other.y - this.y : this.y - other.y;
+    }
+    return this.dir === DIR.E ? this.x - other.x : other.x - this.x;
+  }
+
+  getDistToStopLine() {
+    switch(this.dir) {
+      case DIR.N: return (cy - SIDE + LANE_W - 2) - this.y;
+      case DIR.S: return this.y - (cy + SIDE - LANE_W + 2);
+      case DIR.E: return this.x - (cx + SIDE - LANE_W + 2);
+      case DIR.W: return (cx - SIDE + LANE_W - 2) - this.x;
+    }
+  }
+
+  draw() {
+    ctx.save();
+    ctx.translate(this.x, this.y);
+
+    let angle = 0;
+    if (this.dir === DIR.N) angle = 0;
+    else if (this.dir === DIR.E) angle = Math.PI / 2;
+    else if (this.dir === DIR.S) angle = Math.PI;
+    else if (this.dir === DIR.W) angle = -Math.PI / 2;
+
+    if (this.turning) {
+      // Calculate actual angle from position
+      switch(this.dir) {
+        case DIR.N: angle = Math.PI + this.turnProgress * Math.PI / 2; break;
+        case DIR.S: angle = this.turnProgress * Math.PI / 2; break;
+        case DIR.E: angle = -Math.PI / 2 + this.turnProgress * Math.PI / 2; break;
+        case DIR.W: angle = Math.PI / 2 + this.turnProgress * Math.PI / 2; break;
+      }
+    }
+
+    ctx.rotate(angle);
+
+    // Car body
+    const w = this.width;
+    const l = this.length;
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.fillRect(-l/2 + 2, -w/2 + 2, l, w);
+
+    // Body
+    ctx.fillStyle = this.color;
+    ctx.beginPath();
+    ctx.roundRect(-l/2, -w/2, l, w, 3);
+    ctx.fill();
+
+    // Windshield
+    ctx.fillStyle = 'rgba(100,150,200,0.6)';
+    ctx.fillRect(l/2 - 6, -w/2 + 2, 5, w - 4);
+
+    // Rear window
+    ctx.fillStyle = 'rgba(80,120,160,0.4)';
+    ctx.fillRect(-l/2 + 1, -w/2 + 3, 4, w - 6);
+
+    // Tail lights
+    ctx.fillStyle = '#ff0000';
+    ctx.fillRect(-l/2 - 1, -w/2 + 1, 2, 3);
+    ctx.fillRect(-l/2 - 1, w/2 - 4, 2, 3);
+
+    // Headlights
+    if (this.headlights) {
+      ctx.fillStyle = '#ffffcc';
+      ctx.fillRect(l/2 - 1, -w/2 + 1, 2, 3);
+      ctx.fillRect(l/2 - 1, w/2 - 4, 2, 3);
+    }
+
+    ctx.restore();
+
+    // Headlight beams
+    if (this.headlights && this.speed > 0) {
+      ctx.save();
+      ctx.translate(this.x, this.y);
+      ctx.rotate(angle);
+
+      const grad = ctx.createRadialGradient(l/2, 0, 2, l/2 + 60, 0, 60);
+      grad.addColorStop(0, 'rgba(255,255,200,0.15)');
+      grad.addColorStop(1, 'rgba(255,255,200,0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(l/2, -w/2);
+      ctx.lineTo(l/2 + 60, -30);
+      ctx.lineTo(l/2 + 60, 30);
+      ctx.lineTo(l/2, w/2);
+      ctx.fill();
+
+      ctx.restore();
+    }
+  }
+}
+
+// Bus class
+class Bus {
+  constructor(dir) {
+    this.dir = dir;
+    this.speed = 0;
+    this.maxSpeed = 2.0;
+    this.accel = 0.05;
+    this.brake = 0.12;
+    this.length = 35;
+    this.width = LANE_W * 0.7;
+    this.color = '#d4a017';
+    this.headlights = true;
+    this.stopped = false;
+    this.stopTimer = 0;
+    this.busStopReached = false;
+    this.remove = false;
+    this.trail = [];
+    this.setStartPos();
+  }
+
+  setStartPos() {
+    const offset = LANE_W * 0.5;
+    const startDist = SIDE + 80;
+    switch(this.dir) {
+      case DIR.N: this.x = cx - offset; this.y = cy - SIDE + LANE_W - 2 - startDist; break;
+      case DIR.S: this.x = cx + offset; this.y = cy + SIDE - LANE_W + 2 + startDist; break;
+      case DIR.E: this.x = cx + SIDE - LANE_W + 2 + startDist; this.y = cy + offset; break;
+      case DIR.W: this.x = cx - SIDE + LANE_W - 2 - startDist; this.y = cy - offset; break;
+    }
+  }
+
+  getBusStopPos() {
+    const offset = LANE_W * 0.5;
+    const stopDist = LANE_W * 3;
+    switch(this.dir) {
+      case DIR.N: return { x: cx - offset, y: cy - SIDE + stopDist };
+      case DIR.S: return { x: cx + offset, y: cy + SIDE - stopDist };
+      case DIR.E: return { x: cx + SIDE - stopDist, y: cy + offset };
+      case DIR.W: return { x: cx - SIDE + stopDist, y: cy - offset };
+    }
+  }
+
+  update(dt) {
+    const stopDist = getStopDistance(this.dir);
+    const red = isRed(this.dir);
+
+    // Check if bus stop is near
+    const busStop = this.getBusStopPos();
+    const distToStop = Math.hypot(this.x - busStop.x, this.y - busStop.y);
+
+    if (!this.busStopReached && distToStop < 30 && !this.stopped && !red) {
+      this.busStopReached = true;
+      this.stopped = true;
+      this.stopTimer = 4 + Math.random() * 3;
+    }
+
+    if (this.stopped) {
+      this.speed = 0;
+      this.stopTimer -= dt;
+      if (this.stopTimer <= 0) {
+        this.stopped = false;
+        this.busStopReached = false;
+      }
+      return;
+    }
+
+    // Check car ahead
+    let carAheadDist = Infinity;
+    for (const c of cars) {
+      if (c.dir !== this.dir) continue;
+      const d = this.getDistTo(c);
+      if (d > 0 && d < carAheadDist) carAheadDist = d;
+    }
+
+    let desiredSpeed = this.maxSpeed;
+
+    if (carAheadDist < this.length + 15) {
+      const gap = carAheadDist - this.length;
+      if (gap < 40) {
+        desiredSpeed = Math.max(0, (gap / 40) * this.maxSpeed);
+      }
+    }
+
+    if (red) {
+      const d = this.getDistToStopLine();
+      if (d > 0 && d < 80) {
+        desiredSpeed = Math.min(desiredSpeed, (d / 80) * this.maxSpeed);
+      } else if (d <= 0) {
+        desiredSpeed = 0;
+      }
+    }
+
+    if (this.speed < desiredSpeed) {
+      this.speed = Math.min(this.speed + this.accel * dt * 60, desiredSpeed);
+    } else if (this.speed > desiredSpeed) {
+      this.speed = Math.max(this.speed - this.brake * dt * 60, 0);
+    }
+
+    const move = this.speed * dt * 60;
+    switch(this.dir) {
+      case DIR.N: this.y -= move; break;
+      case DIR.S: this.y += move; break;
+      case DIR.E: this.x += move; break;
+      case DIR.W: this.x -= move; break;
+    }
+
+    const margin = SIDE + 250;
+    if (this.dir === DIR.N && this.y < -margin) this.remove = true;
+    if (this.dir === DIR.S && this.y > H + margin) this.remove = true;
+    if (this.dir === DIR.E && this.x > W + margin) this.remove = true;
+    if (this.dir === DIR.W && this.x < -margin) this.remove = true;
+  }
+
+  getDistTo(other) {
+    if (this.dir === DIR.N || this.dir === DIR.S) {
+      return this.dir === DIR.N ? other.y - this.y : this.y - other.y;
+    }
+    return this.dir === DIR.E ? this.x - other.x : other.x - this.x;
+  }
+
+  getDistToStopLine() {
+    switch(this.dir) {
+      case DIR.N: return (cy - SIDE + LANE_W - 2) - this.y;
+      case DIR.S: return this.y - (cy + SIDE - LANE_W + 2);
+      case DIR.E: return this.x - (cx + SIDE - LANE_W + 2);
+      case DIR.W: return (cx - SIDE + LANE_W - 2) - this.x;
+    }
+  }
+
+  draw() {
+    ctx.save();
+    ctx.translate(this.x, this.y);
+
+    let angle = 0;
+    if (this.dir === DIR.N) angle = 0;
+    else if (this.dir === DIR.E) angle = Math.PI / 2;
+    else if (this.dir === DIR.S) angle = Math.PI;
+    else if (this.dir === DIR.W) angle = -Math.PI / 2;
+
+    ctx.rotate(angle);
+
+    const w = this.width;
+    const l = this.length;
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.fillRect(-l/2 + 2, -w/2 + 2, l, w);
+
+    // Body
+    ctx.fillStyle = this.color;
+    ctx.beginPath();
+    ctx.roundRect(-l/2, -w/2, l, w, 4);
+    ctx.fill();
+
+    // Stripe
+    ctx.fillStyle = '#b8860b';
+    ctx.fillRect(-l/2, -w/2 + 2, l, 3);
+    ctx.fillRect(-l/2, w/2 - 5, l, 3);
+
+    // Windows
+    ctx.fillStyle = 'rgba(100,180,255,0.5)';
+    for (let i = 0; i < 4; i++) {
+      ctx.fillRect(-l/2 + 5 + i * 8, -w/2 + 5, 5, w - 10);
+    }
+
+    // Rear lights
+    ctx.fillStyle = '#ff0000';
+    ctx.fillRect(-l/2 - 1, -w/2 + 1, 2, 4);
+    ctx.fillRect(-l/2 - 1, w/2 - 5, 2, 4);
+
+    // Headlights
+    ctx.fillStyle = '#ffffcc';
+    ctx.fillRect(l/2 - 1, -w/2 + 1, 2, 4);
+    ctx.fillRect(l/2 - 1, w/2 - 5, 2, 4);
+
+    // "BUS" text
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 6px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('BUS', 0, 2);
+
+    ctx.restore();
+
+    // Headlight beams
+    if (this.headlights) {
+      ctx.save();
+      ctx.translate(this.x, this.y);
+      ctx.rotate(angle);
+      const grad = ctx.createRadialGradient(l/2, 0, 2, l/2 + 80, 0, 70);
+      grad.addColorStop(0, 'rgba(255,255,200,0.12)');
+      grad.addColorStop(1, 'rgba(255,255,200,0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(l/2, -w/2);
+      ctx.lineTo(l/2 + 80, -35);
+      ctx.lineTo(l/2 + 80, 35);
+      ctx.lineTo(l/2, w/2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+}
+
+// Pedestrian class
+class Pedestrian {
+  constructor(corner) {
+    this.corner = corner; // 0=N, 1=E, 2=S, 3=W
+    this.x = 0;
+    this.y = 0;
+    this.speed = 0.8 + Math.random() * 0.3;
+    this.state = 'waiting'; // waiting, crossing, done
+    this.waitTimer = Math.random() * 3;
+    this.remove = false;
+    this.color = ['#e74c3c','#3498db','#2ecc71','#f39c12','#9b59b6','#1abc9c'][Math.floor(Math.random()*6)];
+    this.size = 3;
+    this.setStartPos();
+  }
+
+  setStartPos() {
+    const sw = 8;
+    switch(this.corner) {
+      case 0: this.x = cx - SIDE + sw; this.y = cy - SIDE - sw; break;
+      case 1: this.x = cx + SIDE + sw; this.y = cy - SIDE - sw; break;
+      case 2: this.x = cx + SIDE + sw; this.y = cy + SIDE + sw; break;
+      case 3: this.x = cx - SIDE - sw; this.y = cy + SIDE + sw; break;
+    }
+  }
+
+  update(dt) {
+    if (this.state === 'waiting') {
+      this.waitTimer -= dt;
+      if (this.waitTimer <= 0 && isWalkSignal(this.corner)) {
+        this.state = 'crossing';
+        this.crossProgress = 0;
+        this.crossDir = getWalkDir(this.corner);
+      }
+      return;
+    }
+
+    if (this.state === 'crossing') {
+      this.crossProgress += dt * this.speed * 0.03;
+      if (this.crossProgress >= 1) {
+        this.state = 'done';
+        this.remove = true;
+        return;
+      }
+
+      const t = this.crossProgress;
+      const crossW = ROAD_W + 16;
+      const sw = 8;
+
+      switch(this.corner) {
+        case 0: // N side, cross east
+          this.x = (cx - SIDE + sw) + t * (crossW + sw * 2);
+          this.y = cy - SIDE - sw;
+          break;
+        case 1: // E side, cross west
+          this.x = (cx + SIDE + sw) - t * (crossW + sw * 2);
+          this.y = cy - SIDE - sw;
+          break;
+        case 2: // S side, cross east
+          this.x = (cx + SIDE + sw) + t * (crossW + sw * 2);
+          this.y = cy + SIDE + sw;
+          break;
+        case 3: // W side, cross east
+          this.x = (cx - SIDE - sw) - t * (crossW + sw * 2);
+          this.y = cy + SIDE + sw;
+          break;
+      }
+    }
+  }
+
+  draw() {
+    ctx.save();
+    ctx.translate(this.x, this.y);
+
+    // Body
+    ctx.fillStyle = this.color;
+    ctx.beginPath();
+    ctx.arc(0, 0, this.size, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Head
+    ctx.fillStyle = '#f5d6b8';
+    ctx.beginPath();
+    ctx.arc(0, -this.size, this.size * 0.6, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  }
+}
+
+// Spawn logic
+function spawnCar() {
+  const dirs = [DIR.N, DIR.S, DIR.E, DIR.W];
+  const dir = dirs[Math.floor(Math.random() * 4)];
+  const lane = Math.random() < 0.5 ? 0 : 1;
+  const c = new Car(dir, lane);
+
+  // Check if spawn area is clear
+  let clear = true;
+  for (const other of cars) {
+    const d = Math.hypot(other.x - c.x, other.y - c.y);
+    if (d < 50) { clear = false; break; }
+  }
+  for (const b of buses) {
+    const d = Math.hypot(b.x - c.x, b.y - c.y);
+    if (d < 60) { clear = false; break; }
+  }
+
+  if (clear) {
+    cars.push(c);
+  }
+}
+
+function spawnBus() {
+  const dirs = [DIR.N, DIR.S, DIR.E, DIR.W];
+  const dir = dirs[Math.floor(Math.random() * 4)];
+  buses.push(new Bus(dir));
+}
+
+function spawnPedestrian() {
+  const corner = Math.floor(Math.random() * 4);
+  pedestrians.push(new Pedestrian(corner));
+}
+
+// Draw functions
+function drawSky() {
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, SKY_TOP);
+  grad.addColorStop(1, SKY_BOT);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+}
+
+function drawGrass() {
+  ctx.fillStyle = GRASS;
+  // Four grass quadrants around intersection
+  ctx.fillRect(0, 0, cx - SIDE, cy - SIDE);
+  ctx.fillRect(cx + SIDE, 0, W - cx - SIDE, cy - SIDE);
+  ctx.fillRect(0, cy + SIDE, cx - SIDE, H - cy - SIDE);
+  ctx.fillRect(cx + SIDE, cy + SIDE, W - cx - SIDE, H - cy - SIDE);
+
+  // Some grass texture dots
+  ctx.fillStyle = '#1a3a1a';
+  for (let i = 0; i < 200; i++) {
+    const gx = Math.random() * W;
+    const gy = Math.random() * H;
+    if (Math.abs(gx - cx) > SIDE + 10 || Math.abs(gy - cy) > SIDE + 10) {
+      ctx.fillRect(gx, gy, 3, 3);
+    }
+  }
+}
+
+function drawRoads() {
+  // North-South road
+  ctx.fillStyle = ROAD_COLOR;
+  ctx.fillRect(cx - ROAD_W, 0, ROAD_W * 2, H);
+
+  // East-West road
+  ctx.fillRect(0, cy - ROAD_W, W, ROAD_W * 2);
+
+  // Center lines (double yellow)
+  ctx.strokeStyle = '#888';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([12, 8]);
+
+  // NS center line
+  ctx.beginPath();
+  ctx.moveTo(cx, 0);
+  ctx.lineTo(cx, cy - SIDE);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx, cy + SIDE);
+  ctx.lineTo(cx, H);
+  ctx.stroke();
+
+  // EW center line
+  ctx.beginPath();
+  ctx.moveTo(0, cy);
+  ctx.lineTo(cx - SIDE, cy);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx + SIDE, cy);
+  ctx.lineTo(W, cy);
+  ctx.stroke();
+
+  ctx.setLineDash([]);
+
+  // Lane dividers (dashed white)
+  ctx.strokeStyle = '#666';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([8, 12]);
+
+  // NS lane divider
+  ctx.beginPath();
+  ctx.moveTo(cx - LANE_W, 0);
+  ctx.lineTo(cx - LANE_W, cy - SIDE);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx - LANE_W, cy + SIDE);
+  ctx.lineTo(cx - LANE_W, H);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx + LANE_W, 0);
+  ctx.lineTo(cx + LANE_W, cy - SIDE);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx + LANE_W, cy + SIDE);
+  ctx.lineTo(cx + LANE_W, H);
+  ctx.stroke();
+
+  // EW lane divider
+  ctx.beginPath();
+  ctx.moveTo(0, cy - LANE_W);
+  ctx.lineTo(cx - SIDE, cy - LANE_W);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx + SIDE, cy - LANE_W);
+  ctx.lineTo(W, cy - LANE_W);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(0, cy + LANE_W);
+  ctx.lineTo(cx - SIDE, cy + LANE_W);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx + SIDE, cy + LANE_W);
+  ctx.lineTo(W, cy + LANE_W);
+  ctx.stroke();
+
+  ctx.setLineDash([]);
+
+  // Stop lines
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 3;
+
+  // NS stop lines
+  ctx.beginPath();
+  ctx.moveTo(cx - ROAD_W, cy - SIDE + 2);
+  ctx.lineTo(cx, cy - SIDE + 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx, cy + SIDE - 2);
+  ctx.lineTo(cx + ROAD_W, cy + SIDE - 2);
+  ctx.stroke();
+
+  // EW stop lines
+  ctx.beginPath();
+  ctx.moveTo(cx - SIDE + 2, cy - ROAD_W);
+  ctx.lineTo(cx - SIDE + 2, cy);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx + SIDE - 2, cy);
+  ctx.lineTo(cx + SIDE - 2, cy + ROAD_W);
+  ctx.stroke();
+
+  // Left turn arrows
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  ctx.font = '10px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('←', cx - LANE_W * 0.5, cy - SIDE + 20);
+  ctx.fillText('→', cx + LANE_W * 0.5, cy + SIDE - 12);
+  ctx.fillText('↑', cx - LANE_W * 0.5, cy + SIDE - 12);
+  ctx.fillText('↓', cx + LANE_W * 0.5, cy - SIDE + 20);
+
+  // Crosswalks
+  ctx.fillStyle = CROSSWALK;
+  const cwW = 8;
+  const cwH = ROAD_W + 16;
+
+  // N crosswalk
+  ctx.fillRect(cx - cwW, cy - SIDE - cwW, cwW * 2, cwH);
+  // S crosswalk
+  ctx.fillRect(cx - cwW, cy + SIDE, cwW * 2, cwH);
+  // E crosswalk
+  ctx.fillRect(cx - SIDE - cwW, cy - cwW, cwH, cwW * 2);
+  // W crosswalk
+  ctx.fillRect(cx + SIDE, cy - cwW, cwH, cwW * 2);
+
+  // Crosswalk stripes
+  ctx.fillStyle = ROAD_COLOR;
+  for (let i = 0; i < 6; i++) {
+    const y = cy - SIDE - cwW + i * (cwH / 6);
+    ctx.fillRect(cx - cwW + 1, y, cwW * 2 - 2, cwH / 12);
+    const y2 = cy + SIDE + i * (cwH / 6);
+    ctx.fillRect(cx - cwW + 1, y2, cwW * 2 - 2, cwH / 12);
+  }
+  for (let i = 0; i < 6; i++) {
+    const x = cx - SIDE - cwW + i * (cwH / 6);
+    ctx.fillRect(x, cy - cwW + 1, cwH / 12, cwW * 2 - 2);
+    const x2 = cx + SIDE + i * (cwH / 6);
+    ctx.fillRect(x2, cy - cwW + 1, cwH / 12, cwW * 2 - 2);
+  }
+
+  // Bus stops
+  drawBusStop(cx - LANE_W * 0.5, cy - SIDE + LANE_W * 2.5, DIR.N);
+  drawBusStop(cx + LANE_W * 0.5, cy + SIDE - LANE_W * 2.5, DIR.S);
+  drawBusStop(cx + SIDE - LANE_W * 2.5, cy - LANE_W * 0.5, DIR.E);
+  drawBusStop(cx - SIDE + LANE_W * 2.5, cy + LANE_W * 0.5, DIR.W);
+
+  // Sidewalks
+  ctx.fillStyle = SIDEWALK;
+  const sw = 8;
+  // N quadrant
+  ctx.fillRect(cx - SIDE - sw, cy - SIDE - sw, ROAD_W + sw * 2, sw);
+  ctx.fillRect(cx + SIDE, cy - SIDE - sw, ROAD_W + sw * 2, sw);
+  ctx.fillRect(cx - SIDE - sw, cy - SIDE, sw, ROAD_W + sw * 2);
+  ctx.fillRect(cx + SIDE + ROAD_W, cy - SIDE, sw, ROAD_W + sw * 2);
+
+  // S quadrant
+  ctx.fillRect(cx - SIDE - sw, cy + SIDE, ROAD_W + sw * 2, sw);
+  ctx.fillRect(cx + SIDE, cy + SIDE, ROAD_W + sw * 2, sw);
+  ctx.fillRect(cx - SIDE - sw, cy + SIDE + ROAD_W, sw, ROAD_W + sw * 2);
+  ctx.fillRect(cx + SIDE + ROAD_W, cy + SIDE + ROAD_W, sw, ROAD_W + sw * 2);
+
+  // E quadrant
+  ctx.fillRect(cx - SIDE - sw, cy - SIDE - sw, sw, ROAD_W + sw * 2);
+  ctx.fillRect(cx + SIDE + ROAD_W, cy - SIDE - sw, sw, ROAD_W + sw * 2);
+  ctx.fillRect(cx - SIDE, cy - SIDE - sw, ROAD_W + sw * 2, sw);
+  ctx.fillRect(cx - SIDE, cy + SIDE + ROAD_W, ROAD_W + sw * 2, sw);
+
+  // W quadrant
+  ctx.fillRect(cx - SIDE - sw, cy - SIDE - sw, sw, ROAD_W + sw * 2);
+  ctx.fillRect(cx + SIDE + ROAD_W, cy - SIDE - sw, sw, ROAD_W + sw * 2);
+  ctx.fillRect(cx - SIDE, cy - SIDE - sw, ROAD_W + sw * 2, sw);
+  ctx.fillRect(cx - SIDE, cy + SIDE + ROAD_W, ROAD_W + sw * 2, sw);
+}
+
+function drawBusStop(x, y, dir) {
+  ctx.fillStyle = '#555';
+  const s = 12;
+  ctx.fillRect(x - s/2, y - s/2, s, s);
+  ctx.fillStyle = '#d4a017';
+  ctx.font = '6px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('BUS', x, y + 2);
+
+  // Bus stop sign pole
+  ctx.fillStyle = '#888';
+  ctx.fillRect(x - 1, y - 10, 2, 8);
+  ctx.fillStyle = '#d4a017';
+  ctx.fillRect(x - 4, y - 12, 8, 6);
+}
+
+function drawTrafficLights() {
+  const lightSize = 8;
+  const positions = [
+    { x: cx - SIDE - 14, y: cy - SIDE - 14, dirs: [DIR.N, DIR.S] },
+    { x: cx + SIDE + 14, y: cy + SIDE + 14, dirs: [DIR.N, DIR.S] },
+    { x: cx - SIDE - 14, y: cy + SIDE + 14, dirs: [DIR.E, DIR.W] },
+    { x: cx + SIDE + 14, y: cy - SIDE - 14, dirs: [DIR.E, DIR.W] },
+  ];
+
+  for (const pos of positions) {
+    for (const dir of pos.dirs) {
+      const red = isRed(dir);
+      const x = pos.x;
+      const y = pos.y;
+
+      // Housing
+      ctx.fillStyle = '#111';
+      ctx.beginPath();
+      ctx.roundRect(x - lightSize, y - lightSize * 2, lightSize * 2, lightSize * 6, 2);
+      ctx.fill();
+
+      // Red
+      ctx.fillStyle = red && (phase === PHASE.NS_GREEN || phase === PHASE.NS_YELLOW || phase === PHASE.ALL_RED) ? '#ff0000' : '#330000';
+      ctx.beginPath();
+      ctx.arc(x, y - lightSize * 1.2, lightSize * 0.6, 0, Math.PI * 2);
+      ctx.fill();
+      if (ctx.fillStyle !== '#330000') {
+        ctx.fillStyle = 'rgba(255,0,0,0.3)';
+        ctx.beginPath();
+        ctx.arc(x, y - lightSize * 1.2, lightSize * 1.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Yellow
+      const isYellow = (phase === PHASE.NS_YELLOW && (dir === DIR.N || dir === DIR.S)) ||
+                       (phase === PHASE.EW_YELLOW && (dir === DIR.E || dir === DIR.W));
+      ctx.fillStyle = isYellow ? '#ffcc00' : '#333300';
+      ctx.beginPath();
+      ctx.arc(x, y, lightSize * 0.6, 0, Math.PI * 2);
+      ctx.fill();
+      if (ctx.fillStyle !== '#333300') {
+        ctx.fillStyle = 'rgba(255,200,0,0.3)';
+        ctx.beginPath();
+        ctx.arc(x, y, lightSize * 1.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Green
+      const isGreen = (phase === PHASE.NS_GREEN && (dir === DIR.N || dir === DIR.S)) ||
+                      (phase === PHASE.EW_GREEN && (dir === DIR.E || dir === DIR.W));
+      ctx.fillStyle = isGreen ? '#00ff00' : '#003300';
+      ctx.beginPath();
+      ctx.arc(x, y + lightSize * 1.2, lightSize * 0.6, 0, Math.PI * 2);
+      ctx.fill();
+      if (ctx.fillStyle !== '#003300') {
+        ctx.fillStyle = 'rgba(0,255,0,0.3)';
+        ctx.beginPath();
+        ctx.arc(x, y + lightSize * 1.2, lightSize * 1.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  // Pedestrian signals
+  const pedPositions = [
+    { x: cx - SIDE - 20, y: cy - SIDE - 20, corner: 0 },
+    { x: cx + SIDE + 20, y: cy - SIDE - 20, corner: 1 },
+    { x: cx + SIDE + 20, y: cy + SIDE + 20, corner: 2 },
+    { x: cx - SIDE - 20, y: cy + SIDE + 20, corner: 3 },
+  ];
+
+  for (const pos of pedPositions) {
+    const walk = isWalkSignal(pos.corner);
+    const x = pos.x;
+    const y = pos.y;
+
+    ctx.fillStyle = '#222';
+    ctx.beginPath();
+    ctx.roundRect(x - 6, y - 8, 12, 16, 2);
+    ctx.fill();
+
+    if (walk) {
+      ctx.fillStyle = '#00ff00';
+      ctx.font = '8px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('W', x, y + 3);
+      ctx.fillStyle = 'rgba(0,255,0,0.2)';
+      ctx.beginPath();
+      ctx.arc(x, y, 10, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.fillStyle = '#ff0000';
+      ctx.font = '8px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('X', x, y + 3);
+    }
+  }
+}
+
+function drawDuskOverlay() {
+  // Vignette
+  const grad = ctx.createRadialGradient(cx, cy, W * 0.2, cx, cy, W * 0.7);
+  grad.addColorStop(0, 'rgba(0,0,0,0)');
+  grad.addColorStop(1, 'rgba(0,0,0,0.4)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Stars
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  for (let i = 0; i < 50; i++) {
+    const sx = (Math.sin(i * 127.1 + 311.7) * 0.5 + 0.5) * W;
+    const sy = (Math.sin(i * 269.5 + 183.3) * 0.5 + 0.5) * H * 0.4;
+    const ss = 0.5 + Math.sin(Date.now() * 0.001 + i) * 0.5;
+    ctx.globalAlpha = 0.3 + ss * 0.4;
+    ctx.fillRect(sx, sy, 1.5, 1.5);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// Adaptive timing
+function updatePhase(dt) {
+  phaseTimer += dt;
+
+  let currentGreenTime = 0;
+  if (phase === PHASE.NS_GREEN) currentGreenTime = getGreenTime(DIR.N) + getGreenTime(DIR.S);
+  else if (phase === PHASE.EW_GREEN) currentGreenTime = getGreenTime(DIR.E) + getGreenTime(DIR.W);
+
+  switch(phase) {
+    case PHASE.NS_GREEN:
+      if (phaseTimer >= currentGreenTime) {
+        phase = PHASE.NS_YELLOW;
+        phaseTimer = 0;
+        lateYellow = Math.random() < 0.15; // 15% chance of late yellow
+        lateYellowTimer = 0;
+      }
+      break;
+    case PHASE.NS_YELLOW:
+      if (lateYellow && phaseTimer < YELLOW_TIME - 0.8) {
+        lateYellowTimer += dt;
+        if (lateYellowTimer >= 0.8) {
+          phase = PHASE.NS_GREEN;
+          phaseTimer = 0;
+          lateYellow = false;
         }
-
-        const lights = [
-            new TrafficLight(DIR.UP),
-            new TrafficLight(DIR.DOWN),
-            new TrafficLight(DIR.RIGHT),
-            new TrafficLight(DIR.LEFT)
-        ];
-
-        // Bus stop logic
-        const busStopZones = [
-            { x: INTERSECTION_SIZE, y: 200, dir: DIR.LEFT, laneOffset: -HALF_LANE }, // Bus coming from right, heading left
-            { x: -INTERSECTION_SIZE, y: -200, dir: DIR.RIGHT, laneOffset: HALF_LANE }, // Bus coming from left, heading right
-            { x: -200, y: INTERSECTION_SIZE, dir: DIR.UP, laneOffset: HALF_LANE }, // Bus coming from bottom, heading up
-            { x: 200, y: -INTERSECTION_SIZE, dir: DIR.DOWN, laneOffset: -HALF_LANE } // Bus coming from top, heading down
-        ];
-
-        class Car {
-            constructor(roadDir, isBus = false) {
-                this.roadDir = roadDir;
-                this.isBus = isBus;
-                this.length = isBus ? 70 : CAR_LENGTH;
-                this.width = isBus ? 24 : CAR_WIDTH;
-                this.color = isBus ? COLORS.bus : COLORS.carColors[Math.floor(Math.random() * COLORS.carColors.length)];
-                
-                // Position setup
-                const config = LANE_CONFIG[roadDir];
-                this.x = config.x;
-                this.y = config.y;
-                
-                // Determine turn target
-                this.targetDir = config.turnType === 'left' ? (roadDir + 1) % 4 : roadDir;
-                
-                // State
-                this.speed = 0;
-                this.state = 'WAITING'; // WAITING, ACCELERATING, BRAKING, TURNING, STOPPED
-                this.turnProgress = 0; // 0 to 1
-                this.stopTimer = 0;
-                this.isStoppedAtBus = false;
-                
-                // Visuals
-                this.headlightsOn = true;
-            }
-
-            update() {
-                const light = lights[this.roadDir];
-                const lightState = light.getStateForCar(this);
-
-                // 1. Handle Bus Stop Logic
-                if (this.isBus && !this.isStoppedAtBus) {
-                    // Check if near bus stop
-                    let nearBusStop = false;
-                    let busStop = null;
-                    
-                    // Simple bounding box check for bus stop zones
-                    for(let bs of busStopZones) {
-                        if (bs.dir === this.roadDir) {
-                            if (this.roadDir === DIR.LEFT && this.x < bs.x - 50 && this.x > bs.x - 300) nearBusStop = true;
-                            if (this.roadDir === DIR.RIGHT && this.x > bs.x + 50 && this.x < bs.x + 300) nearBusStop = true;
-                            if (this.roadDir === DIR.UP && this.y > bs.y + 50 && this.y < bs.y + 300) nearBusStop = true;
-                            if (this.roadDir === DIR.DOWN && this.y < bs.y - 50 && this.y > bs.y - 300) nearBusStop = true;
-                        }
-                    }
-                    
-                    if (nearBusStop && this.speed < 2) {
-                        this.isStoppedAtBus = true;
-                        this.stopTimer = 120; // Stop for 2 seconds
-                    }
-                }
-
-                if (this.isStoppedAtBus) {
-                    this.stopTimer--;
-                    if (this.stopTimer <= 0) {
-                        this.isStoppedAtBus = false;
-                        this.speed = 0;
-                    }
-                    this.x = (this.roadDir === DIR.LEFT) ? this.x : this.x;
-                    this.y = (this.roadDir === DIR.DOWN) ? this.y : this.y;
-                    // Snap position to bus stop
-                    if(this.roadDir === DIR.LEFT) this.x = busStopZones[0].x;
-                    if(this.roadDir === DIR.RIGHT) this.x = busStopZones[1].x;
-                    if(this.roadDir === DIR.UP) this.y = busStopZones[2].y;
-                    if(this.roadDir === DIR.DOWN) this.y = busStopZones[3].y;
-                    return;
-                }
-
-                // 2. Handle Turning
-                if (this.state === 'TURNING') {
-                    this.handleTurning();
-                    return;
-                }
-
-                // 3. Handle Traffic Lights
-                let shouldStop = false;
-                
-                // Stop line calculation
-                let stopLineDist = 0;
-                const config = LANE_CONFIG[this.roadDir];
-                
-                if (this.roadDir === DIR.UP || this.roadDir === DIR.DOWN) {
-                    stopLineDist = Math.abs(this.y - config.stopY);
-                } else {
-                    stopLineDist = Math.abs(this.x - config.stopX);
-                }
-
-                if (lightState === 'RED') {
-                    if (stopLineDist < SAFE_DISTANCE) shouldStop = true;
-                } else if (lightState === 'YELLOW') {
-                    // Late yellow: if close enough to stop safely, stop. Otherwise go.
-                    if (stopLineDist < SAFE_DISTANCE * 0.5) shouldStop = true;
-                }
-
-                // 4. Handle Cars Ahead (Spacing)
-                let carAheadDist = Infinity;
-                cars.forEach(other => {
-                    if (other === this) return;
-                    if (other.roadDir !== this.roadDir) return;
-                    if (other.state === 'TURNING') return; // Don't follow turning cars on straight path logic
-
-                    let dist = Infinity;
-                    if (this.roadDir === DIR.UP) dist = this.y - other.y;
-                    if (this.roadDir === DIR.DOWN) dist = other.y - this.y;
-                    if (this.roadDir === DIR.LEFT) dist = other.x - this.x;
-                    if (this.roadDir === DIR.RIGHT) dist = this.x - other.x;
-
-                    if (dist > 0 && dist < carAheadDist) {
-                        carAheadDist = dist;
-                    }
-                });
-
-                if (carAheadDist < SAFE_DISTANCE) {
-                    shouldStop = true;
-                }
-
-                // Apply physics
-                if (shouldStop) {
-                    this.state = 'BRAKING';
-                    this.speed = Math.max(0, this.speed - BRAKING);
-                    if (this.speed === 0) this.state = 'WAITING';
-                } else {
-                    this.state = 'ACCELERATING';
-                    this.speed = Math.min(MAX_SPEED, this.speed + ACCELERATION);
-                    
-                    // Start turn if intersection entered
-                    if (this.isAtIntersection()) {
-                        this.state = 'TURNING';
-                    }
-                }
-
-                // Move
-                if (this.state !== 'TURNING') {
-                    if (this.roadDir === DIR.UP) this.y -= this.speed;
-                    if (this.roadDir === DIR.DOWN) this.y += this.speed;
-                    if (this.roadDir === DIR.LEFT) this.x -= this.speed;
-                    if (this.roadDir === DIR.RIGHT) this.x += this.speed;
-                }
-            }
-
-            isAtIntersection() {
-                // Check if center of car is roughly in the intersection box
-                const margin = 10;
-                const inBoxX = this.x > -INTERSECTION_SIZE + margin && this.x < INTERSECTION_SIZE - margin;
-                const inBoxY = this.y > -INTERSECTION_SIZE + margin && this.y < INTERSECTION_SIZE - margin;
-                return inBoxX && inBoxY;
-            }
-
-            handleTurning() {
-                if (this.roadDir === DIR.UP) {
-                    if (this.y < 0) {
-                        // Move to center
-                        this.x += (LANE_WIDTH) * 0.1; 
-                        this.y += 2;
-                    } else {
-                        // Turn left
-                        this.x += this.speed;
-                        this.y += this.speed;
-                        if (this.x > 0 && this.y > 0) {
-                            this.roadDir = DIR.RIGHT;
-                            this.state = 'ACCELERATING';
-                        }
-                    }
-                } else if (this.roadDir === DIR.DOWN) {
-                    if (this.y > 0) {
-                        this.x -= (LANE_WIDTH) * 0.1;
-                        this.y -= 2;
-                    } else {
-                        this.x -= this.speed;
-                        this.y -= this.speed;
-                        if (this.x < 0 && this.y < 0) {
-                            this.roadDir = DIR.LEFT;
-                            this.state = 'ACCELERATING';
-                        }
-                    }
-                } else if (this.roadDir === DIR.LEFT) {
-                    if (this.x < 0) {
-                        this.y -= (LANE_WIDTH) * 0.1;
-                        this.x -= 2;
-                    } else {
-                        this.y += this.speed;
-                        this.x += this.speed;
-                        if (this.x > 0 && this.y > 0) {
-                            this.roadDir = DIR.DOWN;
-                            this.state = 'ACCELERATING';
-                        }
-                    }
-                } else if (this.roadDir === DIR.RIGHT) {
-                    if (this.x > 0) {
-                        this.y += (LANE_WIDTH) * 0.1;
-                        this.x += 2;
-                    } else {
-                        this.y -= this.speed;
-                        this.x -= this.speed;
-                        if (this.x < 0 && this.y < 0) {
-                            this.roadDir = DIR.UP;
-                            this.state = 'ACCELERATING';
-                        }
-                    }
-                }
-            }
-
-            draw() {
-                ctx.save();
-                ctx.translate(this.x, this.y);
-                
-                // Rotate based on direction
-                let angle = 0;
-                if (this.roadDir === DIR.UP) angle = 0;
-                if (this.roadDir === DIR.RIGHT) angle = Math.PI / 2;
-                if (this.roadDir === DIR.DOWN) angle = Math.PI;
-                if (this.roadDir === DIR.LEFT) angle = -Math.PI / 2;
-                
-                ctx.rotate(angle);
-
-                // Draw Car Body
-                ctx.fillStyle = this.color;
-                ctx.fillRect(-this.length / 2, -this.width / 2, this.length, this.width);
-                
-                // Draw Windshield
-                ctx.fillStyle = '#111';
-                ctx.fillRect(-this.length / 2 + 5, -this.width / 2 + 2, 8, this.width - 4);
-                ctx.fillRect(this.length / 2 - 8, -this.width / 2 + 2, 5, this.width - 4);
-
-                // Draw Headlights
-                if (this.headlightsOn) {
-                    ctx.fillStyle = 'rgba(255, 255, 200, 0.8)';
-                    ctx.beginPath();
-                    ctx.arc(this.length / 2, -this.width / 2 + 3, 3, 0, Math.PI * 2);
-                    ctx.arc(this.length / 2, this.width / 2 - 3, 3, 0, Math.PI * 2);
-                    ctx.fill();
-                    
-                    // Light Beam (Dusk effect)
-                    ctx.globalCompositeOperation = 'screen';
-                    ctx.fillStyle = 'rgba(255, 255, 200, 0.15)';
-                    ctx.beginPath();
-                    ctx.moveTo(this.length / 2, -this.width / 2 + 3);
-                    ctx.lineTo(this.length / 2 + 100, -this.width * 1.5);
-                    ctx.lineTo(this.length / 2 + 100, this.width * 1.5);
-                    ctx.lineTo(this.length / 2, this.width / 2 - 3);
-                    ctx.fill();
-                    ctx.globalCompositeOperation = 'source-over';
-                }
-
-                // Draw Tail lights
-                ctx.fillStyle = '#f00';
-                ctx.fillRect(-this.length / 2, -this.width / 2 + 2, 2, 4);
-                ctx.fillRect(-this.length / 2, this.width / 2 - 6, 2, 4);
-
-                ctx.restore();
-            }
+      } else {
+        if (phaseTimer >= YELLOW_TIME) {
+          phase = PHASE.ALL_RED;
+          phaseTimer = 0;
         }
-
-        class Pedestrian {
-            constructor() {
-                this.reset();
-                this.x = (Math.random() < 0.5 ? -1 : 1) * (INTERSECTION_SIZE + 20);
-                this.y = (Math.random() < 0.5 ? -1 : 1) * (INTERSECTION_SIZE + 20);
-            }
-
-            reset() {
-                // Pick a crosswalk
-                const side = Math.floor(Math.random() * 4);
-                this.crosswalkSide = side;
-                this.waiting = true;
-                this.waitingTime = 0;
-                
-                if (side === 0) { // Bottom, walking up
-                    this.x = (Math.random() < 0.5 ? -1 : 1) * (INTERSECTION_SIZE + 10);
-                    this.y = INTERSECTION_SIZE + 20;
-                    this.targetY = -INTERSECTION_SIZE - 20;
-                    this.targetX = this.x;
-                    this.dir = DIR.UP;
-                } else if (side === 1) { // Right, walking left
-                    this.x = INTERSECTION_SIZE + 20;
-                    this.y = (Math.random() < 0.5 ? -1 : 1) * (INTERSECTION_SIZE + 10);
-                    this.targetX = -INTERSECTION_SIZE - 20;
-                    this.targetY = this.y;
-                    this.dir = DIR.LEFT;
-                } else if (side === 2) { // Top, walking down
-                    this.x = (Math.random() < 0.5 ? -1 : 1) * (INTERSECTION_SIZE + 10);
-                    this.y = -INTERSECTION_SIZE - 20;
-                    this.targetY = INTERSECTION_SIZE + 20;
-                    this.targetX = this.x;
-                    this.dir = DIR.DOWN;
-                } else { // Left, walking right
-                    this.x = -INTERSECTION_SIZE - 20;
-                    this.y = (Math.random() < 0.5 ? -1 : 1) * (INTERSECTION_SIZE + 10);
-                    this.targetX = INTERSECTION_SIZE + 20;
-                    this.targetY = this.y;
-                    this.dir = DIR.RIGHT;
-                }
-                
-                this.speed = 0.5 + Math.random() * 0.5;
-                this.color = '#fff';
-            }
-
-            update() {
-                // Check if corresponding crosswalk light is green
-                // Pedestrians cross parallel to the road that has GREEN
-                let canCross = false;
-                
-                // Map pedestrian side to road direction
-                // Side 0 (Bottom) crosses UP (parallel to Road DOWN)
-                // Side 1 (Right) crosses LEFT (parallel to Road LEFT)
-                // Side 2 (Top) crosses DOWN (parallel to Road UP)
-                // Side 3 (Left) crosses RIGHT (parallel to Road RIGHT)
-                
-                let roadDirForCrosswalk;
-                if (this.crosswalkSide === 0) roadDirForCrosswalk = DIR.DOWN;
-                if (this.crosswalkSide === 1) roadDirForCrosswalk = DIR.LEFT;
-                if (this.crosswalkSide === 2) roadDirForCrosswalk = DIR.UP;
-                if (this.crosswalkSide === 3) roadDirForCrosswalk = DIR.RIGHT;
-
-                if (lights[roadDirForCrosswalk].state === 'GREEN') {
-                    canCross = true;
-                }
-
-                if (this.waiting) {
-                    if (canCross) {
-                        this.waiting = false;
-                    }
-                    this.waitingTime++;
-                    return;
-                }
-
-                // Move
-                if (this.dir === DIR.UP) this.y -= this.speed;
-                if (this.dir === DIR.DOWN) this.y += this.speed;
-                if (this.dir === DIR.LEFT) this.x -= this.speed;
-                if (this.dir === DIR.RIGHT) this.x += this.speed;
-
-                // Check if reached target
-                let reached = false;
-                if (this.dir === DIR.UP && this.y <= this.targetY) reached = true;
-                if (this.dir === DIR.DOWN && this.y >= this.targetY) reached = true;
-                if (this.dir === DIR.LEFT && this.x <= this.targetX) reached = true;
-                if (this.dir === DIR.RIGHT && this.x >= this.targetX) reached = true;
-
-                if (reached) {
-                    this.reset();
-                }
-            }
-
-            draw() {
-                ctx.fillStyle = this.color;
-                ctx.beginPath();
-                ctx.arc(this.x, this.y, 4, 0, Math.PI * 2);
-                ctx.fill();
-                
-                // Shadow
-                ctx.fillStyle = 'rgba(0,0,0,0.3)';
-                ctx.beginPath();
-                ctx.ellipse(this.x, this.y + 4, 4, 2, 0, 0, Math.PI * 2);
-                ctx.fill();
-            }
+      }
+      break;
+    case PHASE.ALL_RED:
+      if (phaseTimer >= ALL_RED_TIME) {
+        phase = PHASE.EW_GREEN;
+        phaseTimer = 0;
+      }
+      break;
+    case PHASE.EW_GREEN:
+      if (phaseTimer >= currentGreenTime) {
+        phase = PHASE.EW_YELLOW;
+        phaseTimer = 0;
+        lateYellow = Math.random() < 0.15;
+        lateYellowTimer = 0;
+      }
+      break;
+    case PHASE.EW_YELLOW:
+      if (lateYellow && phaseTimer < YELLOW_TIME - 0.8) {
+        lateYellowTimer += dt;
+        if (lateYellowTimer >= 0.8) {
+          phase = PHASE.EW_GREEN;
+          phaseTimer = 0;
+          lateYellow = false;
         }
-
-        function init() {
-            resize();
-            window.addEventListener('resize', resize);
-            
-            // Create initial pedestrians
-            for(let i=0; i<10; i++) {
-                pedestrians.push(new Pedestrian());
-            }
-            
-            loop();
+      } else {
+        if (phaseTimer >= YELLOW_TIME) {
+          phase = PHASE.ALL_RED;
+          phaseTimer = 0;
         }
+      }
+      break;
+  }
+}
 
-        function resize() {
-            width = window.innerWidth;
-            height = window.innerHeight;
-            canvas.width = width;
-            canvas.height = height;
-        }
+// Main loop
+let lastTime = 0;
+let frameCount = 0;
 
-        function spawnCar() {
-            if (frame < nextCarTime) return;
-            
-            // Pick a random direction
-            const dir = Math.floor(Math.random() * 4);
-            
-            // Check if lane is clear
-            const config = LANE_CONFIG[dir];
-            let clear = true;
-            for(let c of cars) {
-                if (c.roadDir === dir && c.state !== 'TURNING') {
-                    let dist = 0;
-                    if (dir === DIR.UP) dist = c.y - config.y;
-                    if (dir === DIR.DOWN) dist = config.y - c.y;
-                    if (dir === DIR.LEFT) dist = c.x - config.x;
-                    if (dir === DIR.RIGHT) dist = config.x - c.x;
-                    
-                    if (dist < 150) clear = false;
-                }
-            }
+function update(timestamp) {
+  const dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+  lastTime = timestamp;
+  frameCount++;
 
-            if (clear) {
-                // 10% chance of bus
-                const isBus = Math.random() < 0.1;
-                cars.push(new Car(dir, isBus));
-                // Randomize next spawn time
-                nextCarTime = frame + 60 + Math.random() * 120;
-            }
-        }
+  // Update phase
+  updatePhase(dt);
 
-        function updateLights() {
-            const cycleTime = 300; // Base cycle
-            const yellowTime = 60;
-            
-            // Determine active phase (0: Up/Down, 1: Left/Right)
-            // Simple logic: alternate every cycleTime, but adjust for queues
-            let phase = Math.floor(frame / cycleTime) % 2;
-            let activeRoads = phase === 0 ? [DIR.UP, DIR.DOWN] : [DIR.LEFT, DIR.RIGHT];
-            let inactiveRoads = phase === 0 ? [DIR.LEFT, DIR.RIGHT] : [DIR.UP, DIR.DOWN];
+  // Spawn cars
+  spawnTimers[0] -= dt;
+  spawnTimers[1] -= dt;
+  spawnTimers[2] -= dt;
+  spawnTimers[3] -= dt;
 
-            // Adjust timing based on queue
-            // If a queue is long, extend green
-            let totalQueue = 0;
-            activeRoads.forEach(d => totalQueue += lights[d].getAverageQueue());
-            
-            let modifiedCycle = cycleTime;
-            if (totalQueue > 2) modifiedCycle += totalQueue * 10;
+  const spawnInterval = 1.5 + Math.random() * 0.5;
+  for (let i = 0; i < 4; i++) {
+    if (spawnTimers[i] <= 0) {
+      spawnTimers[i] = spawnInterval + Math.random() * 1.5;
+      spawnCar();
+    }
+  }
 
-            let currentPhaseTime = frame % modifiedCycle;
-            
-            // Reset lights
-            lights.forEach(l => l.state = 'RED');
+  // Spawn bus
+  if (buses.length < 2 && Math.random() < 0.002) {
+    spawnBus();
+  }
 
-            // Handle Yellow transition
-            let yellowStart = modifiedCycle - yellowTime;
-            
-            if (currentPhaseTime < yellowStart) {
-                // Green for active
-                activeRoads.forEach(d => lights[d].state = 'GREEN');
-            } else {
-                // Yellow for active
-                activeRoads.forEach(d => lights[d].state = 'YELLOW');
-            }
-        }
+  // Spawn pedestrians
+  pedSpawnTimers[0] -= dt;
+  pedSpawnTimers[1] -= dt;
+  pedSpawnTimers[2] -= dt;
+  pedSpawnTimers[3] -= dt;
 
-        function drawEnvironment() {
-            // Background (Grass)
-            ctx.fillStyle = COLORS.grass;
-            ctx.fillRect(0, 0, width, height);
+  for (let i = 0; i < 4; i++) {
+    if (pedSpawnTimers[i] <= 0) {
+      pedSpawnTimers[i] = 3 + Math.random() * 5;
+      spawnPedestrian();
+    }
+  }
 
-            // Roads
-            ctx.fillStyle = COLORS.road;
-            // Vertical
-            ctx.fillRect(width/2 - ROAD_WIDTH/2, 0, ROAD_WIDTH, height);
-            // Horizontal
-            ctx.fillRect(0, height/2 - ROAD_WIDTH/2, width, ROAD_WIDTH);
+  // Update cars
+  for (const c of cars) {
+    c.update(dt);
+  }
+  cars = cars.filter(c => !c.remove);
 
-            // Center Intersection
-            ctx.fillRect(width/2 - INTERSECTION_SIZE/2, height/2 - INTERSECTION_SIZE/2, INTERSECTION_SIZE, INTERSECTION_SIZE);
+  // Update buses
+  for (const b of buses) {
+    b.update(dt);
+  }
+  buses = buses.filter(b => !b.remove);
 
-            // Markings
-            ctx.strokeStyle = COLORS.roadMarking;
-            ctx.setLineDash([20, 20]);
-            ctx.lineWidth = 2;
+  // Update pedestrians
+  for (const p of pedestrians) {
+    p.update(dt);
+  }
+  pedestrians = pedestrians.filter(p => !p.remove);
 
-            // Vertical Center Line
-            ctx.beginPath();
-            ctx.moveTo(width/2, 0);
-            ctx.lineTo(width/2, height/2 - INTERSECTION_SIZE/2);
-            ctx.moveTo(width/2, height/2 + INTERSECTION_SIZE/2);
-            ctx.lineTo(width/2, height);
-            ctx.stroke();
+  // Draw
+  drawSky();
+  drawGrass();
+  drawRoads();
+  drawTrafficLights();
 
-            // Horizontal Center Line
-            ctx.beginPath();
-            ctx.moveTo(0, height/2);
-            ctx.lineTo(width/2 - INTERSECTION_SIZE/2, height/2);
-            ctx.moveTo(width/2 + INTERSECTION_SIZE/2, height/2);
-            ctx.lineTo(width, height/2);
-            ctx.stroke();
+  // Draw pedestrians
+  for (const p of pedestrians) {
+    p.draw();
+  }
 
-            // Stop Lines
-            ctx.setLineDash([]);
-            ctx.lineWidth = 4;
-            const stopOffset = INTERSECTION_SIZE / 2 + 10;
-            
-            // Top
-            ctx.beginPath(); ctx.moveTo(width/2, height/2 - stopOffset); ctx.lineTo(width/2 - ROAD_WIDTH/2, height/2 - stopOffset); ctx.stroke();
-            // Bottom
-            ctx.beginPath(); ctx.moveTo(width/2, height/2 + stopOffset); ctx.lineTo(width/2 + ROAD_WIDTH/2, height/2 + stopOffset); ctx.stroke();
-            // Left
-            ctx.beginPath(); ctx.moveTo(width/2 - stopOffset, height/2); ctx.lineTo(width/2 - stopOffset, height/2 - ROAD_WIDTH/2); ctx.stroke();
-            // Right
-            ctx.beginPath(); ctx.moveTo(width/2 + stopOffset, height/2); ctx.lineTo(width/2 + stopOffset, height/2 + ROAD_WIDTH/2); ctx.stroke();
+  // Draw buses
+  for (const b of buses) {
+    b.draw();
+  }
 
-            // Crosswalks
-            ctx.fillStyle = 'rgba(255,255,255,0.3)';
-            const cwWidth = 10;
-            const cwLength = ROAD_WIDTH;
-            
-            // Top
-            ctx.fillRect(width/2 - cwLength/2, height/2 - INTERSECTION_SIZE/2 - cwWidth, cwLength, cwWidth);
-            // Bottom
-            ctx.fillRect(width/2 - cwLength/2, height/2 + INTERSECTION_SIZE/2, cwLength, cwWidth);
-            // Left
-            ctx.fillRect(width/2 - INTERSECTION_SIZE/2 - cwWidth, height/2 - cwLength/2, cwWidth, cwLength);
-            // Right
-            ctx.fillRect(width/2 + INTERSECTION_SIZE/2, height/2 - cwLength/2, cwWidth, cwLength);
-            
-            // Sidewalks (around intersection)
-            ctx.fillStyle = COLORS.sidewalk;
-            const sw = 20;
-            const halfInt = INTERSECTION_SIZE/2;
-            // Top Right
-            ctx.fillRect(width/2 + halfInt, height/2 - halfInt, width - width/2 - halfInt + halfInt, sw);
-            // Bottom Right
-            ctx.fillRect(width/2 + halfInt, height/2 + halfInt, width - width/2 - halfInt + halfInt, sw);
-            // Top Left
-            ctx.fillRect(width/2 - halfInt - sw, height/2 - halfInt, sw, halfInt + halfInt);
-            // Bottom Left
-            ctx.fillRect(width/2 - halfInt - sw, height/2 + halfInt, sw, halfInt + halfInt);
-        }
+  // Draw cars (sorted by y for depth)
+  cars.sort((a, b) => a.y - b.y);
+  for (const c of cars) {
+    c.draw();
+  }
 
-        function drawTrafficLights() {
-            const offset = 40;
-            const size = 10;
+  drawDuskOverlay();
 
-            const positions = [
-                { x: width/2 - offset, y: height/2 - offset, dir: DIR.DOWN }, // Top Left (facing South)
-                { x: width/2 + offset, y: height/2 + offset, dir: DIR.UP },   // Bottom Right (facing North)
-                { x: width/2 + offset, y: height/2 - offset, dir: DIR.LEFT }, // Top Right (facing West)
-                { x: width/2 - offset, y: height/2 + offset, dir: DIR.RIGHT } // Bottom Left (facing East)
-            ];
+  // HUD
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'left';
+  const phaseNames = ['NS GREEN', 'NS YELLOW', 'ALL RED', 'EW GREEN', 'EW YELLOW'];
+  ctx.fillText(`Phase: ${phaseNames[phase]}`, 10, 20);
+  ctx.fillText(`Cars: ${cars.length} | Buses: ${buses.length} | Peds: ${pedestrians.length}`, 10, 35);
 
-            positions.forEach(p => {
-                // Find corresponding light
-                const light = lights[p.dir];
-                
-                // Draw Housing
-                ctx.fillStyle = '#222';
-                ctx.fillRect(p.x - 5, p.y - 15, 10, 30);
-                
-                // Draw Lights
-                const colors = {
-                    'RED': '#ff0000',
-                    'YELLOW': '#ffff00',
-                    'GREEN': '#00ff00'
-                };
-                
-                // Background for off lights
-                ctx.fillStyle = '#333';
-                ctx.beginPath(); ctx.arc(p.x, p.y - 10, 3, 0, Math.PI*2); ctx.fill();
-                ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI*2); ctx.fill();
-                ctx.beginPath(); ctx.arc(p.x, p.y + 10, 3, 0, Math.PI*2); ctx.fill();
+  if (lateYellow) {
+    ctx.fillStyle = 'rgba(255,200,0,0.8)';
+    ctx.fillText('⚡ Late Yellow!', 10, 50);
+  }
 
-                // Active light
-                ctx.shadowBlur = 10;
-                ctx.fillStyle = colors[light.state];
-                ctx.beginPath(); ctx.arc(p.x, p.y - 10, 3, 0, Math.PI*2); ctx.fill(); // Top
-                ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI*2); ctx.fill();     // Middle
-                ctx.beginPath(); ctx.arc(p.x, p.y + 10, 3, 0, Math.PI*2); ctx.fill(); // Bottom
-                ctx.shadowBlur = 0;
-            });
-        }
+  requestAnimationFrame(update);
+}
 
-        function loop() {
-            frame++;
-            
-            // Clear
-            ctx.clearRect(0, 0, width, height);
-
-            // Update Logic
-            updateLights();
-            spawnCar();
-            
-            // Update Cars
-            for (let i = cars.length - 1; i >= 0; i--) {
-                cars[i].update();
-                // Remove cars that are too far off screen
-                if (cars[i].x < -500 || cars[i].x > width + 500 || cars[i].y < -500 || cars[i].y > height + 500) {
-                    cars.splice(i, 1);
-                }
-            }
-
-            // Update Pedestrians
-            pedestrians.forEach(p => p.update());
-
-            // Draw
-            drawEnvironment();
-            
-            // Draw Pedestrians
-            pedestrians.forEach(p => p.draw());
-
-            // Draw Cars
-            cars.forEach(c => c.draw());
-
-            // Draw Traffic Lights (Overlay)
-            drawTrafficLights();
-
-            // Dusk Overlay
-            ctx.fillStyle = 'rgba(0, 0, 20, 0.3)';
-            ctx.fillRect(0, 0, width, height);
-
-            requestAnimationFrame(loop);
-        }
-
-        init();
-    </script>
+requestAnimationFrame(update);
+</script>
 </body>
 </html>

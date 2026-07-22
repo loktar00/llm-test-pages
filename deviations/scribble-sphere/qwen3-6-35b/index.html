@@ -1,309 +1,131 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>3D Scribble Ball</title>
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            overflow: hidden;
-            background-color: #050505;
-            color: #888;
-            font-family: monospace;
-        }
-        canvas {
-            display: block;
-        }
-        #ui {
-            position: absolute;
-            bottom: 20px;
-            left: 20px;
-            pointer-events: none;
-            opacity: 0.6;
-        }
-    </style>
+<style>
+* { margin: 0; padding: 0; }
+body { background: #000; overflow: hidden; }
+canvas { display: block; }
+</style>
 </head>
 <body>
-    <div id="ui">
-        <div id="status">Generating...</div>
-        <div id="progress">0%</div>
-    </div>
-    <canvas id="canvas"></canvas>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+resize();
+addEventListener('resize', resize);
 
-    <script>
-        /**
-         * 3D Scribble Ball
-         * A continuous fractal-like line wrapping a sphere.
-         */
+const RADIUS = 180;
+const NUM_POINTS = 12000;
+const FOV = 550;
+const points = [];
 
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
-        const statusEl = document.getElementById('status');
-        const progressEl = document.getElementById('progress');
+// Generate a dense scribble path covering the sphere
+(function generate() {
+    let x = 0, y = -RADIUS, z = 0;
+    points.push([x, y, z]);
+    for (let i = 1; i < NUM_POINTS; i++) {
+        // Tangent random walk on sphere
+        let dx, dy, dz;
+        do {
+            dx = Math.random() * 2 - 1;
+            dy = Math.random() * 2 - 1;
+            dz = Math.random() * 2 - 1;
+        } while (dx === 0 && dy === 0 && dz === 0);
+        let dl = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        dx /= dl; dy /= dl; dz /= dl;
+        // Project to tangent
+        let dot = x*dx + y*dy + z*dz;
+        dx -= dot*x; dy -= dot*y; dz -= dot*z;
+        let tl = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        if (tl < 1e-6) { dx = 1; tl = 1; }
+        dx /= tl; dy /= tl; dz /= tl;
+        const step = RADIUS * (0.04 + Math.random() * 0.06);
+        let nx = x + dx*step, ny = y + dy*step, nz = z + dz*step;
+        let nl = Math.sqrt(nx*nx + ny*ny + nz*nz);
+        nx = nx/nl*RADIUS; ny = ny/nl*RADIUS; nz = nz/nl*RADIUS;
+        points.push([nx, ny, nz]);
+        x = nx; y = ny; z = nz;
+    }
+})();
 
-        // Configuration
-        const config = {
-            rotationSpeed: 0.005,
-            lineGrowthRate: 15, // Segments per frame
-            maxSegments: 120000,
-            baseRadius: 200,
-            baseColor: { r: 0, g: 200, b: 255 }, // Cyan-ish
-            maxDepth: 1000,
-            minDepth: -1000,
-            fov: 800,
-            lineWeight: 3,
-            phases: {
-                grow: 2000,
-                hold: 1000,
-                shrink: 2000
-            }
-        };
+let ax = 0, ay = 0, az = 0;
+let visible = 0;
+const maxVis = NUM_POINTS - 1;
+let phase = 'grow';
+let growRate = 20;
+let holdT = 0, pauseT = 0;
 
-        let width, height;
-        let cx, cy;
+function rot(p, a, b, c) {
+    let [x,y,z] = p;
+    let co=Math.cos(a), si=Math.sin(a);
+    let y1=y*co-z*si, z1=y*si+z*co; y=y1; z=z1;
+    co=Math.cos(b); si=Math.sin(b);
+    let x2=x*co+z*si, z2=-x*si+z*co; x=x2; z=z2;
+    co=Math.cos(c); si=Math.sin(c);
+    let x3=x*co-y*si, y3=x*si+y*co; x=x3; y=y3;
+    return [x,y,z];
+}
 
-        // State
-        let segments = [];
-        let currentSegmentCount = 0;
-        let phase = 'grow'; // grow, hold, shrink
-        let phaseTime = 0;
-        let isFull = false;
-        
-        // 3D Math State
-        let angleX = 0;
-        let angleY = 0;
-        let angleZ = 0;
+(function frame() {
+    ctx.fillStyle = 'rgba(0,0,0,0.2)';
+    ctx.fillRect(0,0,W,H);
 
-        // Resize Handler
-        function resize() {
-            width = canvas.width = window.innerWidth;
-            height = canvas.height = window.innerHeight;
-            cx = width / 2;
-            cy = height / 2;
-        }
-        window.addEventListener('resize', resize);
-        resize();
+    ax += 0.004; ay += 0.006; az += 0.002;
 
-        // Initialize with a small seed to prevent divide by zero or visual popping
-        function initSphere() {
-            const startPt = { x: 0, y: 0, z: 0 }; // Center
-            for(let i=0; i<50; i++) {
-                addRandomPoint(startPt);
-            }
-            // Connect to center to establish the "core"
-            for(let i=0; i<50; i++) {
-                const last = segments[segments.length-1];
-                const p = project(0, 0, 0);
-                drawLine(last.x, last.y, p.x, p.y, last.a, p.a);
-                segments.push({ x: 0, y: 0, z: 0 });
-            }
-        }
+    if (phase==='grow') {
+        visible += growRate;
+        if (visible >= maxVis) { visible = maxVis; phase='hold'; holdT = 80; }
+    } else if (phase==='hold') {
+        holdT--;
+        if (holdT<=0) phase='shrink';
+    } else if (phase==='shrink') {
+        visible -= growRate * 1.8;
+        if (visible <= 0) { visible = 0; phase='pause'; pauseT = 25; }
+    } else {
+        pauseT--;
+        if (pauseT<=0) phase='grow';
+    }
 
-        function addRandomPoint(fromPoint) {
-            // Random direction
-            const theta = Math.random() * Math.PI * 2;
-            const phi = Math.acos((Math.random() * 2) - 1);
-            
-            // Calculate displacement
-            const r = config.baseRadius;
-            const dx = r * Math.sin(phi) * Math.cos(theta);
-            const dy = r * Math.sin(phi) * Math.sin(theta);
-            const dz = r * Math.cos(phi);
+    const cx = W/2, cy = H/2;
+    const vis = Math.min(Math.floor(visible), maxVis);
 
-            // Add a bit of noise to make it look like "scribbles" (not perfect geodesics)
-            const noise = 20;
-            
-            const toPoint = {
-                x: fromPoint.x + dx + (Math.random() * noise - noise/2),
-                y: fromPoint.y + dy + (Math.random() * noise - noise/2),
-                z: fromPoint.z + dz + (Math.random() * noise - noise/2)
-            };
+    // Batch draw by depth layer for better visual effect
+    // Draw back layers first, front on top
+    for (let i = 0; i < vis; i++) {
+        const p1 = points[i], p2 = points[i+1];
+        const r1 = rot(p1, ax, ay, az);
+        const r2 = rot(p2, ax, ay, az);
 
-            // Project and Draw immediately
-            const p1 = project(fromPoint.x, fromPoint.y, fromPoint.z);
-            const p2 = project(toPoint.x, toPoint.y, toPoint.z);
+        const d1 = r1[2] + RADIUS + 200;
+        const d2 = r2[2] + RADIUS + 200;
+        const s1 = FOV / d1;
+        const s2 = FOV / d2;
 
-            drawLine(p1.x, p1.y, p2.x, p2.y, p1.a, p2.a);
+        const x1 = cx + r1[0]*s1, y1 = cy + r1[1]*s1;
+        const x2 = cx + r2[0]*s2, y2 = cy + r2[1]*s2;
 
-            // Store 3D point for next iteration
-            segments.push(toPoint);
-            currentSegmentCount++;
-        }
+        const depth = (r1[2] + RADIUS) / (2*RADIUS);
+        const alpha = 0.15 + 0.85 * depth;
+        const w = 0.4 + 2.2 * depth;
 
-        function project(x, y, z) {
-            // 1. Rotate
-            // Y Rotation
-            let x1 = x * Math.cos(angleY) - z * Math.sin(angleY);
-            let z1 = z * Math.cos(angleY) + x * Math.sin(angleY);
-            
-            // X Rotation
-            let y2 = y * Math.cos(angleX) - z1 * Math.sin(angleX);
-            let z2 = z1 * Math.cos(angleX) + y * Math.sin(angleX);
+        // Color shifts from deep blue (back) to cyan-white (front)
+        const h = 210 + 50 * (1 - depth);
+        const s = 50 + 50 * depth;
+        const l = 30 + 55 * depth;
 
-            // Z Rotation (Tumbling)
-            let x3 = x1 * Math.cos(angleZ) - y2 * Math.sin(angleZ);
-            let y3 = y2 * Math.cos(angleZ) + x1 * Math.sin(angleZ);
-            z3 = z2; // z is now z3
+        ctx.strokeStyle = `hsla(${h},${s}%,${l}%,${alpha})`;
+        ctx.lineWidth = w;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+    }
 
-            // 2. Perspective
-            // z3 is depth. Center of screen is roughly z=0.
-            // We want the sphere to be at z=0 roughly, but radius is 200.
-            
-            const scale = config.fov / (config.fov + z3);
-            
-            return {
-                x: cx + x3 * scale,
-                y: cy + y3 * scale,
-                z: z3,
-                scale: scale
-            };
-        }
-
-        function drawLine(x1, y1, x2, y2, alpha1, alpha2) {
-            // Calculate average alpha for the stroke
-            // We want line to fade out if it goes too far back, or darken
-            let avgAlpha = (alpha1 + alpha2) / 2;
-            // Clamp alpha to reasonable drawing range (0 to 1)
-            avgAlpha = Math.max(0, Math.min(1, avgAlpha));
-
-            ctx.beginPath();
-            ctx.moveTo(x1, y1);
-            ctx.lineTo(x2, y2);
-            
-            // Dynamic Line Weight based on depth
-            // Closer (lower z, higher scale) = thicker
-            const avgScale = (alpha1 + alpha2) / 2 * config.lineWeight;
-            
-            ctx.lineWidth = Math.max(0.5, avgScale);
-            ctx.strokeStyle = `rgba(${config.baseColor.r}, ${config.baseColor.g}, ${config.baseColor.b}, ${avgAlpha})`;
-            
-            ctx.lineCap = 'round';
-            ctx.lineJoin = 'round';
-            
-            // Optimization: Use globalCompositeOperation for glow effect
-            // Only apply to thicker lines to save performance
-            if (avgScale > 2) {
-                ctx.shadowBlur = 10;
-                ctx.shadowColor = `rgba(${config.baseColor.r}, ${config.baseColor.g}, ${config.baseColor.b}, ${avgAlpha})`;
-            } else {
-                ctx.shadowBlur = 0;
-            }
-
-            ctx.stroke();
-        }
-
-        function update() {
-            // Rotate the entire system
-            angleX += config.rotationSpeed * 0.5;
-            angleY += config.rotationSpeed;
-            angleZ += config.rotationSpeed * 0.2;
-
-            // Phase Logic
-            if (phase === 'grow') {
-                for (let i = 0; i < config.lineGrowthRate; i++) {
-                    if (currentSegmentCount >= config.maxSegments) {
-                        phase = 'hold';
-                        phaseTime = 0;
-                        isFull = true;
-                        break;
-                    }
-                    const lastPt = segments[segments.length - 1];
-                    addRandomPoint(lastPt);
-                    
-                    // Update UI
-                    const pct = Math.floor((currentSegmentCount / config.maxSegments) * 100);
-                    progressEl.innerText = `${pct}%`;
-                    statusEl.innerText = `Density: ${pct}%`;
-                }
-            } else if (phase === 'hold') {
-                phaseTime++;
-                if (phaseTime > config.phases.hold) {
-                    phase = 'shrink';
-                    phaseTime = 0;
-                }
-            } else if (phase === 'shrink') {
-                // We need to redraw the screen with fewer segments.
-                // Since we can't easily "erase" a canvas, we clear and redraw visible history.
-                
-                // Remove the last few segments from memory
-                segments.splice(-config.lineGrowthRate, config.lineGrowthRate);
-                currentSegmentCount -= config.lineGrowthRate;
-
-                // Clear Canvas
-                ctx.clearRect(0, 0, width, height);
-
-                // We need to restore the 3D points to their original positions 
-                // before they were rotated, OR we rotate the current points back.
-                // Since we only stored the *rotated* coordinates in the drawing logic? 
-                // No, we stored 'toPoint' in 3D space. 
-                // But wait, in addRandomPoint, the displacement is applied to local coordinates.
-                // However, we rotate the whole system `angleX/Y/Z`.
-                
-                // To support the "unravel" effect, we simply remove points from the end of the array
-                // and redraw.
-                
-                drawVisibleSegments();
-
-                if (segments.length <= 50) {
-                    phase = 'grow';
-                    phaseTime = 0;
-                    isFull = false;
-                    statusEl.innerText = "Rebuilding...";
-                    progressEl.innerText = "0%";
-                }
-            }
-        }
-
-        function drawVisibleSegments() {
-            // To avoid O(N^2) performance issues, we only iterate through the active segments
-            // and skip the drawing if we are just growing (drawing is incremental).
-            // But when shrinking, we must redraw everything.
-            
-            // Optimization: Iterate backwards or forwards?
-            // The line is continuous.
-            
-            // Note: In 'grow' mode, we draw incrementally in update(). 
-            // In 'shrink' mode, we clear and redraw.
-            
-            if (phase === 'grow') return; 
-
-            const len = segments.length;
-            ctx.lineWidth = 1; // Default, will be overridden per line
-            
-            for (let i = 0; i < len - 1; i++) {
-                const p1 = segments[i];
-                const p2 = segments[i+1];
-                
-                const v1 = project(p1.x, p1.y, p1.z);
-                const v2 = project(p2.x, p2.y, p2.z);
-                
-                drawLine(v1.x, v1.y, v2.x, v2.y, v1.scale, v2.scale);
-            }
-        }
-
-        // Main Loop
-        function loop() {
-            if (phase === 'grow') {
-                update();
-            } else if (phase === 'hold') {
-                // Just rotate and redraw to keep it smooth
-                ctx.clearRect(0, 0, width, height);
-                drawVisibleSegments();
-                update();
-            } else if (phase === 'shrink') {
-                update();
-            }
-            
-            requestAnimationFrame(loop);
-        }
-
-        // Start
-        initSphere();
-        drawVisibleSegments();
-        loop();
-
-    </script>
+    requestAnimationFrame(frame);
+})();
+</script>
 </body>
 </html>

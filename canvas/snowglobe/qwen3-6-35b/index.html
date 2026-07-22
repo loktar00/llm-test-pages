@@ -1,462 +1,725 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Snow Globe Screensaver</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background-color: #050510; /* Dark night background */
-        }
-        canvas {
-            display: block;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Snow Globe</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0a1a; overflow: hidden; }
+canvas { display: block; }
+</style>
 </head>
 <body>
-    <canvas id="globeCanvas"></canvas>
-    <script>
-        const canvas = document.getElementById('globeCanvas');
-        const ctx = canvas.getContext('2d');
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
 
-        // Configuration
-        let width, height, centerX, centerY, globeRadius;
-        const NUM_SNOW = 600;
-        const SHAKE_INTERVAL = 20000; // 20 seconds
-        const SHAKE_DURATION = 2000;
-        
-        // State
-        let time = 0;
-        let shakeStartTime = 0;
-        let isShaking = false;
-        let snowParticles = [];
-        
-        // Globe Geometry
-        const cx = 0, cy = 0; // Set in resize
+let W, H, globeX, globeY, globeR;
 
-        // Resize Handler
-        function resize() {
-            width = canvas.width = window.innerWidth;
-            height = canvas.height = window.innerHeight;
-            centerX = width / 2;
-            centerY = height / 2;
-            globeRadius = Math.min(width, height) * 0.35;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  globeX = W / 2;
+  globeY = H / 2 - 40;
+  globeR = Math.min(W, H) * 0.32;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// --- Scene objects ---
+const cabins = [];
+const trees = [];
+const snowLayers = [];
+
+function initScene() {
+  cabins.length = 0;
+  trees.length = 0;
+  snowLayers.length = 0;
+
+  const groundY = globeY + globeR * 0.55;
+
+  // Cabins
+  const cabinDefs = [
+    { x: -0.15, w: 0.12, h: 0.10, roofH: 0.07, color: '#5a3020', windows: 2 },
+    { x: 0.05, w: 0.15, h: 0.12, roofH: 0.08, color: '#4a2818', windows: 3 },
+    { x: 0.28, w: 0.10, h: 0.09, roofH: 0.06, color: '#6a3828', windows: 2 },
+    { x: -0.38, w: 0.09, h: 0.08, roofH: 0.055, color: '#502818', windows: 1 },
+  ];
+
+  for (const def of cabinDefs) {
+    const cx = globeX + def.x * globeR * 2;
+    const cy = groundY;
+    const cw = def.w * globeR;
+    const ch = def.h * globeR;
+    const crh = def.roofH * globeR;
+    const roofPeakY = cy - ch - crh;
+
+    cabins.push({
+      x: cx, y: cy, w: cw, h: ch, roofH: crh,
+      peakY: roofPeakY, color: def.color,
+      windows: def.windows,
+      windowFlicker: Array.from({ length: def.windows }, () => Math.random() * Math.PI * 2),
+      snowDepth: 0
+    });
+
+    // Snow layer for this cabin
+    snowLayers.push({ x: cx - cw / 2, w: cw, baseY: cy - ch, depth: 0 });
+
+    // Chimney
+    cabins[cabins.length - 1].chimney = {
+      x: cx + cw * 0.3, y: roofPeakY + crh * 0.2,
+      w: cw * 0.12, h: crh * 0.6
+    };
+  }
+
+  // Trees
+  const treeDefs = [
+    { x: -0.48, scale: 1.0 }, { x: -0.30, scale: 0.8 },
+    { x: -0.05, scale: 0.9 }, { x: 0.20, scale: 0.75 },
+    { x: 0.42, scale: 1.1 }, { x: 0.55, scale: 0.85 },
+    { x: -0.55, scale: 0.7 }, { x: 0.62, scale: 0.65 },
+  ];
+
+  for (const def of treeDefs) {
+    const tx = globeX + def.x * globeR * 2;
+    trees.push({
+      x: tx, y: groundY,
+      scale: def.scale,
+      snowDepth: 0
+    });
+  }
+}
+
+// --- Snow particles ---
+const MAX_SNOW = 600;
+const particles = [];
+
+function spawnParticle() {
+  if (particles.length >= MAX_SNOW) return;
+  const angle = Math.random() * Math.PI * 2;
+  const dist = Math.random() * globeR * 0.85;
+  particles.push({
+    x: globeX + Math.cos(angle) * dist,
+    y: globeY - globeR * 0.7 + Math.random() * globeR * 0.4,
+    vx: (Math.random() - 0.5) * 0.5,
+    vy: Math.random() * 0.3 + 0.1,
+    size: Math.random() * 2.5 + 1,
+    opacity: Math.random() * 0.5 + 0.5,
+    settled: false,
+    settleTimer: 0
+  });
+}
+
+function updateParticles(dt, shaking) {
+  const groundY = globeY + globeR * 0.55;
+  const shakeIntensity = shaking ? 8 : 0;
+
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+
+    if (p.settled) {
+      p.settleTimer += dt;
+      if (p.settleTimer > 3) {
+        particles.splice(i, 1);
+      }
+      continue;
+    }
+
+    // Gravity
+    p.vy += 0.08 * dt * 60;
+
+    // Shaking turbulence
+    if (shaking) {
+      p.vx += (Math.random() - 0.5) * shakeIntensity * dt * 60;
+      p.vy += (Math.random() - 0.5) * shakeIntensity * dt * 60;
+      p.vx += Math.sin(Date.now() * 0.01 + i) * 2 * dt * 60;
+      p.vy += Math.cos(Date.now() * 0.013 + i * 0.7) * 1.5 * dt * 60;
+    }
+
+    // Air resistance
+    p.vx *= (1 - 0.02 * dt * 60);
+    p.vy *= (1 - 0.015 * dt * 60);
+
+    // Move
+    p.x += p.vx * dt * 60;
+    p.y += p.vy * dt * 60;
+
+    // Refraction at glass edge
+    const dx = p.x - globeX;
+    const dy = p.y - globeY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    const maxDist = globeR * 0.88;
+
+    if (dist > maxDist) {
+      const nx = dx / dist;
+      const ny = dy / dist;
+      const dot = p.vx * nx + p.vy * ny;
+
+      // Refract: push back inside with slight deflection
+      p.x = globeX + nx * maxDist;
+      p.y = globeY + ny * maxDist;
+
+      // Reflect velocity with energy loss and deflection
+      p.vx -= 1.5 * dot * nx;
+      p.vy -= 1.5 * dot * ny;
+      p.vx *= 0.6;
+      p.vy *= 0.6;
+
+      // Add slight tangential swirl
+      p.vx += -ny * 1.5;
+      p.vy += nx * 1.5;
+    }
+
+    // Collision with cabin roofs
+    for (const cab of cabins) {
+      const roofLeft = cab.x - cab.w / 2;
+      const roofRight = cab.x + cab.w / 2;
+      const roofTop = cab.peakY;
+      const roofBase = cab.y - cab.h;
+
+      // Check if particle is near roof
+      if (p.x > roofLeft - 5 && p.x < roofRight + 5 &&
+          p.y > roofTop - 10 && p.y < roofBase + 5) {
+        // Roof line at this x
+        const t = (p.x - roofLeft) / cab.w;
+        const roofY = roofTop + Math.abs(t - 0.5) * 2 * cab.roofH;
+
+        if (p.y >= roofY) {
+          p.settled = true;
+          p.x = p.x;
+          p.y = roofY - 1;
+          p.vx = 0;
+          p.vy = 0;
+          cab.snowDepth = Math.max(cab.snowDepth, cab.snowDepth + 0.3);
+          // Also add to snow layer
+          const layer = snowLayers.find(l =>
+            Math.abs(l.x - (cab.x - cab.w / 2)) < 1 && Math.abs(l.baseY - cab.y) < 1);
+          if (layer) layer.depth = Math.max(layer.depth, layer.depth + 0.3);
         }
-        window.addEventListener('resize', resize);
-        resize();
+      }
+    }
 
-        // Particle Class
-        class Snow {
-            constructor() {
-                this.reset();
-            }
+    // Collision with tree branches
+    for (const tree of trees) {
+      const treeH = 40 * tree.scale;
+      const treeW = 25 * tree.scale;
+      const trunkH = 8 * tree.scale;
 
-            reset() {
-                // Start inside globe
-                const angle = Math.random() * Math.PI * 2;
-                const r = Math.random() * globeRadius * 0.8;
-                this.x = Math.cos(angle) * r;
-                this.y = Math.sin(angle) * r;
-                
-                this.vx = 0;
-                this.vy = 0;
-                this.size = Math.random() * 2.5 + 0.5;
-                this.opacity = Math.random() * 0.5 + 0.5;
-                this.settled = false;
-                this.settledX = 0;
-                this.settledY = 0;
-            }
+      for (let tier = 0; tier < 3; tier++) {
+        const tierY = tree.y - trunkH - tier * treeH * 0.3;
+        const tierW = treeW * (1 - tier * 0.25);
+        const tierBottom = tierY;
+        const tierTop = tierY - treeH * 0.35;
 
-            update(dt, shakeIntensity) {
-                if (this.settled) {
-                    // Slight settling animation
-                    if (Math.abs(this.x - this.settledX) > 0.1) {
-                        this.x += (this.settledX - this.x) * 0.1;
-                    } else {
-                        this.settled = false;
-                    }
-                    return;
-                }
-
-                // Physics
-                const gravity = 0.05;
-                const drag = 0.96;
-
-                // Turbulence based on shake
-                if (shakeIntensity > 0) {
-                    this.vx += (Math.random() - 0.5) * shakeIntensity * 2;
-                    this.vy += (Math.random() - 0.5) * shakeIntensity * 2;
-                    // Push outwards
-                    const dx = this.x - cx;
-                    const dy = this.y - cy;
-                    const dist = Math.sqrt(dx*dx + dy*dy);
-                    if (dist > 10) {
-                        this.vx += (dx / dist) * shakeIntensity;
-                        this.vy += (dy / dist) * shakeIntensity;
-                    }
-                }
-
-                this.vy += gravity;
-                this.vx *= drag;
-                this.vy *= drag;
-
-                this.x += this.vx;
-                this.y += this.vy;
-
-                // Collision with Ground (The floor of the globe)
-                const floorY = cy + globeRadius * 0.65;
-                
-                // Simple collision resolution
-                if (this.y > floorY) {
-                    this.y = floorY;
-                    this.vy = -this.vy * 0.3; // Bounce
-                    this.vx *= 0.8; // Friction
-                    
-                    if (Math.abs(this.vy) < 0.2 && Math.abs(this.vx) < 0.2) {
-                        this.settled = true;
-                        this.settledX = this.x;
-                        this.settledY = floorY;
-                    }
-                }
-
-                // Containment (Circular)
-                const dx = this.x - cx;
-                const dy = this.y - cy;
-                const dist = Math.sqrt(dx*dx + dy*dy);
-                if (dist > globeRadius - this.size) {
-                    const angle = Math.atan2(dy, dx);
-                    this.x = cx + Math.cos(angle) * (globeRadius - this.size);
-                    this.y = cy + Math.sin(angle) * (globeRadius - this.size);
-                    
-                    // Reflect velocity
-                    const nx = Math.cos(angle);
-                    const ny = Math.sin(angle);
-                    const dot = this.vx * nx + this.vy * ny;
-                    this.vx = (this.vx - 2 * dot * nx) * 0.8;
-                    this.vy = (this.vy - 2 * dot * ny) * 0.8;
-                }
-            }
+        if (p.x > tree.x - tierW && p.x < tree.x + tierW &&
+            p.y > tierTop - 5 && p.y < tierBottom + 5) {
+          if (p.y >= tierTop) {
+            p.settled = true;
+            p.y = tierTop - 1;
+            p.vx = 0;
+            p.vy = 0;
+            tree.snowDepth = Math.max(tree.snowDepth, tree.snowDepth + 0.2);
+          }
         }
+      }
+    }
 
-        // Initialize Snow
-        for (let i = 0; i < NUM_SNOW; i++) {
-            snowParticles.push(new Snow());
+    // Ground collision
+    if (p.y >= groundY) {
+      p.settled = true;
+      p.y = groundY - 1;
+      p.vx = 0;
+      p.vy = 0;
+      // Add to ground snow
+      for (const layer of snowLayers) {
+        if (p.x > layer.x && p.x < layer.x + layer.w) {
+          layer.depth = Math.max(layer.depth, layer.depth + 0.5);
+          break;
         }
-
-        // Drawing Helpers
-        function drawBackground() {
-            // Night sky gradient
-            const grad = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, Math.max(width, height));
-            grad.addColorStop(0, '#0f172a');
-            grad.addColorStop(1, '#020617');
-            ctx.fillStyle = grad;
-            ctx.fillRect(0, 0, width, height);
-
-            // Distant Stars
-            ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
-            for(let i=0; i<50; i++) {
-                const sx = (Math.sin(i * 123.456) * width + width) % width;
-                const sy = (Math.cos(i * 654.321) * height + height) % height;
-                ctx.beginPath();
-                ctx.arc(sx, sy, Math.random() * 1.5, 0, Math.PI*2);
-                ctx.fill();
-            }
+      }
+      // If not near a cabin, add to nearest
+      let found = false;
+      for (const layer of snowLayers) {
+        if (Math.abs(p.x - layer.x) < layer.w) {
+          layer.depth = Math.max(layer.depth, layer.depth + 0.5);
+          found = true;
+          break;
         }
+      }
+    }
 
-        function drawBase() {
-            const baseY = centerY + globeRadius * 1.1;
-            const baseW = globeRadius * 1.4;
-            const baseH = globeRadius * 0.3;
+    // Remove if way outside
+    if (dist > globeR * 1.2) {
+      particles.splice(i, 1);
+    }
+  }
 
-            // Base Shadow
-            ctx.save();
-            ctx.translate(centerX, baseY + 20);
-            ctx.scale(1, 0.3);
-            ctx.beginPath();
-            ctx.arc(0, 0, baseW/2 + 10, 0, Math.PI*2);
-            ctx.fillStyle = 'rgba(0,0,0,0.5)';
-            ctx.fill();
-            ctx.restore();
+  // Ambient spawn
+  if (Math.random() < 0.3 * dt * 60) {
+    spawnParticle();
+  }
+}
 
-            // Base Body (Dark Wood/Marble)
-            const grad = ctx.createLinearGradient(centerX - baseW/2, baseY, centerX + baseW/2, baseY);
-            grad.addColorStop(0, '#3d2b1f');
-            grad.addColorStop(0.5, '#5c4033');
-            grad.addColorStop(1, '#3d2b1f');
-            
-            ctx.fillStyle = grad;
-            ctx.beginPath();
-            ctx.moveTo(centerX - baseW/2, baseY);
-            ctx.quadraticCurveTo(centerX - baseW/2, baseY + baseH, centerX - baseW/2 + 10, baseY + baseH);
-            ctx.lineTo(centerX + baseW/2 - 10, baseY + baseH);
-            ctx.quadraticCurveTo(centerX + baseW/2, baseY + baseH, centerX + baseW/2, baseY);
-            ctx.fill();
+// --- Shaking ---
+let shakeTime = 0;
+let isShaking = false;
+let lastShake = 0;
+const SHAKE_INTERVAL = 20000;
+const SHAKE_DURATION = 2500;
 
-            // Gold trim
-            ctx.strokeStyle = '#d4af37';
-            ctx.lineWidth = 4;
-            ctx.stroke();
-        }
+// --- Drawing ---
+function drawBackground() {
+  const grad = ctx.createRadialGradient(globeX, globeY, 0, globeX, globeY, globeR * 2.5);
+  grad.addColorStop(0, '#1a1a3a');
+  grad.addColorStop(1, '#0a0a1a');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+}
 
-        function drawVillage() {
-            const floorY = centerY + globeRadius * 0.65;
-            
-            // Ground Snow
-            const snowGrad = ctx.createLinearGradient(cx, floorY - 20, cx, floorY + 40);
-            snowGrad.addColorStop(0, '#e0f7fa');
-            snowGrad.addColorStop(1, '#81d4fa');
-            ctx.fillStyle = snowGrad;
-            
-            ctx.beginPath();
-            // Create a curved floor shape
-            ctx.ellipse(cx, floorY, globeRadius * 0.9, 60, 0, 0, Math.PI * 2);
-            ctx.fill();
+function drawGlobeBase() {
+  const baseY = globeY + globeR * 0.65;
+  const baseH = globeR * 0.12;
+  const baseW = globeR * 0.7;
 
-            // Helper to draw a tree
-            const drawTree = (x, y, scale) => {
-                ctx.save();
-                ctx.translate(x, y);
-                ctx.scale(scale, scale);
-                
-                // Trunk
-                ctx.fillStyle = '#3e2723';
-                ctx.fillRect(-3, -10, 6, 10);
+  // Shadow
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(globeX, baseY + baseH + 10, baseW * 0.9, 15, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.fill();
+  ctx.restore();
 
-                // Leaves (3 tiers)
-                ctx.fillStyle = '#1b5e20';
-                ctx.beginPath();
-                ctx.moveTo(0, -50);
-                ctx.lineTo(-15, -10);
-                ctx.lineTo(15, -10);
-                ctx.fill();
+  // Base
+  const baseGrad = ctx.createLinearGradient(globeX - baseW, baseY, globeX + baseW, baseY + baseH);
+  baseGrad.addColorStop(0, '#4a3020');
+  baseGrad.addColorStop(0.3, '#6a4830');
+  baseGrad.addColorStop(0.5, '#7a5840');
+  baseGrad.addColorStop(0.7, '#6a4830');
+  baseGrad.addColorStop(1, '#4a3020');
 
-                ctx.beginPath();
-                ctx.moveTo(0, -70);
-                ctx.lineTo(-12, -30);
-                ctx.lineTo(12, -30);
-                ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(globeX - baseW, baseY);
+  ctx.quadraticCurveTo(globeX - baseW * 1.1, baseY + baseH * 0.5, globeX - baseW * 0.9, baseY + baseH);
+  ctx.lineTo(globeX + baseW * 0.9, baseY + baseH);
+  ctx.quadraticCurveTo(globeX + baseW * 1.1, baseY + baseH * 0.5, globeX + baseW, baseY);
+  ctx.closePath();
+  ctx.fillStyle = baseGrad;
+  ctx.fill();
+  ctx.strokeStyle = '#3a2010';
+  ctx.lineWidth = 2;
+  ctx.stroke();
 
-                ctx.beginPath();
-                ctx.moveTo(0, -90);
-                ctx.lineTo(-9, -50);
-                ctx.lineTo(9, -50);
-                ctx.fill();
+  // Gold trim
+  ctx.beginPath();
+  ctx.moveTo(globeX - baseW, baseY);
+  ctx.quadraticCurveTo(globeX - baseW * 1.1, baseY + baseH * 0.5, globeX - baseW * 0.9, baseY + baseH);
+  ctx.lineTo(globeX + baseW * 0.9, baseY + baseH);
+  ctx.quadraticCurveTo(globeX + baseW * 1.1, baseY + baseH * 0.5, globeX + baseW, baseY);
+  ctx.closePath();
+  ctx.strokeStyle = '#c8a050';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+}
 
-                ctx.restore();
-            };
+function drawGround() {
+  const groundY = globeY + globeR * 0.55;
 
-            // Helper to draw a cabin
-            const drawCabin = (x, y, scale, color) => {
-                ctx.save();
-                ctx.translate(x, y);
-                ctx.scale(scale, scale);
+  // Snow ground
+  ctx.beginPath();
+  ctx.moveTo(globeX - globeR * 0.9, groundY + 10);
+  ctx.quadraticCurveTo(globeX, groundY - 5, globeX + globeR * 0.9, groundY + 10);
+  ctx.lineTo(globeX + globeR * 0.9, globeY + globeR * 0.7);
+  ctx.lineTo(globeX - globeR * 0.9, globeY + globeR * 0.7);
+  ctx.closePath();
 
-                // Wall
-                ctx.fillStyle = color;
-                ctx.fillRect(-20, -30, 40, 30);
+  const groundGrad = ctx.createLinearGradient(globeX, groundY - 5, globeX, globeY + globeR * 0.7);
+  groundGrad.addColorStop(0, '#e8eef5');
+  groundGrad.addColorStop(0.5, '#d0d8e5');
+  groundGrad.addColorStop(1, '#b8c0d0');
+  ctx.fillStyle = groundGrad;
+  ctx.fill();
+}
 
-                // Roof
-                ctx.fillStyle = '#b71c1c'; // Red roof
-                ctx.beginPath();
-                ctx.moveTo(-25, -30);
-                ctx.lineTo(0, -55);
-                ctx.lineTo(25, -30);
-                ctx.fill();
+function drawCabin(cab) {
+  const { x, y, w, h, roofH, peakY, color, windows, windowFlicker, snowDepth } = cab;
+  const roofBase = y - h;
 
-                // Snow on Roof
-                ctx.fillStyle = 'white';
-                ctx.beginPath();
-                ctx.moveTo(-25, -30);
-                ctx.lineTo(0, -52);
-                ctx.lineTo(25, -30);
-                ctx.lineTo(22, -28);
-                ctx.lineTo(0, -48);
-                ctx.lineTo(-22, -28);
-                ctx.fill();
+  // Snow on roof
+  if (snowDepth > 0.5) {
+    ctx.beginPath();
+    ctx.moveTo(x - w / 2 - 3, roofBase);
+    ctx.lineTo(x, peakY - snowDepth);
+    ctx.lineTo(x + w / 2 + 3, roofBase);
+    ctx.closePath();
+    ctx.fillStyle = '#e0e8f0';
+    ctx.fill();
+  }
 
-                // Door
-                ctx.fillStyle = '#3e2723';
-                ctx.fillRect(-5, -15, 10, 15);
+  // Chimney
+  const ch = cab.chimney;
+  ctx.fillStyle = '#5a3020';
+  ctx.fillRect(ch.x - ch.w / 2, ch.y, ch.w, ch.h);
+  ctx.fillStyle = '#4a2818';
+  ctx.fillRect(ch.x - ch.w / 2 + 1, ch.y + 1, ch.w - 2, ch.h - 2);
 
-                // Windows
-                drawWindow(-10, -20, 6, 6);
-                drawWindow(10, -20, 6, 6);
+  // Chimney snow
+  ctx.fillStyle = '#d8e0e8';
+  ctx.beginPath();
+  ctx.ellipse(ch.x, ch.y, ch.w * 0.7, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
 
-                ctx.restore();
-            };
+  // Smoke from chimney
+  const smokeOffset = Date.now() * 0.001;
+  for (let s = 0; s < 3; s++) {
+    const sy = ch.y - 5 - s * 12 - Math.sin(smokeOffset + s) * 3;
+    const sx = ch.x + Math.sin(smokeOffset * 0.7 + s * 1.5) * 5;
+    const sr = 3 + s * 2;
+    const so = 0.15 - s * 0.04;
+    ctx.beginPath();
+    ctx.arc(sx, sy, sr, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(180,190,200,${so})`;
+    ctx.fill();
+  }
 
-            const drawWindow = (x, y, w, h) => {
-                // Glow
-                const flicker = Math.random() * 0.2 + 0.8;
-                ctx.shadowBlur = 10 * flicker;
-                ctx.shadowColor = '#ffeb3b';
-                ctx.fillStyle = `rgba(255, 235, 59, ${flicker})`;
-                ctx.fillRect(x, y, w, h);
-                ctx.shadowBlur = 0; // Reset
-                
-                // Frame
-                ctx.strokeStyle = '#3e2723';
-                ctx.lineWidth = 1;
-                ctx.strokeRect(x, y, w, h);
-                ctx.beginPath();
-                ctx.moveTo(x + w/2, y);
-                ctx.lineTo(x + w/2, y + h);
-                ctx.moveTo(x, y + h/2);
-                ctx.lineTo(x + w, y + h/2);
-                ctx.stroke();
-            };
+  // Cabin body
+  const bodyGrad = ctx.createLinearGradient(x - w / 2, roofBase, x + w / 2, y);
+  bodyGrad.addColorStop(0, color);
+  bodyGrad.addColorStop(1, '#3a1a0a');
+  ctx.fillStyle = bodyGrad;
+  ctx.fillRect(x - w / 2, roofBase, w, h);
 
-            // Draw Objects
-            // Order matters for depth
-            drawTree(cx - 80, floorY - 5, 1.5);
-            drawTree(cx + 90, floorY - 10, 1.2);
-            drawTree(cx - 40, floorY - 15, 0.8);
-            
-            drawCabin(cx - 30, floorY - 5, 1, '#795548'); // Left Cabin
-            drawCabin(cx + 40, floorY, 1.2, '#5d4037');  // Right Cabin
-            
-            // Chimney smoke (simple particles)
-            const drawSmoke = (x, y) => {
-                ctx.fillStyle = 'rgba(200,200,200,0.3)';
-                for(let i=0; i<5; i++) {
-                    const ox = Math.sin(time * 0.05 + i) * 5;
-                    const oy = -i * 10 - (time * 0.5) % 50;
-                    const r = 5 + i * 2;
-                    const a = 0.3 - (i * 0.06);
-                    ctx.globalAlpha = a;
-                    ctx.beginPath();
-                    ctx.arc(x + ox, y + oy, r, 0, Math.PI*2);
-                    ctx.fill();
-                }
-                ctx.globalAlpha = 1;
-            };
-            
-            drawSmoke(cx - 20, floorY - 55);
-            drawSmoke(cx + 50, floorY - 60);
-        }
+  // Wood grain lines
+  ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+  ctx.lineWidth = 1;
+  for (let ly = roofBase + 8; ly < y; ly += 6) {
+    ctx.beginPath();
+    ctx.moveTo(x - w / 2, ly);
+    ctx.lineTo(x + w / 2, ly);
+    ctx.stroke();
+  }
 
-        function drawSnowParticles() {
-            ctx.fillStyle = 'white';
-            for (let p of snowParticles) {
-                ctx.globalAlpha = p.opacity;
-                ctx.beginPath();
-                ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-                ctx.fill();
-            }
-            ctx.globalAlpha = 1;
-        }
+  // Roof
+  ctx.beginPath();
+  ctx.moveTo(x - w / 2 - 5, roofBase);
+  ctx.lineTo(x, peakY);
+  ctx.lineTo(x + w / 2 + 5, roofBase);
+  ctx.closePath();
+  const roofGrad = ctx.createLinearGradient(x, peakY, x, roofBase);
+  roofGrad.addColorStop(0, '#3a1810');
+  roofGrad.addColorStop(1, '#5a2818');
+  ctx.fillStyle = roofGrad;
+  ctx.fill();
+  ctx.strokeStyle = '#2a1008';
+  ctx.lineWidth = 1;
+  ctx.stroke();
 
-        function drawGlassOverlay() {
-            // 1. Internal Darkening (atmosphere)
-            const grad = ctx.createRadialGradient(cx, cy, globeRadius * 0.6, cx, cy, globeRadius);
-            grad.addColorStop(0, 'rgba(0,0,0,0)');
-            grad.addColorStop(1, 'rgba(0,0,20,0.3)');
-            ctx.fillStyle = grad;
-            ctx.beginPath();
-            ctx.arc(cx, cy, globeRadius, 0, Math.PI * 2);
-            ctx.fill();
+  // Windows
+  const winW = w * 0.15;
+  const winH = h * 0.35;
+  const winSpacing = w / (windows + 1);
+  const winY = roofBase + h * 0.25;
 
-            // 2. Environment Reflection (Gradient)
-            const refGrad = ctx.createLinearGradient(cx - globeRadius, cy - globeRadius, cx + globeRadius, cy + globeRadius);
-            refGrad.addColorStop(0, 'rgba(255, 255, 255, 0.15)');
-            refGrad.addColorStop(0.2, 'rgba(255, 255, 255, 0)');
-            refGrad.addColorStop(0.8, 'rgba(255, 255, 255, 0)');
-            refGrad.addColorStop(1, 'rgba(255, 255, 255, 0.1)');
-            ctx.fillStyle = refGrad;
-            ctx.beginPath();
-            ctx.arc(cx, cy, globeRadius, 0, Math.PI * 2);
-            ctx.fill();
+  for (let wi = 0; wi < windows; wi++) {
+    const wx = x - winSpacing + winSpacing * (wi + 1) - winW / 2;
+    const flicker = Math.sin(Date.now() * 0.003 + windowFlicker[wi]) * 0.2 + 0.8;
+    const flicker2 = Math.sin(Date.now() * 0.007 + windowFlicker[wi] * 2.3) * 0.1 + 0.9;
+    const brightness = flicker * flicker2;
 
-            // 3. Rim Shadow
-            ctx.lineWidth = 4;
-            ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-            ctx.beginPath();
-            ctx.arc(cx, cy, globeRadius, 0, Math.PI * 2);
-            ctx.stroke();
+    // Window glow
+    ctx.save();
+    ctx.shadowColor = `rgba(255, 180, 60, ${brightness * 0.6})`;
+    ctx.shadowBlur = 15 * brightness;
 
-            // 4. Specular Highlight (The "Glass" shine)
-            ctx.save();
-            ctx.beginPath();
-            ctx.arc(cx - globeRadius*0.3, cy - globeRadius*0.3, globeRadius*0.15, 0, Math.PI*2);
-            ctx.fillStyle = 'rgba(255,255,255,0.4)';
-            ctx.filter = 'blur(4px)';
-            ctx.fill();
-            ctx.restore();
-        }
+    // Window pane
+    ctx.fillStyle = `rgba(255, 200, 80, ${brightness})`;
+    ctx.fillRect(wx, winY, winW, winH);
 
-        function animate() {
-            time++;
-            ctx.clearRect(0, 0, width, height);
+    // Window frame
+    ctx.restore();
+    ctx.strokeStyle = '#2a1008';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(wx, winY, winW, winH);
 
-            drawBackground();
+    // Cross frame
+    ctx.beginPath();
+    ctx.moveTo(wx + winW / 2, winY);
+    ctx.lineTo(wx + winW / 2, winY + winH);
+    ctx.moveTo(wx, winY + winH / 2);
+    ctx.lineTo(wx + winW, winY + winH / 2);
+    ctx.strokeStyle = '#2a1008';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
 
-            // Shake Logic
-            let shakeIntensity = 0;
-            const now = Date.now();
-            if (isShaking) {
-                const elapsed = now - shakeStartTime;
-                const progress = elapsed / SHAKE_DURATION;
-                
-                if (progress >= 1) {
-                    isShaking = false;
-                } else {
-                    // Shake curve: Ramp up, stay high, ramp down
-                    if (progress < 0.2) shakeIntensity = progress / 0.2;
-                    else if (progress < 0.8) shakeIntensity = 1;
-                    else shakeIntensity = 1 - (progress - 0.8) / 0.2;
-                    
-                    // Jitter the canvas context
-                    const jitterX = (Math.random() - 0.5) * shakeIntensity * 10;
-                    const jitterY = (Math.random() - 0.5) * shakeIntensity * 10;
-                    ctx.save();
-                    ctx.translate(jitterX, jitterY);
-                }
-            }
+    // Warm glow on ground
+    ctx.save();
+    ctx.globalAlpha = brightness * 0.15;
+    const glowGrad = ctx.createRadialGradient(wx + winW / 2, y, 0, wx + winW / 2, y, w * 0.6);
+    glowGrad.addColorStop(0, '#ffcc44');
+    glowGrad.addColorStop(1, 'transparent');
+    ctx.fillStyle = glowGrad;
+    ctx.fillRect(wx - w * 0.3, y, winW + w * 0.6, h * 0.5);
+    ctx.restore();
+  }
 
-            // Check for next shake
-            if (!isShaking && (now - shakeStartTime > SHAKE_INTERVAL)) {
-                isShaking = true;
-                shakeStartTime = now;
-            }
-            
-            // Ensure initial shake happens
-            if (now - shakeStartTime > SHAKE_INTERVAL && !isShaking) {
-                 isShaking = true;
-                 shakeStartTime = now;
-            }
+  // Door
+  const doorW = w * 0.18;
+  const doorH = h * 0.55;
+  const doorX = x - doorW / 2;
+  const doorY = y - doorH;
+  ctx.fillStyle = '#2a1008';
+  ctx.fillRect(doorX, doorY, doorW, doorH);
+  ctx.strokeStyle = '#1a0800';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(doorX, doorY, doorW, doorH);
+  // Door knob
+  ctx.beginPath();
+  ctx.arc(doorX + doorW * 0.75, doorY + doorH * 0.5, 2, 0, Math.PI * 2);
+  ctx.fillStyle = '#8a7040';
+  ctx.fill();
+}
 
+function drawTree(tree) {
+  const { x, y, scale, snowDepth } = tree;
+  const trunkH = 8 * scale;
+  const trunkW = 4 * scale;
+  const treeH = 40 * scale;
+  const treeW = 25 * scale;
 
-            drawBase();
-            drawVillage();
+  // Trunk
+  ctx.fillStyle = '#3a2010';
+  ctx.fillRect(x - trunkW / 2, y - trunkH, trunkW, trunkH);
 
-            // Update and Draw Snow
-            // We apply a slight tilt to the global gravity vector if shaking
-            const tilt = isShaking ? (Math.random()-0.5) * 0.05 : 0;
-            
-            for (let p of snowParticles) {
-                p.update(1, shakeIntensity);
-            }
-            drawSnowParticles();
+  // Tree tiers
+  for (let tier = 0; tier < 3; tier++) {
+    const tierY = y - trunkH - tier * treeH * 0.3;
+    const tierW = treeW * (1 - tier * 0.25);
+    const tierBottom = tierY;
+    const tierTop = tierY - treeH * 0.35;
 
-            // Restore context if shaken
-            if (isShaking) {
-                ctx.restore();
-            }
+    const tierGrad = ctx.createLinearGradient(x, tierTop, x, tierBottom);
+    tierGrad.addColorStop(0, tier === 0 ? '#1a4a2a' : '#1a3a20');
+    tierGrad.addColorStop(1, tier === 0 ? '#0a2a10' : '#0a1a08');
 
-            drawGlassOverlay();
+    ctx.beginPath();
+    ctx.moveTo(x, tierTop);
+    ctx.lineTo(x - tierW, tierBottom);
+    ctx.lineTo(x + tierW, tierBottom);
+    ctx.closePath();
+    ctx.fillStyle = tierGrad;
+    ctx.fill();
 
-            requestAnimationFrame(animate);
-        }
+    // Snow on branches
+    if (snowDepth > 0.3) {
+      ctx.beginPath();
+      ctx.moveTo(x - tierW * 0.8, tierTop + (tierBottom - tierTop) * 0.3);
+      ctx.quadraticCurveTo(x, tierTop - snowDepth * 0.5, x + tierW * 0.8, tierTop + (tierBottom - tierTop) * 0.3);
+      ctx.lineTo(x + tierW * 0.6, tierTop + (tierBottom - tierTop) * 0.4);
+      ctx.quadraticCurveTo(x, tierTop + (tierBottom - tierTop) * 0.15, x - tierW * 0.6, tierTop + (tierBottom - tierTop) * 0.4);
+      ctx.closePath();
+      ctx.fillStyle = `rgba(220, 230, 240, ${Math.min(snowDepth * 0.3, 0.7)})`;
+      ctx.fill();
+    }
+  }
 
-        // Start
-        shakeStartTime = Date.now(); // Trigger first shake soon
-        animate();
+  // Snow on top
+  if (snowDepth > 0.2) {
+    ctx.beginPath();
+    ctx.ellipse(x, y - trunkH - treeH * 0.35, treeW * 0.3, 3, 0, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(220, 230, 240, ${Math.min(snowDepth * 0.4, 0.8)})`;
+    ctx.fill();
+  }
+}
 
-    </script>
+function drawSnowLayers() {
+  for (const layer of snowLayers) {
+    if (layer.depth < 0.5) continue;
+    const depth = layer.depth;
+    ctx.beginPath();
+    ctx.moveTo(layer.x, layer.baseY);
+    for (let sx = layer.x; sx <= layer.x + layer.w; sx += 2) {
+      const t = (sx - layer.x) / layer.w;
+      const bump = Math.sin(t * Math.PI) * depth * 0.5;
+      ctx.lineTo(sx, layer.baseY - depth + bump);
+    }
+    ctx.lineTo(layer.x + layer.w, layer.baseY);
+    ctx.closePath();
+    ctx.fillStyle = '#dce4ee';
+    ctx.fill();
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(240, 245, 255, ${p.opacity})`;
+    ctx.fill();
+  }
+}
+
+function drawGlassReflection() {
+  ctx.save();
+
+  // Clip to globe
+  ctx.beginPath();
+  ctx.arc(globeX, globeY, globeR, 0, Math.PI * 2);
+  ctx.clip();
+
+  // Inner glow
+  const innerGlow = ctx.createRadialGradient(globeX, globeY, globeR * 0.3, globeX, globeY, globeR);
+  innerGlow.addColorStop(0, 'rgba(100, 140, 200, 0.03)');
+  innerGlow.addColorStop(1, 'rgba(50, 80, 140, 0.08)');
+  ctx.fillStyle = innerGlow;
+  ctx.fillRect(globeX - globeR, globeY - globeR, globeR * 2, globeR * 2);
+
+  ctx.restore();
+
+  // Glass outline
+  ctx.beginPath();
+  ctx.arc(globeX, globeY, globeR, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(180, 200, 230, 0.3)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Main highlight (top-left)
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(globeX, globeY, globeR, 0, Math.PI * 2);
+  ctx.clip();
+
+  const hlGrad = ctx.createRadialGradient(
+    globeX - globeR * 0.35, globeY - globeR * 0.35, 0,
+    globeX - globeR * 0.35, globeY - globeR * 0.35, globeR * 0.6
+  );
+  hlGrad.addColorStop(0, 'rgba(255, 255, 255, 0.25)');
+  hlGrad.addColorStop(0.5, 'rgba(255, 255, 255, 0.05)');
+  hlGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+  ctx.fillStyle = hlGrad;
+  ctx.fillRect(globeX - globeR, globeY - globeR, globeR * 2, globeR * 2);
+
+  // Secondary highlight (bottom-right)
+  const hl2Grad = ctx.createRadialGradient(
+    globeX + globeR * 0.3, globeY + globeR * 0.3, 0,
+    globeX + globeR * 0.3, globeY + globeR * 0.3, globeR * 0.3
+  );
+  hl2Grad.addColorStop(0, 'rgba(255, 255, 255, 0.08)');
+  hl2Grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+  ctx.fillStyle = hl2Grad;
+  ctx.fillRect(globeX - globeR, globeY - globeR, globeR * 2, globeR * 2);
+
+  ctx.restore();
+
+  // Glass edge ring
+  ctx.beginPath();
+  ctx.arc(globeX, globeY, globeR, 0, Math.PI * 2);
+  const edgeGrad = ctx.createRadialGradient(globeX, globeY, globeR - 8, globeX, globeY, globeR);
+  edgeGrad.addColorStop(0, 'rgba(200, 220, 240, 0)');
+  edgeGrad.addColorStop(1, 'rgba(200, 220, 240, 0.15)');
+  ctx.strokeStyle = edgeGrad;
+  ctx.lineWidth = 8;
+  ctx.stroke();
+}
+
+function drawAmbientParticles() {
+  // Dust/snow outside globe
+  const time = Date.now() * 0.0003;
+  for (let i = 0; i < 30; i++) {
+    const ax = (Math.sin(time + i * 7.3) * 0.5 + 0.5) * W;
+    const ay = (Math.cos(time * 0.7 + i * 3.1) * 0.5 + 0.5) * H;
+    const ao = 0.05 + Math.sin(time + i) * 0.03;
+    ctx.beginPath();
+    ctx.arc(ax, ay, 1, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(180, 200, 230, ${ao})`;
+    ctx.fill();
+  }
+}
+
+// --- Main loop ---
+let lastTime = performance.now();
+
+function update(now) {
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+
+  // Shake logic
+  const elapsed = now - lastShake;
+  if (!isShaking && elapsed > SHAKE_INTERVAL) {
+    isShaking = true;
+    shakeTime = 0;
+  }
+
+  if (isShaking) {
+    shakeTime += dt * 1000;
+    if (shakeTime > SHAKE_DURATION) {
+      isShaking = false;
+      lastShake = now;
+    }
+  }
+
+  updateParticles(dt, isShaking);
+
+  // Slowly accumulate snow between shakes
+  for (const cab of cabins) {
+    cab.snowDepth = Math.min(cab.snowDepth + dt * 0.02, 8);
+  }
+  for (const tree of trees) {
+    tree.snowDepth = Math.min(tree.snowDepth + dt * 0.015, 6);
+  }
+
+  draw();
+  requestAnimationFrame(update);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+
+  drawBackground();
+  drawAmbientParticles();
+
+  // Globe content (clipped)
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(globeX, globeY, globeR - 1, 0, Math.PI * 2);
+  ctx.clip();
+
+  // Dark interior background
+  const intGrad = ctx.createRadialGradient(globeX, globeY, 0, globeX, globeY, globeR);
+  intGrad.addColorStop(0, '#1a2040');
+  intGrad.addColorStop(1, '#0a0a1a');
+  ctx.fillStyle = intGrad;
+  ctx.fillRect(globeX - globeR, globeY - globeR, globeR * 2, globeR * 2);
+
+  drawGround();
+  drawSnowLayers();
+
+  // Draw trees behind cabins
+  for (const tree of trees) {
+    if (tree.x < globeX - globeR * 0.1) drawTree(tree);
+  }
+
+  // Draw cabins
+  for (const cab of cabins) {
+    drawCabin(cab);
+  }
+
+  // Draw trees in front
+  for (const tree of trees) {
+    if (tree.x >= globeX - globeR * 0.1) drawTree(tree);
+  }
+
+  drawParticles();
+
+  ctx.restore();
+
+  drawGlassReflection();
+  drawGlobeBase();
+}
+
+// --- Init ---
+initScene();
+requestAnimationFrame(update);
+</script>
 </body>
 </html>

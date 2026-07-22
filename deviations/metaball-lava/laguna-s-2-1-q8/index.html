@@ -1,189 +1,159 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <title>Metaball Lava Lamp</title>
-    <style>
-        html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
-        canvas { display: block; width: 100vw; height: 100vh; }
-    </style>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Metaball Lava Lamp</title>
+<style>
+    * {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+    }
+    canvas {
+        display: block;
+    }
+</style>
 </head>
 <body>
-<canvas id="lamp"></canvas>
+<canvas id="canvas"></canvas>
 <script>
-(() => {
-    const canvas = document.getElementById('lamp');
-    const gl = canvas.getContext('webgl2');
-    if (!gl) alert('WebGL2 required');
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
 
-    function resize() {
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
-        gl.viewport(0, 0, canvas.width, canvas.height);
+let width, height, dpr;
+
+function resize() {
+    dpr = window.devicePixelRatio || 1;
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    canvas.style.width = width + "px";
+    canvas.style.height = height + "px";
+    ctx.scale(dpr, dpr);
+}
+window.addEventListener("resize", resize);
+resize();
+
+const NUM = 10;
+const blobs = [];
+
+for (let i = 0; i < NUM; i++) {
+    blobs.push({
+        x: Math.random() * width,
+        y: Math.random() * height,
+        vx: (Math.random() - 0.5) * 0.4,
+        vy: (Math.random() - 0.3) * 0.6 + 0.3,
+        speed: 0.4 + Math.random() * 0.3,
+        r: 30 + Math.random() * 30,
+        heat: Math.random(),
+        targetHeat: Math.random(),
+    });
+}
+
+function update() {
+    for (const b of blobs) {
+        // Heat cycles: warm at base, cool at top
+        b.targetHeat = b.y / height;
+        b.heat += (b.targetHeat - b.heat) * 0.02;
+
+        // Vertical movement influenced by heat
+        b.vy = (0.3 + (1 - b.heat) * 0.5) * b.speed;
+
+        b.x += b.vx * b.speed;
+        b.y += b.vy * b.speed;
+
+        // Wrap around
+        if (b.x < -b.r) b.x = width + b.r;
+        if (b.x > width + b.r) b.x = -b.r;
+        if (b.y < -b.r) b.y = height + b.r;
+        if (b.y > height + b.r) b.y = -b.r;
+
+        // Horizontal wobble
+        b.vx += (Math.random() - 0.5) * 0.01;
+        b.vx *= 0.98;
     }
-    window.addEventListener('resize', resize);
-    resize();
+}
 
-    const vertShaderSrc = `#version 300 es
-    precision highp float;
-    out vec2 vUv;
-    void main() {
-        vUv = (gl_VertexID == 0) ? vec2(0.0) : 
-              (gl_VertexID == 1) ? vec2(1.0, 0.0) :
-              (gl_VertexID == 2) ? vec2(0.0, 1.0) : vec2(1.0);
-        gl_Position = vec4(vUv * 2.0 - 1.0, 0.0, 1.0);
-    }`;
+// Field resolution
+let resX = Math.floor(width / 6);
+let resY = Math.floor(height / 6);
+let field = new Uint8Array(resX * resY);
+let imageData = ctx.createImageData(resX, resY);
 
-    const fragmentShaderSrc = `#version 300 es
-    precision highp float;
-    in vec2 vUv;
-    out vec4 fragColor;
+function render() {
+    // Update field
+    for (let i = 0; i < field.length; i++) field[i] = 0;
 
-    uniform vec2 u_resolution;
-    uniform float u_time;
+    for (const b of blobs) {
+        const bx = Math.floor(b.x / (width / resX));
+        const by = Math.floor(b.y / (height / resY));
+        const radius = b.r / (width / resX);
 
-    // Hash function for pseudo-random numbers
-    float hash(vec2 p) {
-        return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
-    }
-
-    // Smooth noise over time
-    float noise(vec2 p, float t) {
-        vec2 i = floor(p);
-        vec2 f = fract(p);
-        float a = hash(i);
-        float b = hash(i + vec2(1.0, 0.0));
-        float c = hash(i + vec2(0.0, 1.0));
-        float d = hash(i + vec2(1.0, 1.0));
-        vec2 u = f * f * (3.0 - 2.0 * f);
-        return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
-    }
-
-    void main() {
-        vec2 uv = vUv;
-        vec2 resolution = u_resolution;
-
-        // Normalize UV coordinates
-        vec2 pos = uv * resolution;
-
-        // Simulate heat convection cells - blobs rise at center, sink at edges
-        // This creates natural-looking movement
-        
-        float t = u_time * 0.3;
-        int numBlobs = 10;
-        float metaballSum = 0.0;
-        vec3 color = vec3(0.0);
-        vec2 centerGlow = vec2(0.0);
-        float glowWeight = 0.0;
-
-        for (int i = 0; i < 12; i++) {
-            if (i >= numBlobs) break;
-
-            // Generate unique movement pattern per blob
-            float phase = float(i) / float(numBlobs) * 3.14159 * 2.0;
-            float speed = 0.2 + 0.1 * hash(vec2(float(i), 0.0));
-            float driftX = sin(t * speed + phase) * 0.15 + cos(t * 0.05 + phase * 1.3) * 0.1;
-            float verticalCycle = fract((t * (0.3 + speed) + phase) * 0.2 + hash(vec2(float(i), 1.0)));
-            
-            // Apply heat cycle: blobs rise slowly, cool down, sink back
-            float yPos = mix(0.1, 0.9, verticalCycle);
-            // Add some vertical oscillation based on convection
-            float convectionRise = sin(yPos * 3.14159 + t * 0.2) * 0.02;
-            yPos += convectionRise;
-            
-            vec2 blobPos = vec2(
-                0.5 + driftX,
-                yPos
-            );
-
-            // Blob size varies with temperature (larger when warm at bottom)
-            float tempFactor = smoothstep(0.1, 0.9, yPos); // cooler at top, warmer at bottom
-            float size = 0.08 + tempFactor * 0.05; // larger when warm
-
-            vec2 diff = pos / resolution - blobPos;
-            float distSq = dot(diff, diff);
-            float influence = size * size / (distSq + 0.0001);
-            
-            metaballSum += influence;
-
-            // Color based on temperature
-            vec3 warmColor = mix(vec3(0.9, 0.4, 0.1), vec3(1.0, 0.7, 0.2), tempFactor);
-            vec3 coolColor = mix(vec3(0.1, 0.3, 0.8), vec3(0.2, 0.2, 0.9), tempFactor);
-            vec3 blobColor = mix(coolColor, warmColor, tempFactor);
-            
-            color += blobColor * influence;
-
-            // Track glow positions
-            centerGlow += blobPos * influence;
-            glowWeight += influence;
+        for (let dy = -radius - 2; dy <= radius + 2; dy++) {
+            for (let dx = -radius - 2; dx <= radius + 2; dx++) {
+                const px = bx + dx;
+                const py = by + dy;
+                if (px < 0 || px >= resX || py < 0 || py >= resY) continue;
+                const distSq = dx * dx + dy * dy;
+                if (distSq > (radius + 1) * (radius + 1)) continue;
+                const val = (1 - distSq / (radius * radius)) * 255;
+                const idx = py * resX + px;
+                field[idx] += val > field[idx] ? val : 0;
+            }
         }
-
-        // Threshold to create solid blobs
-        float threshold = 0.8;
-        if (metaballSum > threshold) {
-            // Normalize color by total influence
-            color /= max(glowWeight, 0.001);
-
-            // Deep glass lamp color grading
-            vec3 lampColor = mix(vec3(0.1, 0.05, 0.2), vec3(0.3, 0.1, 0.4), smoothstep(0.1, 0.7, metaballSum));
-            color = mix(lampColor, color, 0.7);
-
-            // Add subtle inner glow at blob cores
-            vec2 glowCenter = centerGlow / max(glowWeight, 0.001);
-            float coreGlow = exp(-length(pos / resolution - glowCenter) * 6.0) * 0.5;
-            color += vec3(1.0, 0.8, 0.6) * coreGlow * smoothstep(0.0, 0.3, metaballSum - threshold);
-
-            fragColor = vec4(color, 1.0);
-        } else {
-            // Background with dark gradient
-            vec3 bg = mix(vec3(0.0, 0.0, 0.05), vec3(0.05, 0.0, 0.1), uv.y);
-            fragColor = vec4(bg, 1.0);
-        }
-    }`;
-
-    // Create shaders
-    function createShader(type, source) {
-        const shader = gl.createShader(type);
-        gl.shaderSource(shader, source);
-        gl.compileShader(shader);
-        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-            console.error('Shader compile error:', gl.getShaderInfoLog(shader));
-            gl.deleteShader(shader);
-            return null;
-        }
-        return shader;
     }
 
-    const vertexShader = createShader(gl.VERTEX_SHADER, vertShaderSrc);
-    const fragmentShader = createShader(gl.FRAGMENT_SHADER, fragmentShaderSrc);
-
-    const program = gl.createProgram();
-    gl.attachShader(program, vertexShader);
-    gl.attachShader(program, fragmentShader);
-    gl.linkProgram(program);
-
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-        console.error('Program link error:', gl.getProgramInfoLog(program));
+    // Draw thresholded field
+    for (let i = 0; i < field.length; i++) {
+        const val = field[i] > 128 ? 255 : 0;
+        imageData.data[i * 4] = val;     // R
+        imageData.data[i * 4 + 1] = val; // G
+        imageData.data[i * 4 + 2] = val; // B
+        imageData.data[i * 4 + 3] = val; // A
     }
 
-    const resolutionLoc = gl.getUniformLocation(program, 'u_resolution');
-    const timeLoc = gl.getUniformLocation(program, 'u_time');
+    const blobCanvas = document.createElement("canvas");
+    blobCanvas.width = resX;
+    blobCanvas.height = resY;
+    const blobCtx = blobCanvas.getContext("2d");
+    blobCtx.putImageData(imageData, 0, 0);
 
-    let startTime = Date.now();
-    function render() {
-        const elapsed = (Date.now() - startTime) * 0.001;
+    ctx.clearRect(0, 0, width, height);
 
-        gl.useProgram(program);
-        gl.uniform2f(resolutionLoc, canvas.width, canvas.height);
-        gl.uniform1f(timeLoc, elapsed);
+    // Color grading: glass lamp effect
+    ctx.fillStyle = "#0a001f";
+    ctx.fillRect(0, 0, width, height);
 
-        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    // Draw upscale metaballs with color based on heat
+    ctx.filter = "blur(2px)";
+    ctx.drawImage(blobCanvas, 0, 0, width, height);
+    ctx.filter = "none";
 
-        requestAnimationFrame(render);
+    for (const b of blobs) {
+        const t = b.heat;
+        const hue = t < 0.5
+            ? 20 + t * 40   // Cool -> orange
+            : 40 + t * 30;  // Warm -> red
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, b.r * 0.4, 0, Math.PI * 2);
+        ctx.fillStyle = `hsla(${hue}, 90%, 50%, 0.7)`;
+        ctx.shadowBlur = b.r * 2;
+        ctx.shadowColor = `hsla(${hue}, 100%, 60%, 0.8)`;
+        ctx.fill();
     }
 
+    ctx.shadowBlur = 0;
+}
+
+function loop() {
+    update();
     render();
-})();
+    requestAnimationFrame(loop);
+}
+
+loop();
 </script>
 </body>
 </html>

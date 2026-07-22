@@ -1,409 +1,692 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Paper Planes - Atrium Screensaver</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background-color: #1a1a1a;
-        }
-        canvas {
-            display: block;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Paper Planes</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; width: 100%; height: 100%; }
+</style>
 </head>
 <body>
-    <canvas id="canvas"></canvas>
-    <script>
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H, cx, cy, focal;
 
-        let width, height;
-        let particles = [];
-        let planes = [];
-        const NUM_PLANES = 10;
-        const NUM_PARTICLES = 150;
-        
-        // Atrium Geometry & Physics
-        const FLOOR_Y_OFFSET = 100; // Perspective shift
-        const THERMAL_X = 0; // Center of screen
-        const THERMAL_STRENGTH = 0.08;
-        const GRAVITY = 0.02;
-        const DRAG = 0.99;
-        
-        // Colors
-        const COLORS = {
-            sky: '#fdfbf7',
-            sun: '#fff9e6',
-            floor: '#e8e4d9',
-            shadow: 'rgba(100, 100, 100, 0.15)',
-            plane: '#ffffff',
-            planeShadow: 'rgba(0,0,0,0.08)',
-            dust: 'rgba(255, 240, 200, 0.6)'
-        };
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  cx = W / 2;
+  cy = H / 2;
+  focal = Math.max(W, H) * 0.6;
+}
+resize();
+window.addEventListener('resize', resize);
 
-        // Resize handling
-        function resize() {
-            width = canvas.width = window.innerWidth;
-            height = canvas.height = window.innerHeight;
+// --- 3D helpers ---
+function project(x, y, z) {
+  const scale = focal / (focal + z);
+  return { x: cx + x * scale, y: cy - y * scale, s: scale };
+}
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+function clamp(v, mn, mx) { return Math.max(mn, Math.min(mx, v)); }
+
+// --- Atrium dimensions ---
+const ATRIUM = {
+  floorY: 0,
+  ceilY: 280,
+  wallLeft: -350,
+  wallRight: 350,
+  wallBack: 600,
+  balconyLeft: { x: -320, y: 180, z: 100, w: 50, h: 8, d: 300 },
+  balconyRight: { x: 320, y: 180, z: 100, w: 50, h: 8, d: 300 },
+  balconyBackL: { x: -200, y: 160, z: 550, w: 300, h: 8, d: 40 },
+  balconyBackR: { x: 200, y: 160, z: 550, w: 300, h: 8, d: 40 },
+};
+
+// --- Thermal column ---
+const THERMAL = { x: 30, y: 0, z: 150, radius: 120, strength: 1.8 };
+
+// --- Dust motes ---
+const NUM_MOTES = 200;
+const motes = [];
+for (let i = 0; i < NUM_MOTES; i++) {
+  motes.push({
+    x: (Math.random() - 0.5) * 600,
+    y: Math.random() * 280,
+    z: Math.random() * 600,
+    vx: (Math.random() - 0.5) * 0.3,
+    vy: Math.random() * 0.15 + 0.05,
+    vz: (Math.random() - 0.5) * 0.3,
+    size: Math.random() * 2.5 + 0.5,
+    alpha: Math.random() * 0.5 + 0.1,
+    phase: Math.random() * Math.PI * 2,
+  });
+}
+
+// --- Paper Plane ---
+class PaperPlane {
+  constructor(id) {
+    this.id = id;
+    this.state = 'launched'; // launched, gliding, thermal, landing, folded, relaunching
+    this.stateTime = 0;
+    this.reset();
+  }
+
+  reset() {
+    const balconies = [
+      { x: -320, y: 185, z: 150 + Math.random() * 200 },
+      { x: 320, y: 185, z: 150 + Math.random() * 200 },
+      { x: -150 + Math.random() * 300, y: 165, z: 550 },
+      { x: -150 + Math.random() * 300, y: 165, z: 550 },
+    ];
+    const b = balconies[Math.floor(Math.random() * balconies.length)];
+    this.x = b.x;
+    this.y = b.y;
+    this.z = b.z;
+    this.vx = (Math.random() - 0.5) * 2;
+    this.vy = 0;
+    this.vz = -1.5 - Math.random() * 1.5;
+    this.pitch = -0.15;
+    this.yaw = Math.atan2(this.vx, this.vz);
+    this.roll = 0;
+    this.targetRoll = 0;
+    this.targetYaw = this.yaw;
+    this.turnTimer = Math.random() * 200;
+    this.size = 12 + Math.random() * 6;
+    this.color = `hsl(${40 + Math.random() * 20}, ${10 + Math.random() * 15}%, ${88 + Math.random() * 10}%)`;
+    this.wingColor = `hsl(${40 + Math.random() * 20}, ${8 + Math.random() * 12}%, ${82 + Math.random() * 12}%)`;
+    this.flashAlpha = 0;
+    this.foldProgress = 0;
+    this.landingZ = 200 + Math.random() * 300;
+    this.landingX = (Math.random() - 0.5) * 400;
+    this.groundBounce = 0;
+    this.trail = [];
+  }
+
+  update(dt, time) {
+    this.stateTime += dt;
+    this.turnTimer -= dt;
+
+    if (this.state === 'launched') {
+      if (this.stateTime > 60) {
+        this.state = 'gliding';
+        this.stateTime = 0;
+      }
+    } else if (this.state === 'gliding') {
+      // Check for thermal
+      const dx = this.x - THERMAL.x;
+      const dz = this.z - THERMAL.z;
+      const dist = Math.sqrt(dx * dx + dz * dz);
+      if (dist < THERMAL.radius && this.y < 200) {
+        this.state = 'thermal';
+        this.stateTime = 0;
+      }
+      // Check for landing
+      if (this.y < 15) {
+        this.state = 'landing';
+        this.stateTime = 0;
+      }
+    } else if (this.state === 'thermal') {
+      // Spiral in thermal
+      const dx = this.x - THERMAL.x;
+      const dz = this.z - THERMAL.z;
+      const dist = Math.sqrt(dx * dx + dz * dz);
+      const angle = Math.atan2(dz, dx);
+      const spiralSpeed = 0.008;
+      this.targetYaw = angle + Math.PI / 2 + Math.sin(time * 0.003) * 0.5;
+      this.targetRoll = clamp(-0.4 * Math.sin(time * 0.005), -0.5, 0.5);
+
+      this.vy += THERMAL.strength * 0.02;
+      this.vx += Math.cos(this.targetYaw) * 0.05;
+      this.vz += Math.sin(this.targetYaw) * 0.05;
+
+      if (this.stateTime > 200 + Math.random() * 100 || this.y > 250) {
+        this.state = 'gliding';
+        this.stateTime = 0;
+        this.vy = -0.5;
+      }
+    } else if (this.state === 'landing') {
+      this.vy = Math.min(this.vy, 0);
+      if (this.y <= 0) {
+        this.y = 0;
+        this.vy = 0;
+        this.vx *= 0.9;
+        this.vz *= 0.9;
+        if (Math.abs(this.vx) < 0.1 && Math.abs(this.vz) < 0.1) {
+          this.state = 'folded';
+          this.stateTime = 0;
         }
-        window.addEventListener('resize', resize);
-        resize();
+      }
+    } else if (this.state === 'folded') {
+      this.flashAlpha = 0.5 + 0.5 * Math.sin(this.stateTime * 0.1);
+      this.foldProgress = Math.min(1, this.stateTime / 40);
+      if (this.stateTime > 90) {
+        this.state = 'relaunching';
+        this.stateTime = 0;
+        this.flashAlpha = 0;
+      }
+    } else if (this.state === 'relaunching') {
+      this.foldProgress = Math.max(0, 1 - this.stateTime / 30);
+      const bIdx = this.id % 4;
+      const balconies = [
+        { x: -320, y: 185, z: 150 + Math.random() * 200 },
+        { x: 320, y: 185, z: 150 + Math.random() * 200 },
+        { x: -150 + Math.random() * 300, y: 165, z: 550 },
+        { x: -150 + Math.random() * 300, y: 165, z: 550 },
+      ];
+      const b = balconies[bIdx];
+      if (this.stateTime > 15) {
+        this.x = b.x;
+        this.y = b.y;
+        this.z = b.z;
+        this.vx = (Math.random() - 0.5) * 2;
+        this.vy = 0;
+        this.vz = -1.5 - Math.random() * 1.5;
+        this.pitch = -0.15;
+        this.yaw = Math.atan2(this.vx, this.vz);
+        this.roll = 0;
+        this.state = 'launched';
+        this.stateTime = 0;
+      }
+      return;
+    }
 
-        // Utility
-        const rand = (min, max) => Math.random() * (max - min) + min;
-        const lerp = (a, b, t) => a + (b - a) * t;
+    // Aerodynamics
+    const speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy + this.vz * this.vz);
+    const liftCoeff = 0.015;
+    const dragCoeff = 0.008;
+    const gravity = 0.03;
 
-        // --- Classes ---
+    // Lift (perpendicular to velocity, upward component)
+    if (speed > 0.1) {
+      const lift = liftCoeff * speed * speed;
+      this.vy += lift * 0.02;
+    }
 
-        class Dust {
-            constructor() {
-                this.init();
-            }
+    // Drag
+    this.vx *= (1 - dragCoeff);
+    this.vy *= (1 - dragCoeff * 0.5);
+    this.vz *= (1 - dragCoeff);
 
-            init() {
-                this.x = rand(0, width);
-                this.y = rand(0, height);
-                this.z = rand(0.1, 1); // Depth
-                this.vx = rand(-0.2, 0.2);
-                this.vy = rand(-0.1, -0.3); // Drifting up
-                this.size = rand(1, 3);
-                this.alpha = rand(0.1, 0.5);
-            }
+    // Gravity
+    this.vy -= gravity;
 
-            update() {
-                this.x += this.vx;
-                this.y += this.vy;
+    // Banking turns
+    if (this.turnTimer <= 0 && this.state === 'gliding') {
+      this.targetYaw = this.yaw + (Math.random() - 0.5) * 1.2;
+      this.targetRoll = (Math.random() - 0.5) * 0.6;
+      this.turnTimer = 100 + Math.random() * 200;
+    }
 
-                // Reset if out of bounds
-                if (this.y < -10 || this.x < -10 || this.x > width + 10) {
-                    this.init();
-                    this.y = height + 10;
-                }
-            }
+    // Smooth yaw and roll
+    const yawDiff = this.targetYaw - this.yaw;
+    let yawNorm = yawDiff;
+    while (yawNorm > Math.PI) yawNorm -= Math.PI * 2;
+    while (yawNorm < -Math.PI) yawNorm += Math.PI * 2;
+    this.yaw += yawNorm * 0.015;
 
-            draw() {
-                ctx.beginPath();
-                ctx.arc(this.x, this.y, this.size * this.z, 0, Math.PI * 2);
-                ctx.fillStyle = COLORS.dust;
-                ctx.globalAlpha = this.alpha * this.z;
-                ctx.fill();
-                ctx.globalAlpha = 1.0;
-            }
-        }
+    this.roll = lerp(this.roll, this.targetRoll, 0.03);
 
-        class Plane {
-            constructor() {
-                this.reset(true);
-            }
+    // Apply roll-induced turn
+    if (this.state === 'gliding' || this.state === 'launched') {
+      this.yaw += this.roll * 0.008;
+    }
 
-            reset(initial = false) {
-                // Launch from sides (balconies)
-                const side = Math.random() > 0.5 ? 1 : -1;
-                
-                this.x = side === 1 ? width + 50 : -50;
-                this.y = rand(height * 0.2, height * 0.5);
-                this.z = rand(0.2, 1.0); // Scale/Depth factor
-                
-                this.vx = side * rand(2, 4);
-                this.vy = rand(-1, 1);
-                this.vz = 0;
+    // Pitch based on vertical velocity
+    this.pitch = lerp(this.pitch, -0.1 + this.vy * 0.05, 0.05);
 
-                // Orientation
-                this.angle = side === 1 ? Math.PI : 0; // Facing center
-                this.bank = 0;
-                this.pitch = 0;
-                
-                // State
-                this.state = 'flying'; // flying, landing, relaunching
-                this.landingY = height - FLOOR_Y_OFFSET;
-                this.opacity = 0;
-                this.flash = 0;
-            }
+    // Update position
+    this.x += this.vx;
+    this.y += this.vy;
+    this.z += this.vz;
 
-            update() {
-                // State Machine
-                if (this.state === 'flying') {
-                    this.updateFlight();
-                    this.checkLanding();
-                } else if (this.state === 'landing') {
-                    this.updateLanding();
-                } else if (this.state === 'relaunching') {
-                    this.updateRelaunch();
-                }
+    // Boundary wrapping
+    if (this.x < ATRIUM.wallLeft + 30) { this.x = ATRIUM.wallLeft + 30; this.vx *= -0.5; }
+    if (this.x > ATRIUM.wallRight - 30) { this.x = ATRIUM.wallRight - 30; this.vx *= -0.5; }
+    if (this.z < -50) { this.z = -50; this.vz *= -0.5; }
+    if (this.z > ATRIUM.wallBack - 20) { this.z = ATRIUM.wallBack - 20; this.vz *= -0.5; }
+    if (this.y > ATRIUM.ceilY - 20) { this.y = ATRIUM.ceilY - 20; this.vy *= -0.5; }
 
-                // Flash effect decay
-                if (this.flash > 0) this.flash -= 0.05;
-            }
+    // Trail
+    if (this.state !== 'folded' && this.state !== 'relaunching') {
+      this.trail.push({ x: this.x, y: this.y, z: this.z, a: 0.3 });
+      if (this.trail.length > 30) this.trail.shift();
+      for (let t of this.trail) t.a *= 0.96;
+    }
+  }
 
-            updateFlight() {
-                // 1. Aerodynamics & Gravity
-                this.vy += GRAVITY * 0.5;
-                
-                // 2. Thermal Lift
-                const distToCenter = Math.abs(this.x - width / 2);
-                if (distToCenter < 300) {
-                    // Stronger lift in center
-                    const lift = THERMAL_STRENGTH * (1 - distToCenter / 300) * (1.5 - this.z); 
-                    this.vy -= lift;
-                    
-                    // Spiral tendency
-                    this.vx += (width/2 - this.x) * 0.0005;
-                }
+  draw(time) {
+    if (this.state === 'relaunching' && this.stateTime < 15) return;
 
-                // 3. Drag
-                this.vx *= DRAG;
-                this.vy *= DRAG;
+    // Draw trail
+    if (this.trail.length > 1) {
+      ctx.beginPath();
+      for (let i = 0; i < this.trail.length; i++) {
+        const p = project(this.trail[i].x, this.trail[i].y, this.trail[i].z);
+        if (i === 0) ctx.moveTo(p.x, p.y);
+        else ctx.lineTo(p.x, p.y);
+      }
+      ctx.strokeStyle = `rgba(200, 190, 170, 0.08)`;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
 
-                // 4. Position Update
-                this.x += this.vx * (1 + this.z); // Move faster if closer
-                this.y += this.vy;
+    // Shadow on floor
+    if (this.state !== 'folded') {
+      const shadowY = 0;
+      const heightRatio = clamp((this.y - shadowY) / ATRIUM.ceilY, 0, 1);
+      const shadowScale = 1 + heightRatio * 0.5;
+      const shadowAlpha = clamp(0.3 - heightRatio * 0.25, 0.02, 0.3);
+      const sp = project(this.x, shadowY, this.z);
+      const shadowSize = this.size * sp.s * shadowScale;
 
-                // 5. Orientation Calculation
-                // Target angle based on velocity vector
-                const targetAngle = Math.atan2(this.vy, this.vx);
-                
-                // Banking: Turn into the curve
-                // Calculate curvature roughly
-                const turnRate = targetAngle - this.angle;
-                this.bank = lerp(this.bank, turnRate * 5, 0.1);
-                this.bank = Math.max(-1.2, Math.min(1.2, this.bank)); // Cap banking
+      ctx.save();
+      ctx.translate(sp.x, sp.y);
+      ctx.rotate(this.yaw + Math.PI / 2);
+      ctx.globalAlpha = shadowAlpha;
+      ctx.fillStyle = '#000';
+      ctx.beginPath();
+      // Shadow shape: elongated diamond
+      ctx.moveTo(shadowSize * 1.5, 0);
+      ctx.lineTo(-shadowSize * 0.3, -shadowSize * 0.6);
+      ctx.lineTo(-shadowSize * 0.3, shadowSize * 0.6);
+      ctx.closePath();
+      ctx.filter = `blur(${4 + heightRatio * 8}px)`;
+      ctx.fill();
+      ctx.restore();
+    }
 
-                // Smoothly rotate plane to velocity vector
-                this.angle = lerp(this.angle, targetAngle, 0.05);
-                
-                // Pitch: Nose up if going up, nose down if going down
-                this.pitch = -this.vy * 0.2;
-            }
+    // Flash effect
+    if (this.flashAlpha > 0) {
+      const p = project(this.x, this.y, this.z);
+      const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, 40 * p.s);
+      grad.addColorStop(0, `rgba(255, 240, 200, ${this.flashAlpha * 0.6})`);
+      grad.addColorStop(1, `rgba(255, 240, 200, 0)`);
+      ctx.fillStyle = grad;
+      ctx.fillRect(p.x - 60, p.y - 60, 120, 120);
+    }
 
-            checkLanding() {
-                // If plane gets too low or too slow
-                if (this.y > this.landingY - 20 || (Math.abs(this.vx) < 0.5 && this.y > height * 0.6)) {
-                    this.state = 'landing';
-                    this.landingTimer = 0;
-                }
-                // Screen bounds check for reset
-                if (this.x < -200 || this.x > width + 200) {
-                    this.reset();
-                }
-            }
+    // Draw plane
+    const p = project(this.x, this.y, this.z);
+    const s = this.size * p.s;
 
-            updateLanding() {
-                this.landingTimer++;
-                
-                // Slide to stop
-                this.vx *= 0.9;
-                this.x += this.vx;
-                this.y = this.landingY; // Snap to floor
-                
-                // Flatten
-                this.bank = 0;
-                this.angle = Math.atan2(0, this.vx);
-                this.pitch = 0;
-                this.opacity = 1;
+    ctx.save();
+    ctx.translate(p.x, p.y);
 
-                if (this.landingTimer > 60) {
-                    this.flash = 1; // Flash white
-                    this.state = 'relaunching';
-                    this.relaunchTimer = 0;
-                }
-            }
+    // Rotation: yaw around Y, then roll around local axis, then pitch
+    ctx.rotate(this.yaw + Math.PI / 2);
 
-            updateRelaunch() {
-                this.relaunchTimer++;
-                
-                // Fade out
-                this.opacity = Math.max(0, 1 - (this.relaunchTimer / 30));
+    // Roll
+    ctx.rotate(this.roll);
 
-                if (this.relaunchTimer > 30) {
-                    this.reset();
-                    this.opacity = 0; // Fade in handled in draw
-                }
-            }
+    // Pitch (affects apparent shape)
+    ctx.scale(1, 0.5 + Math.abs(this.pitch) * 2);
 
-            draw() {
-                ctx.save();
-                ctx.translate(this.x, this.y);
-                
-                // Fade in/out handling
-                if (this.state === 'flying' && this.opacity < 1) {
-                    this.opacity += 0.05;
-                }
-                if (this.opacity <= 0) { ctx.restore(); return; }
+    const fold = this.foldProgress;
+    const wingSpread = lerp(1, 0.15, fold);
 
-                ctx.globalAlpha = this.opacity;
+    // Paper airplane shape
+    ctx.beginPath();
+    // Nose
+    ctx.moveTo(s * 1.2, 0);
+    // Right wing
+    ctx.lineTo(-s * 0.6, -s * 0.5 * wingSpread);
+    ctx.lineTo(-s * 0.2, 0);
+    // Left wing
+    ctx.lineTo(-s * 0.6, s * 0.5 * wingSpread);
+    ctx.closePath();
 
-                // Apply 3D-ish transforms
-                // Scale based on Z
-                const scale = this.z * 2;
-                ctx.scale(scale, scale);
+    ctx.fillStyle = this.color;
+    ctx.fill();
 
-                // Banking rotation (around X axis in 3D, simulated here by skew/rotate)
-                // Since we are 2D, we rotate the context for the plane's heading
-                ctx.rotate(this.angle);
+    // Wing shading
+    ctx.beginPath();
+    ctx.moveTo(s * 1.2, 0);
+    ctx.lineTo(-s * 0.6, -s * 0.5 * wingSpread);
+    ctx.lineTo(-s * 0.2, 0);
+    ctx.closePath();
+    ctx.fillStyle = this.wingColor;
+    ctx.fill();
 
-                // Simulate banking by flattening the Y axis
-                const bankScale = Math.cos(this.bank);
-                const skew = Math.sin(this.bank);
-                
-                ctx.transform(1, 0, skew, bankScale, 0, 0);
+    // Center fold line
+    ctx.beginPath();
+    ctx.moveTo(s * 1.2, 0);
+    ctx.lineTo(-s * 0.2, 0);
+    ctx.strokeStyle = `rgba(0,0,0,0.15)`;
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
 
-                // Pitch simulation (move wings slightly up/down relative to body)
-                // Handled inside drawShape
+    // Wing edge lines
+    ctx.beginPath();
+    ctx.moveTo(s * 0.3, -s * 0.15 * wingSpread);
+    ctx.lineTo(-s * 0.6, -s * 0.5 * wingSpread);
+    ctx.moveTo(s * 0.3, s * 0.15 * wingSpread);
+    ctx.lineTo(-s * 0.6, s * 0.5 * wingSpread);
+    ctx.strokeStyle = `rgba(0,0,0,0.1)`;
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
 
-                // Draw Shadow
-                // Shadow is projected "down" and "right" based on light source (top-leftish)
-                // Since we are on the floor, shadow is just below
-                ctx.save();
-                ctx.translate(0, 40 / this.z); // Offset down
-                ctx.rotate(-this.angle); // Counter rotate for perspective
-                ctx.scale(1, 0.5); // Flatten shadow
-                ctx.fillStyle = COLORS.shadow;
-                ctx.beginPath();
-                ctx.moveTo(15, 0);
-                ctx.lineTo(-10, 8);
-                ctx.lineTo(-10, -8);
-                ctx.fill();
-                ctx.restore();
+    ctx.restore();
+  }
+}
 
-                // Draw Plane
-                this.drawShape();
+// --- Create planes ---
+const NUM_PLANES = 10;
+const planes = [];
+for (let i = 0; i < NUM_PLANES; i++) {
+  const p = new PaperPlane(i);
+  // Stagger initial states
+  p.state = ['launched', 'gliding', 'thermal', 'gliding', 'launched', 'gliding', 'thermal', 'gliding', 'launched', 'gliding'][i];
+  p.stateTime = Math.random() * 100;
+  planes.push(p);
+}
 
-                // Flash effect
-                if (this.flash > 0) {
-                    ctx.fillStyle = `rgba(255, 255, 255, ${this.flash})`;
-                    ctx.beginPath();
-                    ctx.arc(0, 0, 20, 0, Math.PI * 2);
-                    ctx.fill();
-                }
+// --- Draw atrium ---
+function drawAtrium(time) {
+  // Sky / ceiling gradient
+  const skyGrad = ctx.createLinearGradient(0, 0, 0, H);
+  skyGrad.addColorStop(0, '#d4c8a8');
+  skyGrad.addColorStop(0.3, '#e8dcc0');
+  skyGrad.addColorStop(0.7, '#f0e6d0');
+  skyGrad.addColorStop(1, '#e0d4b8');
+  ctx.fillStyle = skyGrad;
+  ctx.fillRect(0, 0, W, H);
 
-                ctx.restore();
-            }
+  // Floor
+  const floorCorners = [
+    project(ATRIUM.wallLeft, 0, 50),
+    project(ATRIUM.wallRight, 0, 50),
+    project(ATRIUM.wallRight, 0, ATRIUM.wallBack),
+    project(ATRIUM.wallLeft, 0, ATRIUM.wallBack),
+  ];
+  ctx.beginPath();
+  ctx.moveTo(floorCorners[0].x, floorCorners[0].y);
+  for (let i = 1; i < floorCorners.length; i++) ctx.lineTo(floorCorners[i].x, floorCorners[i].y);
+  ctx.closePath();
+  const floorGrad = ctx.createLinearGradient(0, cy, 0, H);
+  floorGrad.addColorStop(0, '#c8b898');
+  floorGrad.addColorStop(1, '#a89878');
+  ctx.fillStyle = floorGrad;
+  ctx.fill();
 
-            drawShape() {
-                ctx.fillStyle = COLORS.plane;
-                ctx.strokeStyle = '#ccc';
-                ctx.lineWidth = 0.5;
-                
-                // Simple dart shape
-                ctx.beginPath();
-                ctx.moveTo(15, 0); // Nose
-                ctx.lineTo(-10, 6); // Right wing tip
-                ctx.lineTo(-5, 0); // Center fold
-                ctx.lineTo(-10, -6); // Left wing tip
-                ctx.closePath();
-                
-                // Shading
-                ctx.fill();
-                ctx.stroke();
+  // Floor tiles
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(floorCorners[0].x, floorCorners[0].y);
+  for (let i = 1; i < floorCorners.length; i++) ctx.lineTo(floorCorners[i].x, floorCorners[i].y);
+  ctx.closePath();
+  ctx.clip();
 
-                // Wing shading based on bank
-                if (this.bank > 0) {
-                    // Right wing down
-                    ctx.fillStyle = 'rgba(0,0,0,0.1)';
-                    ctx.beginPath();
-                    ctx.moveTo(0,0);
-                    ctx.lineTo(-10, 6);
-                    ctx.lineTo(-5, 0);
-                    ctx.fill();
-                } else {
-                    // Left wing down
-                    ctx.fillStyle = 'rgba(0,0,0,0.1)';
-                    ctx.beginPath();
-                    ctx.moveTo(0,0);
-                    ctx.lineTo(-10, -6);
-                    ctx.lineTo(-5, 0);
-                    ctx.fill();
-                }
-            }
-        }
+  for (let i = -10; i < 20; i++) {
+    const z = 50 + i * 35;
+    const p1 = project(ATRIUM.wallLeft, 0, z);
+    const p2 = project(ATRIUM.wallRight, 0, z);
+    ctx.beginPath();
+    ctx.moveTo(p1.x, p1.y);
+    ctx.lineTo(p2.x, p2.y);
+    ctx.strokeStyle = 'rgba(0,0,0,0.06)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+  for (let i = -5; i < 8; i++) {
+    const x = ATRIUM.wallLeft + i * 50;
+    const p1 = project(x, 0, 50);
+    const p2 = project(x, 0, ATRIUM.wallBack);
+    ctx.beginPath();
+    ctx.moveTo(p1.x, p1.y);
+    ctx.lineTo(p2.x, p2.y);
+    ctx.strokeStyle = 'rgba(0,0,0,0.04)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+  ctx.restore();
 
-        // --- Initialization ---
+  // Back wall
+  const backWall = [
+    project(ATRIUM.wallLeft, 0, ATRIUM.wallBack),
+    project(ATRIUM.wallRight, 0, ATRIUM.wallBack),
+    project(ATRIUM.wallRight, ATRIUM.ceilY, ATRIUM.wallBack),
+    project(ATRIUM.wallLeft, ATRIUM.ceilY, ATRIUM.wallBack),
+  ];
+  ctx.beginPath();
+  ctx.moveTo(backWall[0].x, backWall[0].y);
+  for (let i = 1; i < backWall.length; i++) ctx.lineTo(backWall[i].x, backWall[i].y);
+  ctx.closePath();
+  ctx.fillStyle = '#d8ccb4';
+  ctx.fill();
 
-        for (let i = 0; i < NUM_PARTICLES; i++) {
-            particles.push(new Dust());
-        }
+  // Side walls
+  const leftWall = [
+    project(ATRIUM.wallLeft, 0, 50),
+    project(ATRIUM.wallLeft, 0, ATRIUM.wallBack),
+    project(ATRIUM.wallLeft, ATRIUM.ceilY, ATRIUM.wallBack),
+    project(ATRIUM.wallLeft, ATRIUM.ceilY, 50),
+  ];
+  ctx.beginPath();
+  ctx.moveTo(leftWall[0].x, leftWall[0].y);
+  for (let i = 1; i < leftWall.length; i++) ctx.lineTo(leftWall[i].x, leftWall[i].y);
+  ctx.closePath();
+  ctx.fillStyle = '#e0d4bc';
+  ctx.fill();
 
-        for (let i = 0; i < NUM_PLANES; i++) {
-            planes.push(new Plane());
-        }
+  const rightWall = [
+    project(ATRIUM.wallRight, 0, 50),
+    project(ATRIUM.wallRight, 0, ATRIUM.wallBack),
+    project(ATRIUM.wallRight, ATRIUM.ceilY, ATRIUM.wallBack),
+    project(ATRIUM.wallRight, ATRIUM.ceilY, 50),
+  ];
+  ctx.beginPath();
+  ctx.moveTo(rightWall[0].x, rightWall[0].y);
+  for (let i = 1; i < rightWall.length; i++) ctx.lineTo(rightWall[i].x, rightWall[i].y);
+  ctx.closePath();
+  ctx.fillStyle = '#d8ccb4';
+  ctx.fill();
 
-        // --- Main Loop ---
+  // Balconies
+  drawBalcony(ATRIUM.balconyLeft, '#c8b898', '#b8a888');
+  drawBalcony(ATRIUM.balconyRight, '#c8b898', '#b8a888');
+  drawBalcony(ATRIUM.balconyBackL, '#c0b090', '#b0a080');
+  drawBalcony(ATRIUM.balconyBackR, '#c0b090', '#b0a080');
 
-        function drawBackground() {
-            // Sun gradient
-            const grd = ctx.createRadialGradient(width * 0.2, height * 0.2, 100, width * 0.5, height * 0.5, width);
-            grd.addColorStop(0, '#fffbe3');
-            grd.addColorStop(0.4, '#f0e6d2');
-            grd.addColorStop(1, '#d8d0c1');
-            
-            ctx.fillStyle = grd;
-            ctx.fillRect(0, 0, width, height);
+  // Columns
+  drawColumn(-280, 0, 100);
+  drawColumn(280, 0, 100);
+  drawColumn(-280, 0, 300);
+  drawColumn(280, 0, 300);
+  drawColumn(-100, 0, 550);
+  drawColumn(100, 0, 550);
 
-            // Floor Perspective
-            ctx.fillStyle = COLORS.floor;
-            ctx.beginPath();
-            ctx.moveTo(0, height - FLOOR_Y_OFFSET);
-            ctx.lineTo(width, height - FLOOR_Y_OFFSET);
-            ctx.lineTo(width, height);
-            ctx.lineTo(0, height);
-            ctx.fill();
-            
-            // Floor Grid lines (Perspective)
-            ctx.strokeStyle = 'rgba(200, 190, 170, 0.3)';
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            // Horizon line
-            ctx.moveTo(0, height - FLOOR_Y_OFFSET);
-            ctx.lineTo(width, height - FLOOR_Y_OFFSET);
-            
-            // Radiating lines
-            const centerX = width / 2;
-            for (let i = -10; i <= 10; i++) {
-                ctx.moveTo(centerX + i * 100, height - FLOOR_Y_OFFSET);
-                ctx.lineTo(centerX + i * 400, height);
-            }
-            ctx.stroke();
-        }
+  // Skylight / ceiling opening
+  const skylightPts = [
+    project(-100, ATRIUM.ceilY, 200),
+    project(100, ATRIUM.ceilY, 200),
+    project(100, ATRIUM.ceilY, 400),
+    project(-100, ATRIUM.ceilY, 400),
+  ];
+  ctx.beginPath();
+  ctx.moveTo(skylightPts[0].x, skylightPts[0].y);
+  for (let i = 1; i < skylightPts.length; i++) ctx.lineTo(skylightPts[i].x, skylightPts[i].y);
+  ctx.closePath();
+  ctx.fillStyle = '#f8f0d8';
+  ctx.fill();
 
-        function animate() {
-            ctx.clearRect(0, 0, width, height);
+  // Light shafts
+  drawLightShaft(-80, ATRIUM.ceilY, 220, 60, 0.06);
+  drawLightShaft(0, ATRIUM.ceilY, 300, 80, 0.08);
+  drawLightShaft(60, ATRIUM.ceilY, 380, 50, 0.05);
+  drawLightShaft(-30, ATRIUM.ceilY, 450, 40, 0.04);
 
-            drawBackground();
+  // Warm glow overlay
+  const glowGrad = ctx.createRadialGradient(cx * 0.8, cy * 0.3, 0, cx * 0.8, cy * 0.3, W * 0.8);
+  glowGrad.addColorStop(0, 'rgba(255, 245, 210, 0.12)');
+  glowGrad.addColorStop(1, 'rgba(255, 245, 210, 0)');
+  ctx.fillStyle = glowGrad;
+  ctx.fillRect(0, 0, W, H);
+}
 
-            // Sort planes by Z for correct depth rendering
-            planes.sort((a, b) => a.z - b.z);
+function drawBalcony(b, topColor, sideColor) {
+  const pts = [
+    project(b.x - b.w / 2, b.y, b.z - b.d / 2),
+    project(b.x + b.w / 2, b.y, b.z - b.d / 2),
+    project(b.x + b.w / 2, b.y, b.z + b.d / 2),
+    project(b.x - b.w / 2, b.y, b.z + b.d / 2),
+  ];
+  const ptsLow = pts.map(p => {
+    const lp = project(b.x + (p.x - cx) / p.s, b.y - b.h, (p.y - cy) / (-p.s / focal) * focal + focal);
+    return lp;
+  });
 
-            // Draw Dust (Background layer)
-            particles.forEach(p => {
-                p.update();
-                p.draw();
-            });
+  // Top
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+  ctx.closePath();
+  ctx.fillStyle = topColor;
+  ctx.fill();
 
-            // Draw Planes
-            planes.forEach(plane => {
-                plane.update();
-                plane.draw();
-            });
+  // Front face
+  const f1 = project(b.x - b.w / 2, b.y - b.h, b.z - b.d / 2);
+  const f2 = project(b.x + b.w / 2, b.y - b.h, b.z - b.d / 2);
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pts[0].y);
+  ctx.lineTo(pts[1].x, pts[1].y);
+  ctx.lineTo(f2.x, f2.y);
+  ctx.lineTo(f1.x, f1.y);
+  ctx.closePath();
+  ctx.fillStyle = sideColor;
+  ctx.fill();
 
-            // Vignette / Atmosphere
-            const vignette = ctx.createRadialGradient(width/2, height/2, height/3, width/2, height/2, height);
-            vignette.addColorStop(0, 'rgba(0,0,0,0)');
-            vignette.addColorStop(1, 'rgba(0,0,0,0.2)');
-            ctx.fillStyle = vignette;
-            ctx.fillRect(0, 0, width, height);
+  // Railing
+  const railY = b.y + 12;
+  const r1 = project(b.x - b.w / 2, railY, b.z - b.d / 2);
+  const r2 = project(b.x + b.w / 2, railY, b.z - b.d / 2);
+  ctx.beginPath();
+  ctx.moveTo(r1.x, r1.y);
+  ctx.lineTo(r2.x, r2.y);
+  ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+}
 
-            requestAnimationFrame(animate);
-        }
+function drawColumn(x, y, z) {
+  const top = project(x, ATRIUM.ceilY, z);
+  const bot = project(x, 0, z);
+  const r = 8;
+  const rTop = r * top.s;
+  const rBot = r * bot.s;
 
-        animate();
+  ctx.beginPath();
+  ctx.moveTo(top.x - rTop, top.y);
+  ctx.lineTo(bot.x - rBot, bot.y);
+  ctx.lineTo(bot.x + rBot, bot.y);
+  ctx.lineTo(top.x + rTop, top.y);
+  ctx.closePath();
+  ctx.fillStyle = '#d8ccb4';
+  ctx.fill();
 
-    </script>
+  // Capital
+  const capY = ATRIUM.ceilY - 8;
+  const capTop = project(x, capY, z);
+  ctx.beginPath();
+  ctx.moveTo(capTop.x - rTop * 1.8, capTop.y);
+  ctx.lineTo(top.x - rTop, top.y);
+  ctx.lineTo(top.x + rTop, top.y);
+  ctx.lineTo(capTop.x + rTop * 1.8, capTop.y);
+  ctx.closePath();
+  ctx.fillStyle = '#e0d4bc';
+  ctx.fill();
+}
+
+function drawLightShaft(x, y, z, width, alpha) {
+  const top = project(x, y, z);
+  const bot = project(x, 0, z + 100);
+  const topW = width * top.s;
+  const botW = width * bot.s * 2.5;
+
+  ctx.save();
+  ctx.globalAlpha = alpha + Math.sin(time * 0.001) * 0.01;
+  ctx.beginPath();
+  ctx.moveTo(top.x - topW, top.y);
+  ctx.lineTo(bot.x - botW, bot.y);
+  ctx.lineTo(bot.x + botW, bot.y);
+  ctx.lineTo(top.x + topW, top.y);
+  ctx.closePath();
+
+  const grad = ctx.createLinearGradient(top.x, top.y, bot.x, bot.y);
+  grad.addColorStop(0, 'rgba(255, 250, 220, 0.3)');
+  grad.addColorStop(0.5, 'rgba(255, 250, 220, 0.1)');
+  grad.addColorStop(1, 'rgba(255, 250, 220, 0)');
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.restore();
+}
+
+// --- Draw dust motes ---
+function drawDustMotes(time) {
+  for (const m of motes) {
+    m.x += m.vx + Math.sin(time * 0.002 + m.phase) * 0.1;
+    m.y += m.vy;
+    m.z += m.vz + Math.cos(time * 0.0015 + m.phase) * 0.1;
+
+    // Wrap
+    if (m.y > ATRIUM.ceilY) { m.y = 0; m.x = (Math.random() - 0.5) * 600; m.z = Math.random() * 600; }
+    if (m.y < 0) m.y = 0;
+    if (m.x < ATRIUM.wallLeft) m.x = ATRIUM.wallLeft + 10;
+    if (m.x > ATRIUM.wallRight) m.x = ATRIUM.wallRight - 10;
+    if (m.z < 0) m.z = 50;
+    if (m.z > ATRIUM.wallBack) m.z = ATRIUM.wallBack - 10;
+
+    const p = project(m.x, m.y, m.z);
+    const depthAlpha = clamp(1 - (m.z / ATRIUM.wallBack), 0.1, 0.6);
+    const twinkle = 0.5 + 0.5 * Math.sin(time * 0.003 + m.phase * 5);
+
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, m.size * p.s, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255, 245, 210, ${m.alpha * depthAlpha * twinkle})`;
+    ctx.fill();
+  }
+}
+
+// --- Main loop ---
+let lastTime = 0;
+let time = 0;
+
+function animate(timestamp) {
+  const dt = Math.min((timestamp - lastTime) / 16.67, 3);
+  lastTime = timestamp;
+  time = timestamp;
+
+  ctx.clearRect(0, 0, W, H);
+
+  drawAtrium(time);
+  drawDustMotes(time);
+
+  // Sort planes by depth for proper rendering
+  const sorted = [...planes].sort((a, b) => b.z - a.z);
+  for (const p of sorted) {
+    p.update(dt, time);
+  }
+  for (const p of sorted) {
+    p.draw(time);
+  }
+
+  // Vignette
+  const vigGrad = ctx.createRadialGradient(cx, cy, W * 0.25, cx, cy, W * 0.75);
+  vigGrad.addColorStop(0, 'rgba(0,0,0,0)');
+  vigGrad.addColorStop(1, 'rgba(0,0,0,0.25)');
+  ctx.fillStyle = vigGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  requestAnimationFrame(animate);
+}
+
+requestAnimationFrame(animate);
+</script>
 </body>
 </html>

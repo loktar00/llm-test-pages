@@ -1,13 +1,12 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Crystal Cavern Screensaver</title>
-  <style>
-    * { margin: 0; padding: 0; overflow: hidden; }
-    canvas { display: block; }
-  </style>
+<meta charset="UTF-8" />
+<title>Crystal Cavern</title>
+<style>
+  html, body { margin:0; padding:0; overflow:hidden; background:#000; }
+  canvas { display:block; }
+</style>
 </head>
 <body>
 <canvas id="c"></canvas>
@@ -15,377 +14,375 @@
 (() => {
   const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d');
-  let W = canvas.width = window.innerWidth;
-  let H = canvas.height = window.innerHeight;
+  let w, h, dpr;
 
-  window.addEventListener('resize', () => {
-    W = canvas.width = window.innerWidth;
-    H = canvas.height = window.innerHeight;
-  });
+  function resize() {
+    dpr = window.devicePixelRatio || 1;
+    w = canvas.offsetWidth * dpr;
+    h = canvas.offsetHeight * dpr;
+    canvas.width = w;
+    canvas.height = h;
+    ctx.scale(dpr, dpr);
+  }
+  window.addEventListener('resize', resize);
+  resize();
 
-  // Light position orbiting slowly
+  // --- Scene state ---
+  const caveFloorY = h * 0.6;
+  const caveCeilingY = h * 0.3;
+  const crystals = [];
+  const shards = [];
+  const drips = [];
+  const ripplePools = [];
   let lightAngle = 0;
 
-  function getLightPos() {
-    lightAngle += 0.001;
-    const r = Math.min(W, H) * 0.6;
-    return {
-      x: W / 2 + Math.cos(lightAngle) * r,
-      y: H / 2 + Math.sin(lightAngle * 0.7) * r * 0.8
-    };
+  // Threshold for tremor
+  const crystalCapacity = 300;
+  let totalCrystals = 0;
+
+  // --- Utilities ---
+  function rand(min, max) { return Math.random() * (max - min) + min; }
+  function randInt(min, max) { return Math.floor(rand(min, max + 1)); }
+  function hslToRgb(h, s, l) {
+    h /= 360; s /= 100; l /= 100;
+    let r, g, b;
+    if (s === 0) r = g = b = l;
+    else {
+      const hue2rgb = (p, q, t) => {
+        if (t < 0) t += 1;
+        if (t > 1) t -= 1;
+        if (t < 1/6) return p + (q - p) * 6 * t;
+        if (t < 1/2) return q;
+        if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+        return p;
+      };
+      const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+      const p = 2 * l - q;
+      r = hue2rgb(p, q, h + 1/3);
+      g = hue2rgb(p, q, h);
+      b = hue2rgb(p, q, h - 1/3);
+    }
+    return [Math.round(r*255), Math.round(g*255), Math.round(b*255)];
   }
 
+  // --- Crystal class ---
   class Crystal {
-    constructor(x, y, isFloor = true) {
+    constructor(x, y, seed=false) {
       this.x = x;
       this.y = y;
-      this.isFloor = isFloor;
       this.age = 0;
-      this.segments = [{x: x, y: y, len: 0, angle: isFloor ? -Math.PI/2 : Math.PI/2}];
-      this.growthRate = 0.3 + Math.random() * 0.5;
-      this.color = `hsl(${Math.random() * 60 + 180}, 80%, 70%)`;
+      this.points = [{x: x, y: y}];
+      this.growthRate = rand(0.2, 0.6);
+      this.maxLength = rand(30, 90);
       this.branches = [];
-      this.tipX = x;
-      this.tipY = y;
+      this.color = `hsl(${randInt(160, 220)}, 80%, 70%)`;
+      this.segments = [];
+      if (seed && Math.random() < 0.3) {
+        this.tryBranch();
+      }
     }
 
     update() {
       this.age++;
-      for (let seg of this.segments) {
-        if (seg.grow && seg.len < seg.maxLen) {
-          seg.len += this.growthRate;
-          const rad = seg.angle;
-          this.tipX = seg.x + Math.cos(rad) * seg.len;
-          this.tipY = seg.y + Math.sin(rad) * seg.len;
-          if (seg.len >= seg.maxLen) {
-            seg.grow = false;
-            // Maybe branch
-            if (Math.random() < 0.4 && this.segments.length < 30) {
-              const newAngle1 = seg.angle + (Math.random() * 0.6 - 0.3);
-              const newAngle2 = seg.angle + (Math.random() * 0.6 - 0.3);
-              this.segments.push({
-                x: this.tipX, y: this.tipY, len: 0, angle: newAngle1,
-                grow: true, maxLen: 5 + Math.random() * 20
-              });
-              this.segments.push({
-                x: this.tipX, y: this.tipY, len: 0, angle: newAngle2,
-                grow: true, maxLen: 5 + Math.random() * 20
-              });
-            } else {
-              // Continue straight
-              const lastSeg = this.segments[this.segments.length - 1];
-              this.segments.push({
-                x: this.tipX, y: this.tipY, len: 0, angle: seg.angle,
-                grow: true, maxLen: 5 + Math.random() * 20
-              });
-            }
-          }
-        } else if (!seg.grow && Math.random() < 0.01) {
-          // Occasional small glimmer
-        }
+      if (this.points.length < this.maxLength && Math.random() < this.growthRate / 60) {
+        const last = this.points[this.points.length - 1];
+        const angle = this.points.length === 1 ? -Math.PI/2 + rand(-0.2, 0.2) : this.lastAngle || -Math.PI/2;
+        const len = rand(2, 5);
+        const nx = last.x + Math.cos(angle) * len;
+        const ny = last.y + Math.sin(angle) * len;
+        this.points.push({x: nx, y: ny});
+        this.lastAngle = angle + rand(-0.3, 0.3);
       }
+
+      // Try branching probabilistically
+      if (this.points.length > 5 && Math.random() < 0.01) {
+        this.tryBranch();
+      }
+
+      // Update branches
+      for (let b of this.branches) b.update();
     }
 
-    draw(ctx, lightPos) {
-      ctx.save();
-      for (let i = 0; i < this.segments.length; i++) {
-        const seg = this.segments[i];
-        if (seg.len <= 0) continue;
-        const x2 = seg.x + Math.cos(seg.angle) * seg.len;
-        const y2 = seg.y + Math.sin(seg.angle) * seg.len;
+    tryBranch() {
+      if (this.points.length < 3) return;
+      const idx = randInt(0, this.points.length - 2);
+      const pt = this.points[idx];
+      const branch = new Crystal(pt.x, pt.y);
+      branch.isBranch = true;
+      branch.maxLength = rand(10, 40);
+      this.branches.push(branch);
+    }
 
-        const width = Math.max(1, seg.len / 15);
-        const grad = ctx.createLinearGradient(seg.x, seg.y, x2, y2);
-        grad.addColorStop(0, this.color);
-        grad.addColorStop(1, `hsl(${Math.random()*60+180}, 80%, 85%)`);
-        ctx.fillStyle = grad;
+    draw(ctx, lightX, lightY) {
+      // Refracted glow
+      const last = this.points[this.points.length - 1];
+      const gradient = ctx.createRadialGradient(last.x, last.y, 0, last.x, last.y, 20);
+      gradient.addColorStop(0, 'rgba(255,255,255,0.6)');
+      gradient.addColorStop(1, 'rgba(255,255,255,0)');
+      
+      ctx.fillStyle = gradient;
+      ctx.beginPath();
+      ctx.arc(last.x, last.y, 8, 0, Math.PI * 2);
+      ctx.fill();
 
+      // Draw main crystal shard
+      ctx.strokeStyle = this.color;
+      ctx.lineWidth = 1.5;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      for (let i = 0; i < this.points.length - 1; i++) {
+        if (i === 0) ctx.moveTo(this.points[i].x, this.points[i].y);
+        else ctx.lineTo(this.points[i].x, this.points[i].y);
+      }
+      ctx.stroke();
+
+      // Internal faces (glint)
+      for (let i = 0; i < this.points.length; i += 4) {
+        const p = this.points[i];
+        ctx.fillStyle = `hsl(0, 100%, 90%)`;
         ctx.beginPath();
-        ctx.moveTo(seg.x - width/2, seg.y);
-        ctx.lineTo(x2 - width/2, y2);
-        ctx.lineTo(x2 + width/2, y2);
-        ctx.lineTo(seg.x + width/2, seg.y);
-        ctx.closePath();
+        ctx.arc(p.x, p.y, 1.5, 0, Math.PI*2);
         ctx.fill();
-
-        // Internal glimmer on segment
-        if (Math.random() < 0.02) {
-          ctx.fillStyle = 'white';
-          ctx.fillRect(x2 - 1, y2 - 1, 3, 3);
-        }
-
-        // Caustic-like glow near tip
-        const distToLight = Math.hypot(x2 - lightPos.x, y2 - lightPos.y);
-        if (distToLight < 150) {
-          const alpha = (1 - distToLight / 150) * 0.2;
-          ctx.fillStyle = `rgba(255,255,255,${alpha})`;
-          ctx.beginPath();
-          ctx.arc(x2, y2, 10 + Math.sin(this.age * 0.1) * 3, 0, Math.PI * 2);
-          ctx.fill();
-        }
       }
-      ctx.restore();
+
+      // Branches
+      for (let b of this.branches) b.draw(ctx, lightX, lightY);
     }
 
-    getFillAmount(H) {
-      let maxY = 0;
-      for (let s of this.segments) {
-        if (s.y < maxY) maxY = s.y;
+    breakIntoSherds() {
+      const shards = [];
+      for (let i = 0; i < this.points.length; i += randInt(3, 6)) {
+        const p = this.points[i];
+        shards.push(new Shard(p.x, p.y));
       }
-      return maxY;
+      return shards;
     }
   }
 
+  // --- Shard class ---
   class Shard {
     constructor(x, y) {
       this.x = x;
       this.y = y;
-      this.vx = (Math.random() - 0.5) * 3;
-      this.vy = (Math.random() - 0.5) * 3 + 1;
-      this.rotation = Math.random() * Math.PI * 2;
-      this.rotationSpeed = (Math.random() - 0.5) * 0.2;
-      this.size = Math.random() * 4 + 2;
-      this.life = 1;
-      this.color = `hsl(${Math.random() * 60 + 180}, 80%, 70%)`;
+      this.vx = rand(-1, 1);
+      this.vy = rand(0.5, 3);
+      this.life = rand(30, 80);
+      this.size = rand(1, 3);
+      this.color = `hsl(${randInt(160,220)}, 70%, 75%)`;
     }
-
     update() {
       this.x += this.vx;
       this.y += this.vy;
       this.vy += 0.05;
-      this.rotation += this.rotationSpeed;
-      this.life -= 0.005;
-      if (this.y > H + 20) this.life = 0;
-      return this.life > 0;
+      this.life--;
     }
-
     draw(ctx) {
-      ctx.save();
-      ctx.translate(this.x, this.y);
-      ctx.rotate(this.rotation);
-      ctx.fillStyle = this.color;
-      ctx.globalAlpha = this.life;
+      const alpha = Math.max(0, this.life / 80);
+      ctx.fillStyle = this.color.replace(')', `, ${alpha})`).replace('hsl', 'hsla');
       ctx.beginPath();
-      ctx.moveTo(-this.size, -this.size);
-      ctx.lineTo(this.size, 0);
-      ctx.lineTo(-this.size, this.size);
-      ctx.closePath();
+      ctx.arc(this.x, this.y, this.size, 0, Math.PI*2);
       ctx.fill();
-      ctx.restore();
     }
   }
 
+  // --- Drip class ---
   class Drip {
-    constructor(x) {
+    constructor(x, startY) {
       this.x = x;
-      this.y = 0;
-      this.speed = Math.random() * 1 + 0.5;
-      this.length = Math.random() * 20 + 10;
-      this.active = true;
+      this.y = startY;
+      this.len = 0;
+      this.maxLen = rand(15, 40);
+      this.poolX = x;
+      this.poolY = startY + this.maxLen;
     }
-
     update() {
-      if (this.y < H - 50) {
-        this.y += this.speed;
+      if (this.len < this.maxLen) {
+        this.len += 0.5;
       } else {
-        this.splash = true;
-        this.radius = 1;
-        this.maxRadius = 20 + Math.random() * 30;
+        // Fall into pool
+        this.createRipple();
+        return true;
       }
-      if (this.splash && this.radius < this.maxRadius) {
-        this.radius += 0.5;
-        // Ripple effect handled in pool layer
-      }
-      if (this.radius > this.maxRadius + 20) {
-        this.active = false;
-      }
+      return false;
     }
+    draw(ctx) {
+      ctx.strokeStyle = 'rgba(180, 220, 255, 0.6)';
+      ctx.lineWidth = 0.8;
+      ctx.beginPath();
+      ctx.moveTo(this.x, this.y);
+      ctx.lineTo(this.x, this.y + this.len);
+      ctx.stroke();
+    }
+    createRipple() {
+      ripplePools.push(new Ripple(this.poolX, this.poolY));
+    }
+  }
 
-    draw(ctx, time) {
-      ctx.strokeStyle = 'rgba(150, 200, 255, 0.6)';
+  // --- Ripple pool ---
+  class Ripple {
+    constructor(x, y) {
+      this.x = x;
+      this.y = y;
+      this.radius = 0;
+      this.maxRadius = rand(5, 15);
+      this.alpha = 0.5;
+    }
+    update() {
+      this.radius += 0.3;
+      this.alpha -= 0.005;
+      return this.alpha <= 0;
+    }
+    draw(ctx) {
+      ctx.strokeStyle = `rgba(180, 220, 255, ${this.alpha})`;
       ctx.lineWidth = 1;
-      if (this.y < H - 50) {
-        ctx.beginPath();
-        ctx.moveTo(this.x, this.y);
-        ctx.lineTo(this.x, this.y + this.length);
-        ctx.stroke();
-      } else {
-        if (this.splash) {
-          ctx.globalAlpha = 1 - (this.radius / (this.maxRadius + 20));
-          ctx.beginPath();
-          ctx.arc(this.x, H - 50, this.radius, 0, Math.PI * 2);
-          ctx.stroke();
-          ctx.globalAlpha = 1;
-        }
-      }
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, this.radius, 0, Math.PI*2);
+      ctx.stroke();
     }
   }
 
-  // Cavern background
-  function drawBackground(ctx, time) {
-    // Dark cave walls
-    const wallGrad = ctx.createLinearGradient(0, 0, 0, H);
-    wallGrad.addColorStop(0, '#1a1a2e');
-    wallGrad.addColorStop(1, '#16213e');
-    ctx.fillStyle = wallGrad;
-    ctx.fillRect(0, 0, W, H);
-
-    // Cave floor texture
-    ctx.fillStyle = '#0d1b2a';
-    for (let i = 0; i < W; i += 20) {
-      const h = Math.sin(i * 0.05 + time * 0.02) * 5 + 15;
-      ctx.fillRect(i, H - h, 20, h);
-    }
-
-    // Ceiling texture
-    ctx.fillStyle = '#0d1b2a';
-    for (let i = 0; i < W; i += 20) {
-      const h = Math.sin(i * 0.05 + time * 0.02) * 5 + 15;
-      ctx.fillRect(i, 0, 20, h);
-    }
+  // --- Light refraction / caustics ---
+  function getLightPos() {
+    lightAngle += 0.001;
+    const lx = w/2 + Math.cos(lightAngle) * w * 0.4;
+    const ly = h * 0.4 + Math.sin(lightAngle * 0.7) * h * 0.1;
+    return {x: lx, y: ly};
   }
 
-  const crystals = [];
-  const shards = [];
-  const drips = [];
-  const ripPoolY = H - 50;
-
-  // Initialize crystals
-  function initCrystals(count, isFloor) {
-    for (let i = 0; i < count; i++) {
-      const x = Math.random() * W;
-      const y = isFloor ? H : 0;
-      crystals.push(new Crystal(x, y, isFloor));
-    }
-  }
-
-  initCrystals(15, true);
-  initCrystals(10, false);
-
-  // Drip initialization
-  setInterval(() => {
-    drips.push(new Drip(Math.random() * W));
-  }, 1500);
-
-  let lastTremor = 0;
-  const tremorInterval = 8000 + Math.random() * 5000;
-
-  function checkTremor() {
-    let oldest = crystals[0];
-    let oldestIdx = 0;
-    for (let i = 1; i < crystals.length; i++) {
-      if (crystals[i].age < oldest.age) {
-        oldest = crystals[i];
-        oldestIdx = i;
-      }
-    }
-    return crystals.length > 50 && oldest.age > 500;
-  }
-
-  function doTremor() {
-    // Shatter oldest crystals
-    for (let i = 0; i < 8; i++) {
-      let oldest = crystals[0];
-      let oldestIdx = 0;
-      for (let j = 1; j < crystals.length; j++) {
-        if (crystals[j].age < oldest.age) {
-          oldest = crystals[j];
-          oldestIdx = j;
-        }
-      }
-      if (oldestIdx < crystals.length) {
-        for (let seg of oldest.segments) {
-          if (seg.len > 0) {
-            const x2 = seg.x + Math.cos(seg.angle) * seg.len;
-            const y2 = seg.y + Math.sin(seg.angle) * seg.len;
-            shards.push(new Shard(x2, y2));
-          }
-        }
-        crystals.splice(oldestIdx, 1);
-      }
-    }
-  }
-
-  // Main loop
-  let startTime = Date.now();
-
-  function animate() {
-    const time = (Date.now() - startTime) / 1000;
-    const lightPos = getLightPos();
-
-    drawBackground(ctx, time);
-
-    // Update crystals
-    for (let i = crystals.length - 1; i >= 0; i--) {
-      crystals[i].update();
-    }
-
-    // Draw caustic patches on floor/ceiling
+  function drawCaustics(light) {
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    ctx.fillStyle = `rgba(100, 200, 255, 0.05)`;
-    const lightProjX = lightPos.x;
-    const lightProjYFloor = H - 30;
-    ctx.beginPath();
-    ctx.arc(lightProjX, lightProjYFloor, 80, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = `rgba(255, 180, 100, 0.05)`;
-    ctx.beginPath();
-    ctx.arc(lightProjX, 30, 80, 0, Math.PI * 2);
-    ctx.fill();
+    for (let y = caveFloorY + 10; y < h; y += 20) {
+      for (let x = 0; x < w; x += 20) {
+        const dx = x - light.x;
+        const dy = y - light.y;
+        const dist = Math.sqrt(dx*dx + dy*dy) + 0.1;
+        const intensity = Math.max(0, 1 - dist / 200);
+        if (intensity > 0.1) {
+          const rgb = hslToRgb(190 + Math.sin(x*0.05)*20, 60, 60 + intensity*20);
+          ctx.fillStyle = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${intensity*0.2})`;
+          ctx.fillRect(x, y, 18, 18);
+        }
+      }
+    }
     ctx.restore();
+  }
 
-    // Draw crystals
-    for (let c of crystals) {
-      c.draw(ctx, lightPos);
+  // --- Init crystals ---
+  function initCrystals() {
+    crystals.length = 0;
+    // Floor crystals
+    for (let i = 0; i < 40; i++) {
+      const x = rand(10, w - 10);
+      const y = caveFloorY + rand(-5, 5);
+      crystals.push(new Crystal(x, y));
+      totalCrystals++;
+    }
+    // Ceiling stalactites
+    for (let i = 0; i < 20; i++) {
+      const x = rand(10, w - 10);
+      const y = caveCeilingY + rand(-5, 5);
+      const c = new Crystal(x, y);
+      c.isStalactite = true;
+      crystals.push(c);
+      totalCrystals++;
+    }
+  }
+
+  // --- Tremor ---
+  let tremorTimer = 0;
+  function triggerTremor() {
+    // Break oldest crystals
+    const oldest = crystals.sort((a,b) => a.age - b.age).slice(0, Math.floor(crystals.length * 0.5));
+    for (let c of oldest) {
+      const newShards = c.breakIntoSherds();
+      shards.push(...newShards);
+    }
+    // Remove oldest
+    for (let c of oldest) {
+      const idx = crystals.indexOf(c);
+      if (idx !== -1) crystals.splice(idx, 1);
+    }
+    totalCrystals = crystals.length;
+  }
+
+  // --- Main loop ---
+  function animate() {
+    // Clear with dark cave color
+    ctx.fillStyle = '#0a0e12';
+    ctx.fillRect(0, 0, w, h);
+
+    // Draw cave walls (rock texture)
+    ctx.fillStyle = '#1a1f25';
+    ctx.fillRect(0, 0, w, h * 0.3);
+    ctx.fillRect(0, h * 0.6, w, h * 0.4);
+
+    const light = getLightPos();
+
+    // Caustics on cave floor and ceiling
+    drawCaustics(light);
+
+    // Update and draw crystals
+    for (let i = crystals.length - 1; i >= 0; i--) {
+      const c = crystals[i];
+      c.update();
+      c.draw(ctx, light.x, light.y);
     }
 
     // Update and draw shards
     for (let i = shards.length - 1; i >= 0; i--) {
-      if (!shards[i].update()) {
-        shards.splice(i, 1);
-      }
-    }
-    for (let s of shards) {
+      const s = shards[i];
+      s.update();
       s.draw(ctx);
+      if (s.life <= 0) shards.splice(i, 1);
+    }
+
+    // Add drips periodically
+    if (Math.random() < 0.02) {
+      const stalactites = crystals.filter(c => c.isStalactite);
+      if (stalactites.length > 0) {
+        const s = stalactites[randInt(0, stalactites.length - 1)];
+        const tip = s.points[s.points.length - 1];
+        drips.push(new Drip(tip.x, tip.y));
+      }
     }
 
     // Update drips
     for (let i = drips.length - 1; i >= 0; i--) {
-      drips[i].update();
-      if (!drips[i].active) {
-        drips.splice(i, 1);
-      }
-    }
-    for (let d of drips) {
-      d.draw(ctx, time);
+      const d = drips[i];
+      const done = d.update();
+      d.draw(ctx);
+      if (done) drips.splice(i, 1);
     }
 
-    // Ripple pools at bottom
-    ctx.save();
-    ctx.strokeStyle = 'rgba(173, 216, 230, 0.4)';
-    ctx.lineWidth = 1;
-    for (let i = 0; i < W; i += 40) {
-      const ripplePhase = (i / W) * Math.PI * 2 + time * 3;
-      const amp = Math.sin(ripplePhase) * 2;
-      ctx.beginPath();
-      ctx.moveTo(i, ripPoolY + amp);
-      ctx.lineTo(i + 20, ripPoolY + amp + Math.sin(ripplePhase + 0.5) * 2);
-      ctx.stroke();
+    // Update ripples
+    for (let i = ripplePools.length - 1; i >= 0; i--) {
+      const r = ripplePools[i];
+      const done = r.update();
+      r.draw(ctx);
+      if (done) ripplePools.splice(i, 1);
     }
-    ctx.restore();
 
-    // Check for tremor
-    if (time - lastTremor > tremorInterval) {
-      if (checkTremor()) {
-        doTremor();
-      }
-      lastTremor = time;
+    // Check capacity for tremor
+    totalCrystals = crystals.length;
+    if (totalCrystals > crystalCapacity && tremorTimer <= 0) {
+      tremorTimer = 120;
+      triggerTremor();
+    }
+    if (tremorTimer > 0) tremorTimer--;
+
+    // Occasionally add new crystals
+    if (Math.random() < 0.03 && crystals.length < crystalCapacity) {
+      const x = rand(20, w - 20);
+      const y = caveFloorY + rand(-5, 5);
+      crystals.push(new Crystal(x, y, true));
+      totalCrystals++;
     }
 
     requestAnimationFrame(animate);
   }
 
+  initCrystals();
   animate();
 })();
 </script>

@@ -1,203 +1,245 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Bokeh Field</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background-color: #050505; /* Fallback */
-        }
-        canvas {
-            display: block;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bokeh Field</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a12; }
+canvas { display: block; width: 100%; height: 100%; }
+</style>
 </head>
 <body>
-<canvas id="bokehCanvas"></canvas>
+<canvas id="c"></canvas>
 <script>
-    const canvas = document.getElementById('bokehCanvas');
-    const ctx = canvas.getContext('2d');
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
 
-    let width, height;
-    let particles = [];
-    const PARTICLE_COUNT = 80;
-    
-    // Configuration
-    const LAYER_COUNT = 3;
-    const FOCUS_CYCLE_DURATION = 10000; // 10 seconds
-    const APERTURE_SIDES = 7; // Heptagon shape typical of lenses
-    
-    // Palette: Warm night city (deep oranges, soft reds, golds) + occasional cool accents
-    const PALETTE = [
-        { r: 255, g: 140, b: 50 },  // Warm Orange
-        { r: 255, g: 200, b: 100 }, // Gold
-        { r: 200, g: 50, b: 50 },   // Soft Red
-        { r: 255, g: 180, b: 180 }, // Pinkish
-        { r: 100, g: 180, b: 255 }, // Cool Blue Accent
-        { r: 200, g: 255, b: 200 }, // Mint Accent
-    ];
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth * devicePixelRatio;
+  H = canvas.height = window.innerHeight * devicePixelRatio;
+  ctx.scale(1, 1);
+}
+resize();
+window.addEventListener('resize', resize);
 
-    class Particle {
-        constructor() {
-            this.reset(true);
-        }
+const warmColors = [
+  [255, 107, 53],
+  [247, 197, 159],
+  [239, 167, 110],
+  [255, 140, 97],
+  [255, 209, 102],
+  [255, 159, 28],
+  [255, 183, 77],
+  [230, 126, 34],
+  [255, 210, 150],
+  [255, 160, 80],
+  [200, 100, 50],
+  [180, 80, 40],
+  [255, 140, 66],
+  [255, 200, 120],
+  [240, 150, 80],
+];
 
-        reset(initial = false) {
-            // Determine layer (0 = far, 1 = mid, 2 = near)
-            this.layer = Math.floor(Math.random() * LAYER_COUNT);
-            
-            // Scale based on layer (Near is bigger)
-            const scaleBase = [0.5, 1.0, 1.8][this.layer];
-            this.radius = (Math.random() * 30 + 10) * scaleBase;
-            
-            // Speed based on layer (Near is faster)
-            const speedBase = [0.2, 0.6, 1.2][this.layer];
-            this.vx = (Math.random() - 0.5) * speedBase;
-            this.vy = (Math.random() - 0.5) * (speedBase * 0.3); // Less vertical movement
+const accentColors = [
+  [6, 214, 160],
+  [17, 138, 178],
+  [239, 71, 111],
+  [100, 180, 255],
+  [180, 120, 255],
+  [255, 100, 180],
+];
 
-            // Position
-            this.x = Math.random() * width;
-            this.y = Math.random() * height;
+const SIDES = 6;
 
-            // Color
-            const color = PALETTE[Math.floor(Math.random() * PALETTE.length)];
-            this.color = color;
-            this.baseAlpha = Math.random() * 0.4 + 0.1;
+class Bokeh {
+  constructor() {
+    this.depth = Math.random();
+    this.reset(true);
+  }
 
-            // Focus properties
-            this.focusFactor = 0; // 0 = blurry, 1 = sharp
-        }
+  reset(initial) {
+    const layer = this.depth < 0.33 ? 0 : this.depth < 0.66 ? 1 : 2;
+    const baseSize = layer === 0 ? 8 : layer === 1 ? 18 : 38;
+    const spread = layer === 0 ? 6 : layer === 1 ? 12 : 22;
+    this.size = (baseSize + Math.random() * spread) * devicePixelRatio;
+    this.baseSize = this.size;
 
-        update(time, focusLayer) {
-            // Move
-            this.x += this.vx;
-            this.y += this.vy;
+    this.speed = (layer === 0 ? 0.15 : layer === 1 ? 0.45 : 1.1) * (0.7 + Math.random() * 0.6);
+    this.dir = Math.random() > 0.5 ? 1 : -1;
 
-            // Wrap around screen
-            if (this.x < -this.radius * 2) this.x = width + this.radius * 2;
-            if (this.x > width + this.radius * 2) this.x = -this.radius * 2;
-            if (this.y < -this.radius * 2) this.y = height + this.radius * 2;
-            if (this.y > height + this.radius * 2) this.y = -this.radius * 2;
-
-            // Calculate Focus Factor (Gaussian-like falloff)
-            // If particle layer matches current focus layer, factor approaches 1
-            // The closer the layer index, the sharper it gets
-            const dist = Math.abs(this.layer - focusLayer);
-            // Smooth falloff: 0 distance = 1.0, 1 distance = 0.3, 2 distance = 0.0
-            this.focusFactor = Math.max(0, 1 - (dist * 0.45));
-        }
-
-        draw(ctx) {
-            ctx.save();
-            ctx.translate(this.x, this.y);
-
-            // Dynamic Opacity: Sharper things are often brighter in bokeh
-            const currentAlpha = this.baseAlpha + (this.focusFactor * 0.4);
-
-            if (this.focusFactor > 0.5) {
-                // Draw Polygonal Aperture (Sharp)
-                const sides = APERTURE_SIDES;
-                const rotation = Date.now() / 1000; // Slow rotation for realism
-                const r = this.radius * (0.8 + this.focusFactor * 0.2); // Slight size shift
-
-                ctx.beginPath();
-                for (let i = 0; i < sides; i++) {
-                    const angle = (i * 2 * Math.PI / sides) + rotation;
-                    const px = Math.cos(angle) * r;
-                    const py = Math.sin(angle) * r;
-                    if (i === 0) ctx.moveTo(px, py);
-                    else ctx.lineTo(px, py);
-                }
-                ctx.closePath();
-
-                // Add a "glow" stroke for the sharp edge
-                ctx.strokeStyle = `rgba(${this.color.r}, ${this.color.g}, ${this.color.b}, ${currentAlpha})`;
-                ctx.lineWidth = 2;
-                ctx.stroke();
-
-                // Fill with a slightly dimmer center
-                ctx.fillStyle = `rgba(${this.color.r}, ${this.color.g}, ${this.color.b}, ${currentAlpha * 0.6})`;
-                ctx.fill();
-
-            } else {
-                // Draw Soft Circle (Blurry)
-                // Larger and softer when out of focus
-                const blurRadius = this.radius * 1.2;
-                
-                // Create radial gradient for soft edge
-                const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, blurRadius);
-                grad.addColorStop(0, `rgba(${this.color.r}, ${this.color.g}, ${this.color.b}, ${currentAlpha})`);
-                grad.addColorStop(1, `rgba(${this.color.r}, ${this.color.g}, ${this.color.b}, 0)`);
-
-                ctx.fillStyle = grad;
-                ctx.beginPath();
-                ctx.arc(0, 0, blurRadius, 0, Math.PI * 2);
-                ctx.fill();
-            }
-
-            ctx.restore();
-        }
+    if (initial) {
+      this.x = Math.random() * W;
+    } else {
+      this.x = this.dir === 1 ? -this.size * 2 : W + this.size * 2;
     }
+    this.y = Math.random() * H;
 
-    function init() {
-        resize();
-        particles = [];
-        for (let i = 0; i < PARTICLE_COUNT; i++) {
-            particles.push(new Particle());
+    const isAccent = Math.random() < 0.12;
+    const palette = isAccent ? accentColors : warmColors;
+    const col = palette[Math.floor(Math.random() * palette.length)];
+    this.r = col[0];
+    this.g = col[1];
+    this.b = col[2];
+    this.brightness = 0.5 + Math.random() * 0.5;
+
+    this.wobbleAmp = (2 + Math.random() * 4) * devicePixelRatio;
+    this.wobbleSpeed = 0.3 + Math.random() * 0.7;
+    this.wobblePhase = Math.random() * Math.PI * 2;
+    this.yDrift = (Math.random() - 0.5) * 0.15 * devicePixelRatio;
+
+    this.alpha = 0.3 + this.depth * 0.5 + Math.random() * 0.2;
+    this.apertureRotation = Math.random() * Math.PI * 2;
+    this.apertureRotSpeed = (Math.random() - 0.5) * 0.003;
+  }
+
+  update(dt, time) {
+    this.x += this.speed * this.dir * dt * 60;
+    this.y += this.yDrift * dt * 60 + Math.sin(time * this.wobbleSpeed + this.wobblePhase) * this.wobbleAmp * dt * 0.5;
+    this.apertureRotation += this.apertureRotSpeed * dt * 60;
+
+    if ((this.dir === 1 && this.x > W + this.size * 3) ||
+        (this.dir === -1 && this.x < -this.size * 3)) {
+      this.reset(false);
+    }
+  }
+
+  draw(ctx, sharpness, time) {
+    const s = this.size * (0.8 + sharpness * 0.4);
+    const alpha = this.alpha * (0.4 + sharpness * 0.6);
+    const r = Math.min(255, this.r * (0.6 + sharpness * 0.5) * this.brightness);
+    const g = Math.min(255, this.g * (0.6 + sharpness * 0.5) * this.brightness);
+    const b = Math.min(255, this.b * (0.6 + sharpness * 0.5) * this.brightness);
+
+    ctx.save();
+    ctx.translate(this.x, this.y);
+
+    if (sharpness > 0.55) {
+      const polySharp = (sharpness - 0.55) / 0.45;
+      const blend = polySharp;
+
+      ctx.rotate(this.apertureRotation);
+
+      if (blend > 0.3) {
+        ctx.beginPath();
+        for (let i = 0; i < SIDES; i++) {
+          const angle = (i / SIDES) * Math.PI * 2 - Math.PI / 2;
+          const px = Math.cos(angle) * s;
+          const py = Math.sin(angle) * s;
+          if (i === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
         }
-        // Sort by layer so background renders first (simple painter's algo)
-        particles.sort((a, b) => a.layer - b.layer);
-    }
+        ctx.closePath();
 
-    function resize() {
-        width = window.innerWidth;
-        height = window.innerHeight;
-        canvas.width = width;
-        canvas.height = height;
-    }
-
-    function animate() {
-        // Clear with a dark, slightly warm background for "Night City" feel
-        ctx.fillStyle = '#08080c'; 
-        ctx.fillRect(0, 0, width, height);
-
-        // Add a subtle vignette
-        const grad = ctx.createRadialGradient(width/2, height/2, height/4, width/2, height/2, height);
-        grad.addColorStop(0, 'rgba(0,0,0,0)');
-        grad.addColorStop(1, 'rgba(0,0,0,0.6)');
+        const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, s);
+        grad.addColorStop(0, `rgba(${Math.round(r * 1.3)},${Math.round(g * 1.3)},${Math.round(b * 1.3)},${alpha * 0.95})`);
+        grad.addColorStop(0.4, `rgba(${Math.round(r)},${Math.round(g)},${Math.round(b)},${alpha * 0.7})`);
+        grad.addColorStop(0.75, `rgba(${Math.round(r * 0.8)},${Math.round(g * 0.8)},${Math.round(b * 0.8)},${alpha * 0.35})`);
+        grad.addColorStop(1, `rgba(${Math.round(r * 0.5)},${Math.round(g * 0.5)},${Math.round(b * 0.5)},0)`);
         ctx.fillStyle = grad;
-        ctx.fillRect(0, 0, width, height);
+        ctx.fill();
 
-        // Calculate Focus Target (Smoothly cycling 0 -> 2 -> 0)
-        const now = Date.now();
-        // Sine wave oscillating between -1 and 1, mapped to 0 and 2
-        const cycle = (Math.sin((now % FOCUS_CYCLE_DURATION) / FOCUS_CYCLE_DURATION * Math.PI * 2) + 1) / 2;
-        const focusLayer = cycle * (LAYER_COUNT - 1);
+        ctx.strokeStyle = `rgba(${Math.min(255, Math.round(r * 1.2))},${Math.min(255, Math.round(g * 1.2))},${Math.min(255, Math.round(b * 1.2))},${alpha * 0.4 * blend})`;
+        ctx.lineWidth = 1.5 * devicePixelRatio;
+        ctx.stroke();
+      }
 
-        // Composite mode for light blending
-        ctx.globalCompositeOperation = 'screen';
-
-        particles.forEach(p => {
-            p.update(now, focusLayer);
-            p.draw(ctx);
-        });
-
-        // Reset composite
-        ctx.globalCompositeOperation = 'source-over';
-
-        requestAnimationFrame(animate);
+      if (blend < 0.7) {
+        const circleAlpha = alpha * (1 - blend) * 0.6;
+        const grad2 = ctx.createRadialGradient(0, 0, 0, 0, 0, s * 1.3);
+        grad2.addColorStop(0, `rgba(${Math.round(r)},${Math.round(g)},${Math.round(b)},${circleAlpha * 0.5})`);
+        grad2.addColorStop(1, `rgba(${Math.round(r * 0.5)},${Math.round(g * 0.5)},${Math.round(b * 0.5)},0)`);
+        ctx.beginPath();
+        ctx.arc(0, 0, s * 1.3, 0, Math.PI * 2);
+        ctx.fillStyle = grad2;
+        ctx.fill();
+      }
+    } else {
+      const blurAmount = (1 - sharpness) * 1.5;
+      const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, s * (1 + blurAmount));
+      grad.addColorStop(0, `rgba(${Math.round(r)},${Math.round(g)},${Math.round(b)},${alpha * 0.7})`);
+      grad.addColorStop(0.3, `rgba(${Math.round(r * 0.9)},${Math.round(g * 0.9)},${Math.round(b * 0.9)},${alpha * 0.4})`);
+      grad.addColorStop(0.7, `rgba(${Math.round(r * 0.6)},${Math.round(g * 0.6)},${Math.round(b * 0.6)},${alpha * 0.15})`);
+      grad.addColorStop(1, `rgba(${Math.round(r * 0.3)},${Math.round(g * 0.3)},${Math.round(b * 0.3)},0)`);
+      ctx.beginPath();
+      ctx.arc(0, 0, s * (1 + blurAmount), 0, Math.PI * 2);
+      ctx.fillStyle = grad;
+      ctx.fill();
     }
 
-    window.addEventListener('resize', resize);
-    init();
-    animate();
+    ctx.restore();
+  }
+}
 
+const bokehList = [];
+const COUNT = 80;
+for (let i = 0; i < COUNT; i++) {
+  bokehList.push(new Bokeh());
+}
+
+function getFocusDepth(time) {
+  const cycle = 10;
+  const t = (time % cycle) / cycle;
+  return 0.5 + 0.5 * Math.sin(t * Math.PI * 2 - Math.PI / 2);
+}
+
+function computeSharpness(bokehDepth, focusDepth) {
+  const diff = Math.abs(bokehDepth - focusDepth);
+  const range = 0.22;
+  if (diff < range) {
+    return 1.0 - (diff / range);
+  }
+  const tailRange = 0.35;
+  if (diff < tailRange) {
+    return 0.3 * (1.0 - (diff - range) / (tailRange - range));
+  }
+  return 0;
+}
+
+function drawBackground() {
+  const grad = ctx.createRadialGradient(W * 0.5, H * 0.5, 0, W * 0.5, H * 0.5, Math.max(W, H) * 0.7);
+  grad.addColorStop(0, '#1a1520');
+  grad.addColorStop(0.5, '#12101a');
+  grad.addColorStop(1, '#0a0a12');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+}
+
+let lastTime = 0;
+function animate(timestamp) {
+  const time = timestamp / 1000;
+  const dt = lastTime ? Math.min((timestamp - lastTime) / 1000, 0.05) : 0.016;
+  lastTime = timestamp;
+
+  drawBackground();
+
+  const focusDepth = getFocusDepth(time);
+
+  bokehList.forEach(b => b.update(dt, time));
+
+  bokehList.sort((a, b) => a.depth - b.depth);
+
+  ctx.globalCompositeOperation = 'lighter';
+
+  bokehList.forEach(b => {
+    const sharpness = computeSharpness(b.depth, focusDepth);
+    b.draw(ctx, sharpness, time);
+  });
+
+  ctx.globalCompositeOperation = 'source-over';
+
+  const vignette = ctx.createRadialGradient(W * 0.5, H * 0.5, W * 0.2, W * 0.5, H * 0.5, W * 0.75);
+  vignette.addColorStop(0, 'rgba(0,0,0,0)');
+  vignette.addColorStop(1, 'rgba(0,0,0,0.45)');
+  ctx.fillStyle = vignette;
+  ctx.fillRect(0, 0, W, H);
+
+  requestAnimationFrame(animate);
+}
+
+requestAnimationFrame(animate);
 </script>
 </body>
 </html>

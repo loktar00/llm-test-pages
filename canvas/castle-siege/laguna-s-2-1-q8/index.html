@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+body{margin:0;overflow:hidden;background:#000}
+canvas{display:block}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(() => {
+let w=innerWidth, h=innerHeight;
+const cvs=document.getElementById('c');
+cvs.width=w;cvs.height=h;
+const ctx=cvs.getContext('2d');
+
+// Game state
+let attackers=[];
+let defenders=[];
+let projectiles=[];
+let debris=[];
+let walls=[];
+let gameObjects=[];
+let score=0;
+let gamePhase='siege'; // siege, breached, repairing, newAssault
+let phaseTimer=0;
+const WALL_Y=h*0.6;
+const CASTLE_X=w*0.7;
+const ATTACKER_START=w*0.2;
+
+// Init walls
+function initWalls() {
+    walls=[];
+    for(let i=0;i<8;i++) {
+        walls.push({
+            x: CASTLE_X + i*25 - 50,
+            y: WALL_Y,
+            width: 20,
+            height: 60,
+            health: 100
+        });
+    }
+}
+
+// Reset game state
+function reset() {
+    attackers=[];
+    defenders=[];
+    projectiles=[];
+    debris=[];
+    gameObjects=[];
+    score=0;
+    gamePhase='siege';
+    phaseTimer=0;
+    initWalls();
+    
+    // Create attackers
+    for(let i=0;i<5;i++) {
+        attackers.push({
+            x: ATTACKER_START + i*30,
+            y: WALL_Y-20,
+            width: 20,
+            height: 30,
+            health: 100,
+            type: 'infantry',
+            speed: 0.5,
+            targetX: CASTLE_X-100,
+            attacking: false,
+            reload: 0
+        });
+    }
+    
+    // Create siege equipment
+    attackers.push({
+        x: ATTACKER_START,
+        y: WALL_Y-50,
+        width: 40,
+        height: 30,
+        health: 200,
+        type: 'ram',
+        speed: 0.3,
+        targetX: CASTLE_X-80,
+        attacking: false
+    });
+    
+    attackers.push({
+        x: ATTACKER_START+50,
+        y: WALL_Y-70,
+        width: 50,
+        height: 40,
+        health: 300,
+        type: 'tower',
+        speed: 0.2,
+        targetX: CASTLE_X-120,
+        attacking: false
+    });
+    
+    // Create defenders
+    for(let i=0;i<4;i++) {
+        defenders.push({
+            x: CASTLE_X + 50 + i*40,
+            y: WALL_Y-30,
+            width: 15,
+            height: 25,
+            health: 80,
+            reload: Math.random()*100,
+            target: null
+        });
+    }
+}
+
+// Launch arrow
+function launchArrow(fromX, fromY, toX, toY, isPlayer=false) {
+    const dx = toX - fromX;
+    const dy = toY - fromY;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    const power = 3 + dist/100;
+    const angle = Math.atan2(dy, dx) * 0.4;
+    
+    projectiles.push({
+        x: fromX,
+        y: fromY,
+        vx: Math.cos(angle) * power,
+        vy: Math.sin(angle) * power,
+        gravity: 0.1,
+        life: 100,
+        isArrow: true,
+        owner: isPlayer ? 'defender' : 'attacker'
+    });
+}
+
+// Launch stone
+function launchStone(fromX, fromY, targetX) {
+    const dx = targetX - fromX;
+    const power = Math.sqrt(dx*dx/1000);
+    const angle = Math.atan2(-1, Math.sign(dx)) * 0.6;
+    
+    projectiles.push({
+        x: fromX,
+        y: fromY,
+        vx: Math.cos(angle) * (power + 3),
+        vy: Math.sin(angle) * (power + 3),
+        gravity: 0.15,
+        life: 120,
+        isStone: true,
+        owner: 'attacker'
+    });
+}
+
+// Create debris
+function createDebris(x, y, count=5) {
+    for(let i=0;i<count;i++) {
+        debris.push({
+            x: x,
+            y: y,
+            vx: (Math.random()-0.5)*3,
+            vy: (Math.random()-0.5)*3,
+            gravity: 0.2,
+            life: 100,
+            size: 5+Math.random()*5
+        });
+    }
+}
+
+// Draw functions
+function drawSiegeTower(x, y) {
+    ctx.fillStyle='#8B4513';
+    ctx.fillRect(x-20, y, 40, 40);
+    ctx.fillStyle='#A0522D';
+    ctx.fillRect(x-15, y-50, 30, 10);
+    
+    // Wheels
+    ctx.fillStyle='#5D295F';
+    ctx.beginPath();
+    ctx.arc(x-15, y+45, 8, 0, Math.PI*2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x+15, y+45, 8, 0, Math.PI*2);
+    ctx.fill();
+}
+
+function drawRam(x, y) {
+    ctx.fillStyle='#8B4513';
+    ctx.fillRect(x-20, y, 40, 20);
+    ctx.fillStyle='#A0522D';
+    ctx.fillRect(x-10, y-30, 20, 30);
+    
+    // Attackers pushing
+    ctx.fillStyle='#4169E1';
+    ctx.fillRect(x-25, y+5, 10, 15);
+    ctx.fillRect(x+15, y+5, 10, 15);
+}
+
+function drawAttacker(u) {
+    ctx.fillStyle='#4169E1';
+    if(u.type==='infantry') {
+        ctx.fillRect(u.x-5, u.y, 10, 20);
+        // Weapon
+        ctx.fillStyle='#C0C0C0';
+        ctx.fillRect(u.x+5, u.y+5, 15, 3);
+    } else if(u.type==='ram') {
+        drawRam(u.x, u.y);
+    } else if(u.type==='tower') {
+        drawSiegeTower(u.x, u.y);
+    }
+}
+
+function drawDefender(d) {
+    ctx.fillStyle='#228B22';
+    ctx.fillRect(d.x-5, d.y, 10, 20);
+    ctx.fillStyle='#8B4513';
+    ctx.fillRect(d.x+5, d.y+5, 15, 3);
+}
+
+function drawArrow(p) {
+    ctx.fillStyle='#FFFFFF';
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    const angle = Math.atan2(p.vy, p.vx);
+    ctx.rotate(angle);
+    ctx.beginPath();
+    ctx.moveTo(0,0);
+    ctx.lineTo(-5,-3);
+    ctx.lineTo(-8,0);
+    ctx.lineTo(-5,3);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+}
+
+function drawStone(p) {
+    ctx.fillStyle='#888888';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 8, 0, Math.PI*2);
+    ctx.fill();
+}
+
+function drawWall(wall) {
+    const hpRatio = wall.health/100;
+    ctx.fillStyle = hpRatio > 0.5 ? '#8B4513' : hpRatio > 0.2 ? '#A0522D' : '#CD853F';
+    ctx.fillRect(wall.x, wall.y, wall.width, wall.height);
+    
+    // Battlements
+    ctx.fillStyle='#A0522D';
+    for(let i=0;i<3;i++) {
+        ctx.fillRect(wall.x + i*7, wall.y-10, 5, 10);
+    }
+}
+
+function drawCastle() {
+    // Main keep
+    ctx.fillStyle='#8B4513';
+    ctx.fillRect(CASTLE_X+80, WALL_Y-150, 100, 150);
+    ctx.fillStyle='#A0522D';
+    ctx.fillRect(CASTLE_X+70, WALL_Y-160, 120, 20);
+    
+    // Windows
+    ctx.fillStyle='#4169E1';
+    for(let i=0;i<6;i++) {
+        ctx.fillRect(CASTLE_X+90+i*15, WALL_Y-120+i*20, 10, 15);
+    }
+    
+    // Bridge
+    ctx.fillStyle='#8B4513';
+    ctx.fillRect(CASTLE_X-100, WALL_Y+60, 170, 10);
+    ctx.fillStyle='#5D295F';
+    ctx.fillRect(CASTLE_X-100, WALL_Y+55, 170, 20);
+}
+
+// Update functions
+function update() {
+    // Update attackers
+    for(let attacker of attackers) {
+        if(attacker.type==='infantry' || attacker.type==='ram') {
+            if(!attacker.attacking) {
+                if(attacker.x < attacker.targetX) {
+                    attacker.x += attacker.speed;
+                } else {
+                    attacker.attacking = true;
+                }
+            }
+            
+            // Shooting
+            if(attacker.type==='infantry') {
+                attacker.reload--;
+                if(attacker.reload <= 0) {
+                    const target = defenders.find(d=>d.health>0);
+                    if(target) {
+                        launchArrow(attacker.x+20, attacker.y+10, target.x, target.y);
+                        attacker.reload = 50 + Math.random()*100;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Update defenders
+    for(let defender of defenders) {
+        defender.reload--;
+        if(defender.reload <= 0) {
+            const target = attackers.find(a=>a.health>0 && a.type!=='tower');
+            if(target) {
+                launchArrow(defender.x-20, defender.y+10, target.x, target.y, true);
+                defender.reload = 60 + Math.random()*100;
+            }
+        }
+    }
+    
+    // Update projectiles
+    for(let i=projectiles.length-1;i>=0;i--) {
+        const p = projectiles[i];
+        p.x += p.vx;
+        p.vy += p.gravity;
+        p.y += p.vy;
+        p.life--;
+        
+        if(p.life <= 0 || p.y > h+50) {
+            projectiles.splice(i, 1);
+            continue;
+        }
+        
+        // Check collisions
+        if(p.isArrow) {
+            if(p.owner === 'attacker') {
+                // Hit defenders
+                for(let defender of defenders) {
+                    if(defender.health > 0 &&
+                       p.x > defender.x-10 && p.x < defender.x+10 &&
+                       p.y > defender.y && p.y < defender.y+20) {
+                        defender.health -= 20;
+                        projectiles.splice(i, 1);
+                        break;
+                    }
+                }
+            } else {
+                // Hit attackers
+                for(let attacker of attackers) {
+                    if(attacker.health > 0 &&
+                       p.x > attacker.x-15 && p.x < attacker.x+15 &&
+                       p.y > attacker.y && p.y < attacker.y+30) {
+                        attacker.health -= 25;
+                        projectiles.splice(i, 1);
+                        if(attacker.health <= 0) {
+                            score += 10;
+                        }
+                        break;
+                    }
+                }
+            }
+        } else if(p.isStone) {
+            // Hit walls
+            for(let wall of walls) {
+                if(wall.health > 0 &&
+                   p.x > wall.x-10 && p.x < wall.x+wall.width+10 &&
+                   p.y > wall.y && p.y < wall.y+wall.height) {
+                    wall.health -= 50;
+                    createDebris(wall.x+wall.width/2, wall.y+wall.height/2);
+                    projectiles.splice(i, 1);
+                    if(wall.health <= 0) {
+                        score += 50;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    
+    // Update debris
+    for(let i=debris.length-1;i>=0;i--) {
+        const d = debris[i];
+        d.x += d.vx;
+        d.vy += d.gravity;
+        d.y += d.vy;
+        d.life--;
+        if(d.life <= 0) {
+            debris.splice(i, 1);
+        }
+    }
+    
+    // Tower attacks walls periodically
+    for(let attacker of attackers) {
+        if(attacker.type === 'tower' && attacker.x > CASTLE_X-120) {
+            attacker.reload = (attacker.reload || 0) - 1;
+            if(attacker.reload <= 0) {
+                launchStone(attacker.x, attacker.y-30, CASTLE_X);
+                attacker.reload = 200;
+            }
+        }
+    }
+    
+    // Check win conditions
+    const aliveAttackers = attackers.filter(a=>a.health > 0 && (a.type==='infantry' || a.type==='ram'));
+    const aliveDefenders = defenders.filter(d=>d.health > 0);
+    const destroyedWalls = walls.filter(w=>w.health <= 0).length;
+    
+    if(destroyedWalls >= 4) {
+        // Breach!
+        gamePhase = 'breached';
+        phaseTimer = 300;
+    }
+    
+    if(aliveAttackers.length === 0) {
+        // Repelled
+        gamePhase = 'repelled';
+        phaseTimer = 300;
+    }
+    
+    if(phaseTimer > 0) {
+        phaseTimer--;
+    } else if(gamePhase === 'breached' || gamePhase === 'repelled') {
+        gamePhase = 'repairing';
+        phaseTimer = 180;
+    } else if(gamePhase === 'repairing') {
+        // Rebuild walls
+        initWalls();
+        attackers = [];
+        defenders = [];
+        
+        // Create new attackers
+        for(let i=0;i<5+score/20;i++) {
+            attackers.push({
+                x: ATTACKER_START + i*30,
+                y: WALL_Y-20,
+                width: 20,
+                height: 30,
+                health: 100,
+                type: 'infantry',
+                speed: 0.5 + score*0.01,
+                targetX: CASTLE_X-100,
+                attacking: false,
+                reload: Math.random()*50
+            });
+        }
+        
+        attackers.push({
+            x: ATTACKER_START,
+            y: WALL_Y-50,
+            width: 40,
+            height: 30,
+            health: 200,
+            type: 'ram',
+            speed: 0.3,
+            targetX: CASTLE_X-80,
+            attacking: false
+        });
+        
+        attackers.push({
+            x: ATTACKER_START+70,
+            y: WALL_Y-70,
+            width: 50,
+            height: 40,
+            health: 300,
+            type: 'tower',
+            speed: 0.2,
+            targetX: CASTLE_X-120,
+            attacking: false
+        });
+        
+        // Create new defenders
+        for(let i=0;i<4+Math.floor(score/30);i++) {
+            defenders.push({
+                x: CASTLE_X + 50 + i*40,
+                y: WALL_Y-30,
+                width: 15,
+                height: 25,
+                health: 80,
+                reload: Math.random()*100
+            });
+        }
+        
+        gamePhase = 'siege';
+        phaseTimer = 0;
+    }
+}
+
+// Draw function
+function draw() {
+    // Clear
+    ctx.fillStyle = 'rgba(0,0,50,' + (gamePhase==='siege'||gamePhase==='repairing'?'0.1':'0.3') + ')';
+    ctx.fillRect(0, 0, w, h);
+    
+    // Draw ground
+    ctx.fillStyle='#228B22';
+    ctx.fillRect(0, WALL_Y+70, w, h-WALL_Y-70);
+    
+    // Draw sky
+    ctx.fillStyle='#87CEEB';
+    ctx.fillRect(0, 0, w, WALL_Y-100);
+    
+    // Draw castle
+    drawCastle();
+    
+    // Draw walls
+    for(let wall of walls) {
+        if(wall.health > 0) drawWall(wall);
+    }
+    
+    // Draw defenders
+    for(let defender of defenders) {
+        if(defender.health > 0) drawDefender(defender);
+    }
+    
+    // Draw attackers
+    for(let attacker of attackers) {
+        if(attacker.health > 0) drawAttacker(attacker);
+    }
+    
+    // Draw projectiles
+    for(let p of projectiles) {
+        if(p.isArrow) drawArrow(p);
+        else if(p.isStone) drawStone(p);
+    }
+    
+    // Draw debris
+    ctx.fillStyle='#888888';
+    for(let d of debris) {
+        ctx.beginPath();
+        ctx.arc(d.x, d.y, d.size/2, 0, Math.PI*2);
+        ctx.fill();
+    }
+    
+    // Draw UI
+    ctx.fillStyle='#FFFFFF';
+    ctx.font='20px monospace';
+    ctx.fillText('Score: ' + score, 20, 30);
+    ctx.fillText('Phase: ' + gamePhase, 20, 60);
+    
+    const aliveA = attackers.filter(a=>a.health>0).length;
+    const aliveD = defenders.filter(d=>d.health>0).length;
+    ctx.fillText('Attackers: ' + aliveA, w-200, 30);
+    ctx.fillText('Defenders: ' + aliveD, w-200, 60);
+}
+
+// Game loop
+function loop() {
+    update();
+    draw();
+    requestAnimationFrame(loop);
+}
+
+// Touch support for adding extra attackers
+cvs.addEventListener('click', (e) => {
+    if(gamePhase === 'siege') {
+        attackers.push({
+            x: e.clientX,
+            y: WALL_Y-20,
+            width: 20,
+            height: 30,
+            health: 100,
+            type: 'infantry',
+            speed: 0.5,
+            targetX: CASTLE_X-100,
+            attacking: false,
+            reload: 0
+        });
+    }
+});
+
+reset();
+loop();
+})();
+</script>
+</body>
+</html>

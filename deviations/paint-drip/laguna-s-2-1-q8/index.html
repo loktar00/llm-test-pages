@@ -1,258 +1,265 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Dripping Paint Art</title>
-  <style>
-    html, body {
-      margin: 0;
-      padding: 0;
-      overflow: hidden;
-      background: #000;
-      height: 100%;
-    }
-    canvas {
-      display: block;
-      width: 100vw;
-      height: 100vh;
-    }
-  </style>
+    <meta charset="UTF-8">
+    <title>Dripping Paint Art Simulation</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background: black;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
 </head>
 <body>
-<canvas id="canvas"></canvas>
+<canvas id="paintCanvas"></canvas>
 <script>
 (() => {
-  const canvas = document.getElementById('canvas');
-  const ctx = canvas.getContext('2d');
-
-  function resize() {
-    const w = window.innerWidth;
-    const h = window.innerHeight;
-    canvas.width = w;
-    canvas.height = h;
-  }
-  window.addEventListener('resize', resize);
-  resize();
-
-  const W = () => canvas.width;
-  const H = () => canvas.height;
-
-  // Grid for thickness map (downsampled)
-  const GRID = 4; // cells per pixel factor
-  let gw, gh;
-  let thicknessMap;
-  let colorMap;
-
-  function initMaps() {
-    gw = Math.ceil(W() / GRID);
-    gh = Math.ceil(H() / GRID);
-    thicknessMap = new Float32Array(gw * gh);
-    colorMap = new Array(gw * gh).fill(null).map(() => ({ r: 0, g: 0, b: 0 }));
-  }
-
-  initMaps();
-
-  const COLORS = [
-    [220, 20, 60],
-    [20, 140, 220],
-    [240, 200, 20],
-    [30, 180, 70],
-    [138, 40, 220],
-    [255, 105, 180],
-  ];
-
-  const particles = [];
-  let coverage = 0;
-  const COVERAGE_THRESHOLD = 0.65;
-
-  function spawnDrop() {
-    const x = Math.random() * W();
-    const color = COLORS[Math.floor(Math.random() * COLORS.length)];
-    particles.push({
-      x: x,
-      y: -5,
-      vx: (Math.random() - 0.5) * 0.3,
-      vy: 0.2 + Math.random() * 0.6,
-      w: 0.8 + Math.random() * 1.4,
-      color: color,
-      life: 1,
-      dead: false
-    });
-  }
-
-  function gridGet(x, y, map) {
-    const gx = Math.floor(x / GRID);
-    const gy = Math.floor(y / GRID);
-    if (gx < 0 || gy < 0 || gx >= gw || gy >= gh) return null;
-    return map[gy * gw + gx];
-  }
-
-  function gridAdd(x, y, amount, color) {
-    const gx = Math.floor(x / GRID);
-    const gy = Math.floor(y / GRID);
-    if (gx < 0 || gy < 0 || gx >= gw || gy >= gh) return;
-    const idx = gy * gw + gx;
-    thicknessMap[idx] += amount;
-
-    if (thicknessMap[idx] > 0.001) {
-      if (colorMap[idx].r === 0 && colorMap[idx].g === 0 && colorMap[idx].b === 0) {
-        colorMap[idx].r = color[0];
-        colorMap[idx].g = color[1];
-        colorMap[idx].b = color[2];
-      } else {
-        const t = 0.5;
-        colorMap[idx].r = Math.round(colorMap[idx].r * (1 - t) + color[0] * t);
-        colorMap[idx].g = Math.round(colorMap[idx].g * (1 - t) + color[1] * t);
-        colorMap[idx].b = Math.round(colorMap[idx].b * (1 - t) + color[2] * t);
-      }
+    const canvas = document.getElementById('paintCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    // Resize canvas to full window
+    function resize() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
     }
-  }
+    window.addEventListener('resize', resize);
+    resize();
 
-  function updateParticles() {
-    for (let p of particles) {
-      if (p.dead) continue;
+    // Grid to track paint thickness and wetness (simplified)
+    const CELL_SIZE = 4;
+    const gridCols = Math.ceil(canvas.width / CELL_SIZE);
+    const gridRows = Math.ceil(canvas.height / CELL_SIZE);
+    const thicknessGrid = new Float32Array(gridCols * gridRows); // 0 to 1
+    const wetGrid = new Float32Array(gridCols * gridRows); // 1 = fully wet, 0 = dry
+    const colorGrid = new Array(gridCols * gridRows).fill(null); // RGB objects
 
-      const th = gridGet(p.x, p.y, thicknessMap) || 0;
-      const speed = 0.3 + p.vy * (0.4 + Math.min(th * 1.2, 2));
-      const gravity = 0.06 + th * 0.02;
+    // Parameters
+    const MAX_THICKNESS = 0.8; // Threshold for "pooling"
+    const DRY_RATE = 0.002; // Rate at which paint dries
+    const BLEED_FACTOR = 0.3; // How far paint spreads sideways
+    const DROP_CHANCE = 0.02; // Probability of new drop per frame
+    const GRAVITY = 0.1;
+    const COVERAGE_THRESHOLD = 0.3; // Fraction of cells covered to trigger reset
 
-      p.vy += gravity;
-      p.vx += (Math.random() - 0.5) * 0.03;
+    // Initialize grid background
+    function initBackground() {
+        ctx.fillStyle = '#1a1a2e';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    initBackground();
 
-      const nx = p.x + p.vx;
-      const ny = p.y + p.vy * speed * 0.2;
-
-      p.x = nx;
-      p.y = ny;
-
-      // Deposit paint
-      gridAdd(p.x, p.y, p.w * 0.0004, p.color);
-      gridAdd(p.x - p.vx, p.y - p.vy, p.w * 0.0002, p.color);
-
-      // Branching
-      if (Math.random() < 0.004 * (1 + th) && p.y > 10) {
-        const child = {
-          x: p.x,
-          y: p.y,
-          vx: (Math.random() - 0.5) * 0.4,
-          vy: 0.1,
-          w: p.w * 0.7,
-          color: p.color,
-          life: 1,
-          dead: false
+    // Pick a random saturated color
+    function randomColor() {
+        const hue = Math.random();
+        return {
+            r: Math.floor(255 * (0.8 + 0.2 * Math.sin(hue * 6.28))),
+            g: Math.floor(255 * (0.8 + 0.2 * Math.sin(hue * 6.28 + 2.09))),
+            b: Math.floor(255 * (0.8 + 0.2 * Math.sin(hue * 6.28 + 4.18)))
         };
-        particles.push(child);
-      }
-
-      // Die if off-screen or too small or too slow at bottom
-      if (p.y > H() + 20 || p.w < 0.05 || (p.y > H() - 5 && Math.abs(p.vy) < 0.05)) {
-        p.dead = true;
-      }
     }
 
-    // Occasionally spawn new drops
-    if (Math.random() < 0.3) spawnDrop();
-  }
+    // Clamp helper
+    function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
 
-  function dryPaint() {
-    for (let i = 0; i < thicknessMap.length; i++) {
-      if (thicknessMap[i] > 0.001) {
-        thicknessMap[i] *= 0.993; // slow evaporation
-        // darken color over time
-        if (colorMap[i]) {
-          const factor = Math.max(0.4, Math.min(1.0, 1.3 - thicknessMap[i] * 20));
-          colorMap[i].r = Math.round(colorMap[i].r * factor);
-          colorMap[i].g = Math.round(colorMap[i].g * factor);
-          colorMap[i].b = Math.round(colorMap[i].b * factor);
+    // Blend two colors by weight t (0->a, 1->b)
+    function blendColors(a, b, t) {
+        t = clamp(t, 0, 1);
+        return {
+            r: Math.round(a.r * (1 - t) + b.r * t),
+            g: Math.round(a.g * (1 - t) + b.g * t),
+            b: Math.round(a.b * (1 - t) + b.b * t)
+        };
+    }
+
+    // Apply a drop of paint at a grid cell
+    function addDrop(x, y, color) {
+        const idx = y * gridCols + x;
+        const existingThickness = thicknessGrid[idx];
+        const combinedThickness = existingThickness + 0.3;
+        const t = combinedThickness > 0 ? existingThickness / combinedThickness : 0.5;
+
+        let blendedColor = color;
+        if (colorGrid[idx]) {
+            blendedColor = blendColors(colorGrid[idx], color, t);
         }
-      }
+
+        thicknessGrid[idx] = clamp(combinedThickness, 0, 1);
+        wetGrid[idx] = 1.0;
+        colorGrid[idx] = blendedColor;
     }
-  }
 
-  function render() {
-    const img = ctx.createImageData(W(), H());
-    const data = img.data;
+    // Spread paint to neighbors if thick enough
+    function spreadPaint(x, y, color) {
+        const idx = y * gridCols + x;
+        if (thicknessGrid[idx] < 0.1) return;
 
-    let totalThickness = 0;
+        const directions = [
+            [0, 1], [1, 0], [-1, 0], [0, -1],
+            [1, 1], [-1, 1], [1, -1], [-1, -1]
+        ];
 
-    for (let gy = 0; gy < gh; gy++) {
-      for (let gx = 0; gx < gw; gx++) {
-        const idx = gy * gw + gx;
-        const px = gx * GRID;
-        const py = gy * GRID;
-        const th = thicknessMap[idx];
+        for (const [dx, dy] of directions) {
+            const nx = x + dx;
+            const ny = y + dy;
+            if (nx < 0 || nx >= gridCols || ny < 0 || ny >= gridRows) continue;
 
-        if (th > 0.0005) {
-          const c = colorMap[idx];
-          const val = Math.min(255, th * 60);
-          const r = Math.min(255, (c.r / 255) * val);
-          const g = Math.min(255, (c.g / 255) * val);
-          const b = Math.min(255, (c.b / 255) * val);
+            const nIdx = ny * gridCols + nx;
+            const flowAmount = thicknessGrid[idx] * BLEED_FACTOR * Math.random();
 
-          totalThickness += th;
-
-          const size = Math.ceil(GRID);
-          for (let dy = 0; dy < size; dy++) {
-            for (let dx = 0; dx < size; dx++) {
-              const xx = px + dx;
-              const yy = py + dy;
-              if (xx >= W() || yy >= H()) continue;
-              const di = (yy * W() + xx) * 4;
-              data[di] = r;
-              data[di + 1] = g;
-              data[di + 2] = b;
-              data[di + 3] = 255;
+            if (thicknessGrid[nIdx] + flowAmount <= 1 && wetGrid[nIdx] > 0.1) {
+                thicknessGrid[nIdx] += flowAmount * 0.5;
+                wetGrid[nIdx] = Math.min(1, wetGrid[nIdx] + flowAmount * 0.5);
+                if (!colorGrid[nIdx]) {
+                    colorGrid[nIdx] = {...colorGrid[idx]};
+                } else {
+                    colorGrid[nIdx] = blendColors(colorGrid[nIdx], colorGrid[idx], 0.5);
+                }
             }
-          }
         }
-      }
     }
 
-    totalThickness /= (gw * gh);
-    coverage = Math.min(1.0, totalThickness * (1.0 / 0.05));
+    // Move paint downward based on thickness
+    function flowDown(x, y) {
+        const idx = y * gridCols + x;
+        const currentThickness = thicknessGrid[idx];
+        if (currentThickness <= 0.01) return;
 
-    ctx.putImageData(img, 0, 0);
-  }
+        const speed = currentThickness * GRAVITY * (1 + currentThickness);
+        const steps = Math.floor(speed / CELL_SIZE) + 1;
 
-  function reset() {
-    thicknessMap.fill(0);
-    for (let c of colorMap) {
-      c.r = 0; c.g = 0; c.b = 0;
+        for (let s = 1; s <= steps; s++) {
+            const ny = y + s;
+            if (ny >= gridRows) {
+                thicknessGrid[idx] *= 0.5; // Fade out at bottom
+                break;
+            }
+            const nIdx = ny * gridCols + x;
+            const flow = currentThickness * 0.1 * (1 / s);
+
+            if (thicknessGrid[nIdx] + flow <= 1) {
+                thicknessGrid[nIdx] += flow;
+                wetGrid[nIdx] = Math.min(1, wetGrid[nIdx] + flow * 0.5);
+                if (!colorGrid[nIdx]) {
+                    colorGrid[nIdx] = {...colorGrid[idx]};
+                } else {
+                    colorGrid[nIdx] = blendColors(colorGrid[nIdx], colorGrid[idx], 0.5);
+                }
+            }
+            thicknessGrid[idx] -= flow * 0.5;
+            if (thicknessGrid[idx] <= 0.01) break;
+        }
     }
-    particles.length = 0;
-    coverage = 0;
-  }
 
-  let whiteout = 0;
+    // Render the current state of the grid
+    function renderGrid() {
+        const imageData = ctx.createImageData(canvas.width, canvas.height);
+        const data = imageData.data;
 
-  function loop() {
-    requestAnimationFrame(loop);
+        for (let y = 0; y < gridRows; y++) {
+            for (let x = 0; x < gridCols; x++) {
+                const idx = y * gridCols + x;
+                const px = x * CELL_SIZE;
+                const py = y * CELL_SIZE;
 
-    if (whiteout > 0) {
-      whiteout -= 0.004;
-      ctx.fillStyle = `rgba(255,255,255,${whiteout})`;
-      ctx.fillRect(0, 0, W(), H());
+                const color = colorGrid[idx];
+                const thickness = thicknessGrid[idx];
+                const wetness = wetGrid[idx];
+
+                let r = 0, g = 0, b = 0;
+
+                if (color && thickness > 0.01) {
+                    const darkFactor = 1 - (1 - wetness) * 0.7; // Darken as it dries
+                    r = Math.min(255, Math.round(color.r * darkFactor * thickness * 2));
+                    g = Math.min(255, Math.round(color.g * darkFactor * thickness * 2));
+                    b = Math.min(255, Math.round(color.b * darkFactor * thickness * 2));
+                }
+
+                // Fill cell area
+                for (let dy = 0; dy < CELL_SIZE; dy++) {
+                    for (let dx = 0; dx < CELL_SIZE; dx++) {
+                        const pxIdx = ((py + dy) * canvas.width + (px + dx)) * 4;
+                        if (px + dx < canvas.width && py + dy < canvas.height) {
+                            data[pxIdx] = r;
+                            data[pxIdx + 1] = g;
+                            data[pxIdx + 2] = b;
+                            data[pxIdx + 3] = 255;
+                        }
+                    }
+                }
+            }
+        }
+
+        ctx.putImageData(imageData, 0, 0);
     }
 
-    updateParticles();
-    dryPaint();
+    let whiteOverlay = { alpha: 0 };
 
-    if (coverage > COVERAGE_THRESHOLD && whiteout === 0) {
-      whiteout = 1;
+    // Handle fading to white and reset
+    function updateCoverage() {
+        let coveredCells = 0;
+        const totalCells = gridCols * gridRows;
+
+        for (let i = 0; i < totalCells; i++) {
+            if (thicknessGrid[i] > 0.05) coveredCells++;
+        }
+
+        const coverage = coveredCells / totalCells;
+
+        if (coverage > COVERAGE_THRESHOLD && whiteOverlay.alpha < 1) {
+            whiteOverlay.alpha += 0.005;
+        }
+
+        if (whiteOverlay.alpha >= 1) {
+            // Reset everything
+            thicknessGrid.fill(0);
+            wetGrid.fill(0);
+            colorGrid.fill(null);
+            whiteOverlay.alpha = 0;
+            initBackground();
+        }
+
+        if (whiteOverlay.alpha > 0) {
+            ctx.fillStyle = `rgba(255, 255, 255, ${whiteOverlay.alpha})`;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
     }
 
-    render();
+    // Animation loop
+    function animate() {
+        // Add new drops at top
+        for (let x = 0; x < gridCols; x++) {
+            if (Math.random() < DROP_CHANCE) {
+                const color = randomColor();
+                addDrop(x, 0, color);
+            }
+        }
 
-    if (whiteout <= 0 && coverage === 0 && particles.length === 0) {
-      // Restart
-      reset();
+        // Process each cell from top to bottom
+        for (let y = 0; y < gridRows; y++) {
+            for (let x = 0; x < gridCols; x++) {
+                flowDown(x, y);
+                spreadPaint(x, y, colorGrid[y * gridCols + x]);
+            }
+        }
+
+        // Dry paint over time
+        for (let i = 0; i < thicknessGrid.length; i++) {
+            wetGrid[i] -= DRY_RATE;
+            if (wetGrid[i] < 0) wetGrid[i] = 0;
+        }
+
+        renderGrid();
+        updateCoverage();
+
+        requestAnimationFrame(animate);
     }
-  }
 
-  // Start
-  for (let i = 0; i < 15; i++) spawnDrop();
-  loop();
+    animate();
 })();
 </script>
 </body>

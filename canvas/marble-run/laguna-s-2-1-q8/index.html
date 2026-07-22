@@ -1,303 +1,322 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Marble Run</title>
 <style>
-html,body{margin:0;padding:0;overflow:hidden;background:#000}
-canvas{display:block}
+* { margin: 0; padding: 0; overflow: hidden; }
+canvas { display: block; }
 </style>
 </head>
 <body>
-<canvas id="c"></canvas>
+<canvas id="canvas"></canvas>
 <script>
-const canvas = document.getElementById('c');
-const ctx = canvas.getContext('2d');
-let W=canvas.width=innerWidth;
-let H=canvas.height=innerHeight;
-addEventListener('resize',()=>{W=canvas.width=innerWidth;H=canvas.height=innerHeight});
-
-const PI=Math.PI, TAU=PI*2;
-const gravity=0.35;
-const friction=0.992;
-const marbles=[];
-const segments=[];
-let camY=0;
-let nextMarble=0;
-let lastRebuild=0;
-const sectionHeight=400;
-const rebuildInterval=30000;
-let rebuildX=null;
-
-// Segment types
-function addSegment(y,type,...args){
-  const seg={y,type};
-  if(type==='ramp'){
-    seg.x1=args[0];seg.y1=args[1];seg.x2=args[2];seg.y2=args[3];seg.thickness=args[4]||8;
-  }else if(type==='funnel'){
-    seg.cx=args[0];seg.cy=args[1];seg.r=args[2];seg.lip=args[3]||true;
-  }else if(type==='spinner'){
-    seg.cx=args[0];seg.cy=args[1];seg.arm=args[2]||30;seg.angle=0;seg.spin=0.03;
-  }else if(type==='bumper'){
-    seg.cx=args[0];seg.cy=args[1];seg.r=args[2]||10;seg.bx=args[3]||0;seg.by=args[4]||0;
-  }
-  segments.push(seg);
-  return seg;
-}
-
-function rebuildCourse(){
-  segments.length=0;
-  let y=0;
-  const laneWidth=80;
-  const lanes=5;
-  const startX=(W-(lanes-1)*laneWidth)/2;
-  
-  for(let i=0;i<20;i++){
-    const cx=W/2;
-    const lane=Math.floor(Math.random()*lanes);
-    const lx=startX+lane*laneWidth;
+(() => {
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
     
-    // Ramps
-    addSegment(y,'ramp',lx-30,y+10,lx+30,y+5,12);
-    addSegment(y+60,'ramp',lx+35,y+70,lx-35,y+65,12);
-    
-    // Funnel
-    addSegment(y+120,'funnel',lx,y+125,25,true);
-    // Spinner
-    addSegment(y+180,'spinner',lx,y+185,28);
-    // Bumper ring
-    for(let b=0;b<6;b++){
-      const ba=b/6*TAU;
-      addSegment(y+240,'bumper',lx+Math.cos(ba)*32,y+240+Math.sin(ba)*32,8,Math.cos(ba)*0.3,Math.sin(ba)*0.3);
+    // Set up canvas to full window size
+    function resize() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
     }
-    y+=sectionHeight;
-  }
-}
-
-function spawnMarble(){
-  const lane=Math.floor(Math.random()*5);
-  const startX=W/2+(lane-2)*80+ (Math.random()-0.5)*16;
-  marbles.push({x:startX,y:camY-50,vx:(Math.random()-0.5)*0.4,vy:-0.2,size:8,motionPoints:[]});
-}
-
-function update(dt){
-  // Spawn
-  if(marbles.length<12 && (performance.now()>nextMarble)){
-    spawnMarble();
-    nextMarble=performance.now()+400+Math.random()*300;
-  }
-  
-  // Update marbles
-  for(let i=marbles.length-1;i>=0;i--){
-    const m=marbles[i];
-    m.vy+=gravity;
-    m.vx*=friction;
-    m.vy*=friction;
-    m.x+=m.vx;
-    m.y+=m.vy;
+    window.addEventListener('resize', resize);
+    resize();
     
-    // Motion blur points
-    m.motionPoints.push({x:m.x,y:m.y});
-    if(m.motionPoints.length>6)m.motionPoints.shift();
-    
-    // Segment collision
-    for(const seg of segments){
-      const sy=seg.y - camY;
-      if(seg.type==='ramp'){
-        collideRamp(m,seg,sy);
-      }else if(seg.type==='funnel'){
-        collideFunnel(m,seg,sy);
-      }else if(seg.type==='spinner'){
-        collideSpinner(m,seg,sy);
-      }else if(seg.type==='bumper'){
-        collideBumper(m,seg,sy);
-      }
+    // Marble class
+    class Marble {
+        constructor() {
+            this.reset();
+            this.trail = [];
+        }
+        
+        reset() {
+            this.x = Math.random() * (canvas.width * 0.8) + canvas.width * 0.1;
+            this.y = -50;
+            this.vx = 0;
+            this.vy = 0;
+            this.radius = 8 + Math.random() * 4;
+            this.color = `hsl(${Math.random() * 360}, 70%, 60%)`;
+            this.trail = [];
+        }
+        
+        update() {
+            // Gravity
+            this.vy += 0.3;
+            
+            // Update position
+            this.x += this.vx;
+            this.y += this.vy;
+            
+            // Add to trail
+            this.trail.push({x: this.x, y: this.y});
+            if (this.trail.length > 10) this.trail.shift();
+            
+            // Reset if fallen off bottom
+            if (this.y > canvas.height + 100) {
+                this.reset();
+            }
+        }
+        
+        draw() {
+            // Motion blur trail
+            ctx.lineCap = 'round';
+            for (let i = 1; i < this.trail.length; i++) {
+                const t = i / this.trail.length;
+                ctx.strokeStyle = this.color.replace(')', `, ${t * 0.5})`).replace('hsl', 'hsla');
+                ctx.lineWidth = this.radius * t * 0.5;
+                ctx.beginPath();
+                ctx.moveTo(this.trail[i-1].x, this.trail[i-1].y);
+                ctx.lineTo(this.trail[i].x, this.trail[i].y);
+                ctx.stroke();
+            }
+            
+            // Main marble
+            ctx.fillStyle = this.color;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Highlight
+            ctx.fillStyle = 'white';
+            ctx.beginPath();
+            ctx.arc(this.x - this.radius/3, this.y - this.radius/3, this.radius/3, 0, Math.PI * 2);
+            ctx.fill();
+        }
     }
     
-    // Wrap
-    if(m.y>camY+H+100){
-      m.x=camY+W/2+(Math.random()-0.5)*W;
-      m.y=camY-30;
-      m.vx=(Math.random()-0.5)*0.5;
-      m.vy=0;
+    // Course element classes
+    class Ramp {
+        constructor(x, y, length, angle) {
+            this.x = x;
+            this.y = y;
+            this.length = length;
+            this.angle = angle;
+        }
+        
+        getEnd() {
+            return {
+                x: this.x + Math.cos(this.angle) * this.length,
+                y: this.y + Math.sin(this.angle) * this.length
+            };
+        }
+        
+        draw() {
+            const end = this.getEnd();
+            ctx.strokeStyle = '#8B4513';
+            ctx.lineWidth = 6;
+            ctx.lineCap = 'round';
+            ctx.beginPath();
+            ctx.moveTo(this.x, this.y);
+            ctx.lineTo(end.x, end.y);
+            ctx.stroke();
+        }
     }
-  }
-  
-  // Camera follow cluster
-  if(marbles.length>0){
-    let avgY=0,cnt=0;
-    for(const m of marbles){avgY+=m.y;cnt++;}
-    avgY/=cnt;
-    const targetY=avgY-H*0.4;
-    camY+= (targetY-camY)*0.02;
-  }else camY+=0.5;
-  
-  // Rebuild
-  if(performance.now()-lastRebuild>rebuildInterval && Math.abs(camY-rebuildX||0)<sectionHeight*2){
-    lastRebuild=performance.now();
-    rebuildCourse();
-    rebuildX=camY;
-  }
-}
-
-function closestPointOnSegment(px,py,x1,y1,x2,y2){
-  const dx=x2-x1,dy=y2-y1;
-  const t=((px-x1)*dx+(py-y1)*dy)/(dx*dx+dy*dy);
-  const tc=Math.max(0,Math.min(1,t));
-  return {x:x1+dx*tc,y:y1+dy*tc,t:tc};
-}
-
-function collideRamp(m,seg,sy){
-  const p=closestPointOnSegment(m.x,m.y,seg.x1,seg.y1+sy,seg.x2,seg.y2+sy);
-  const dx=m.x-p.x,dy=m.y-p.y;
-  const d=Math.hypot(dx,dy);
-  if(d<m.size+seg.thickness/2){
-    const nx=dx/d||0,ny=dy/d||0;
-    const pen=(m.size+seg.thickness/2)-d;
-    m.x+=nx*pen;
-    m.y+=ny*pen;
-    const dot=m.vx*nx+m.vy*ny;
-    m.vx-=dot*nx*1.2;
-    m.vy-=dot*ny*1.2;
-    const rampDx=seg.x2-seg.x1,rampDy=seg.y2-seg.y1;
-    const rlen=Math.hypot(rampDx,rampDy)||1;
-    const rx=rampDx/rlen,ry=rampDy/rlen;
-    // Slide along ramp
-    const slideVel=m.vx*rx+m.vy*ry;
-    m.vx=rx*slideVel*0.98;
-    m.vy=ry*slideVel*0.98;
-    m.vy+=0.05; // gravity along ramp
-  }
-}
-
-function collideFunnel(m,seg,sy){
-  const cx=seg.cx,cy=seg.cy+sy;
-  const dx=m.x-cx,dy=m.y-cy;
-  const d=Math.hypot(dx,dy);
-  if(d<seg.r+m.size){
-    if(d<0.1){m.x=cx+m.size;dy=0;d=0.1;}
-    const nx=dx/d,ny=dy/d;
-    const pen=(seg.r+m.size)-d;
-    m.x+=nx*pen;
-    m.y+=ny*pen;
-    const dot=m.vx*nx+m.vy*ny;
-    m.vx-=dot*nx*1.1;
-    m.vy-=dot*ny*1.1;
-    // Spin outward
-    m.vx+=nx*0.3;
-    m.vy+=ny*0.3;
-  }
-}
-
-function collideSpinner(m,seg,sy){
-  seg.angle+=seg.spin;
-  const arm=seg.arm;
-  const a1=seg.angle,a2=seg.angle+PI;
-  const ax1=seg.cx+Math.cos(a1)*arm,ay1=seg.cy+sy+Math.sin(a1)*arm;
-  const ax2=seg.cx+Math.cos(a2)*arm,ay2=seg.cy+sy+Math.sin(a2)*arm;
-  for(const [x1,y1,x2,y2] of [[ax1,ay1,seg.cx,seg.cy+sy],[ax2,ay2,seg.cx,seg.cy+sy]]){
-    const p=closestPointOnSegment(m.x,m.y,x1,y1,x2,y2);
-    const dx=m.x-p.x,dy=m.y-p.y;
-    const d=Math.hypot(dx,dy);
-    if(d<m.size+3){
-      const nx=dx/d||0,ny=dy/d||0;
-      const pen=(m.size+3)-d;
-      m.x+=nx*pen;m.y+=ny*pen;
-      const dot=m.vx*nx+m.vy*ny;
-      m.vx-=dot*nx*1.05;
-      m.vy-=dot*ny*1.05;
-      // Add arm velocity
-      const tangDx=-Math.sin(seg.angle),tangDy=Math.cos(seg.angle);
-      m.vx+=tangDx*0.4;
-      m.vy+=tangDy*0.4;
+    
+    class Funnel {
+        constructor(x, y, radius) {
+            this.x = x;
+            this.y = y;
+            this.radius = radius;
+        }
+        
+        draw() {
+            ctx.strokeStyle = '#CD853F';
+            ctx.lineWidth = 4;
+            for (let i = 0; i < 3; i++) {
+                const r = this.radius - i * 15;
+                if (r <= 0) break;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, r, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+        }
     }
-  }
-}
-
-function collideBumper(m,seg,sy){
-  const cx=seg.cx,cy=seg.cy+sy;
-  const dx=m.x-cx,dy=m.y-cy;
-  const d=Math.hypot(dx,dy);
-  if(d<m.size+seg.r){
-    const nx=dx/d||0,ny=dy/d||0;
-    const pen=(m.size+seg.r)-d;
-    m.x-=nx*pen;
-    m.y-=ny*pen;
-    const dot=m.vx*nx+m.vy*ny;
-    m.vx-=dot*nx*(1.3+seg.bx*0.5);
-    m.vy-=dot*ny*(1.3+seg.by*0.5);
-    m.vx+=seg.bx*0.5;
-    m.vy+=seg.by*0.5;
-  }
-}
-
-let last=0;
-function loop(t){
-  const dt=(t-last)||16;last=t;
-  ctx.clearRect(0,0,W,H);
-  
-  // Draw segments
-  ctx.strokeStyle='#448';
-  ctx.fillStyle='#336';
-  for(const seg of segments){
-    const sy=seg.y-camY;
-    if(sy<-100||sy>H+100) continue;
-    ctx.save();
-    ctx.translate(0,sy);
-    if(seg.type==='ramp'){
-      ctx.fillRect(seg.x1-1,seg.y1-1,seg.x2-seg.x1+2,seg.y2-seg.y1+2);
-    }else if(seg.type==='funnel'){
-      ctx.beginPath();
-      ctx.arc(seg.cx,seg.cy,seg.r,0,TAU);
-      ctx.fill();
-      ctx.stroke();
-    }else if(seg.type==='spinner'){
-      ctx.strokeStyle='#8af';
-      ctx.beginPath();
-      ctx.moveTo(seg.cx,seg.cy);
-      ctx.lineTo(seg.cx+Math.cos(seg.angle)*seg.arm,seg.cy+Math.sin(seg.angle)*seg.arm);
-      ctx.lineTo(seg.cx,seg.cy);
-      ctx.lineTo(seg.cx+Math.cos(seg.angle+PI)*seg.arm,seg.cy+Math.sin(seg.angle+PI)*seg.arm);
-      ctx.stroke();
-    }else if(seg.type==='bumper'){
-      ctx.fillStyle='#f84';
-      ctx.beginPath();
-      ctx.arc(seg.cx,seg.cy,seg.r,0,TAU);
-      ctx.fill();
+    
+    class Spinner {
+        constructor(x, y) {
+            this.x = x;
+            this.y = y;
+            this.angle = 0;
+            this.speed = 0.05 + Math.random() * 0.1;
+        }
+        
+        update() {
+            this.angle += this.speed;
+        }
+        
+        draw() {
+            ctx.save();
+            ctx.translate(this.x, this.y);
+            ctx.rotate(this.angle);
+            ctx.strokeStyle = '#FF6347';
+            ctx.lineWidth = 3;
+            for (let i = 0; i < 4; i++) {
+                ctx.beginPath();
+                ctx.moveTo(0, 0);
+                ctx.lineTo(Math.cos(i * Math.PI/2) * 40, Math.sin(i * Math.PI/2) * 40);
+                ctx.stroke();
+            }
+            ctx.restore();
+        }
     }
-    ctx.restore();
-  }
-  
-  // Draw marbles with motion blur
-  for(const m of marbles){
-    if(m.motionPoints.length>1){
-      for(let k=0;k<m.motionPoints.length-1;k++){
-        const p1=m.motionPoints[k],p2=m.motionPoints[k+1];
-        const age=k/m.motionPoints.length;
-        ctx.strokeStyle=`rgba(100,200,255,${age*0.3})`;
-        ctx.lineWidth=m.size*age*0.6;
-        ctx.beginPath();
-        ctx.moveTo(p1.x,p1.y);
-        ctx.lineTo(p2.x,p2.y);
-        ctx.stroke();
-      }
+    
+    class Bumper {
+        constructor(x, y) {
+            this.x = x;
+            this.y = y;
+            this.radius = 12;
+        }
+        
+        draw() {
+            ctx.fillStyle = '#32CD32';
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+            ctx.fill();
+            
+            ctx.strokeStyle = '#228B22';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
     }
-    ctx.fillStyle='#5cf';
-    ctx.beginPath();
-    ctx.arc(m.x,m.y,m.size,0,TAU);
-    ctx.fill();
-    ctx.strokeStyle='#8cf';
-    ctx.lineWidth=1;
-    ctx.stroke();
-  }
-  
-  update(dt);
-  requestAnimationFrame(loop);
-}
-
-rebuildCourse();
-last=performance.now();
-requestAnimationFrame(loop);
+    
+    // Game state
+    let marbles = [];
+    let courseElements = [];
+    let cameraY = 0;
+    let lastRebuild = 0;
+    
+    // Initialize marbles
+    for (let i = 0; i < 20; i++) {
+        setTimeout(() => {
+            marbles.push(new Marble());
+        }, i * 300);
+    }
+    
+    // Generate initial course
+    function generateCourse() {
+        courseElements = [];
+        let y = 0;
+        let x = canvas.width / 2;
+        
+        while (y < canvas.height * 4) {
+            const elementType = Math.floor(Math.random() * 4);
+            
+            switch(elementType) {
+                case 0: // Ramp
+                    const length = 80 + Math.random() * 100;
+                    const angle = (Math.random() - 0.5) * 0.5;
+                    courseElements.push(new Ramp(x, y, length, angle));
+                    x += Math.cos(angle) * length;
+                    y += Math.sin(angle) * length + 20;
+                    break;
+                    
+                case 1: // Funnel
+                    courseElements.push(new Funnel(x, y, 50));
+                    y += 100;
+                    break;
+                    
+                case 2: // Spinner
+                    courseElements.push(new Spinner(x, y));
+                    y += 100;
+                    break;
+                    
+                case 3: // Bumper
+                    courseElements.push(new Bumper(x, y));
+                    y += 60;
+                    break;
+            }
+        }
+    }
+    
+    generateCourse();
+    
+    // Rebuild course periodically
+    function checkCourseRebuild() {
+        const now = Date.now();
+        if (now - lastRebuild > 30000) {
+            generateCourse();
+            lastRebuild = now;
+        }
+    }
+    
+    // Find center of marbles for camera following
+    function getMarblesCenter() {
+        if (marbles.length === 0) return {x: canvas.width/2, y: canvas.height/2};
+        
+        let sumX = 0, sumY = 0;
+        let count = 0;
+        
+        for (let marble of marbles) {
+            if (marble.y > -50 && marble.y < canvas.height + 100) {
+                sumX += marble.x;
+                sumY += marble.y;
+                count++;
+            }
+        }
+        
+        if (count === 0) return {x: canvas.width/2, y: canvas.height/2};
+        return {x: sumX/count, y: sumY/count};
+    }
+    
+    // Animation loop
+    function animate() {
+        // Update camera to follow marbles
+        const center = getMarblesCenter();
+        cameraY = center.y - canvas.height * 0.3;
+        
+        // Clear canvas
+        ctx.fillStyle = '#1a1a2e';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        // Draw background grid
+        ctx.strokeStyle = '#16213e';
+        ctx.lineWidth = 1;
+        for (let x = 0; x < canvas.width; x += 50) {
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, canvas.height);
+            ctx.stroke();
+        }
+        for (let y = 0; y < canvas.height; y += 50) {
+            ctx.beginPath();
+            ctx.moveTo(0, y);
+            ctx.lineTo(canvas.width, y);
+            ctx.stroke();
+        }
+        
+        // Update and draw course elements
+        for (let element of courseElements) {
+            const drawY = element.y - cameraY;
+            
+            if (typeof element.update === 'function') {
+                element.update();
+            }
+            
+            // Only draw elements in view
+            if (drawY > -200 && drawY < canvas.height + 200) {
+                ctx.save();
+                ctx.translate(0, -cameraY);
+                element.draw();
+                ctx.restore();
+            }
+        }
+        
+        // Update and draw marbles
+        for (let marble of marbles) {
+            marble.update();
+            marble.draw();
+        }
+        
+        // Check for course rebuild
+        checkCourseRebuild();
+        
+        requestAnimationFrame(animate);
+    }
+    
+    animate();
+})();
 </script>
 </body>
 </html>

@@ -1,711 +1,828 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ragdoll Dojo</title>
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            overflow: hidden;
-            background-color: #1a1a1a;
-            font-family: 'Courier New', Courier, monospace;
-        }
-        canvas {
-            display: block;
-        }
-        #ui {
-            position: absolute;
-            top: 20px;
-            left: 20px;
-            color: rgba(255, 255, 255, 0.5);
-            pointer-events: none;
-            font-size: 12px;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-        #slowmo-indicator {
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            color: white;
-            font-size: 40px;
-            font-weight: bold;
-            text-shadow: 0 0 10px #ff0055;
-            opacity: 0;
-            pointer-events: none;
-            transition: opacity 0.2s;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ragdoll Dojo</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #1a1a2e; }
+canvas { display: block; width: 100%; height: 100%; }
+</style>
 </head>
 <body>
-    <div id="ui">Ragdoll Dojo // Physics Simulation</div>
-    <div id="slowmo-indicator">IMPACT</div>
-    <canvas id="canvas"></canvas>
-
+<canvas id="c"></canvas>
 <script>
-/**
- * RAGDOLL DOJO
- * A self-contained HTML5 Canvas physics simulation.
- * Features: Verlet integration, Distance constraints, Trampolines, Seesaws, Swinging Logs, Slow-motion.
- */
-
-const canvas = document.getElementById('canvas');
+const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
-const slowmoText = document.getElementById('slowmo-indicator');
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
 
-let width, height;
-const gravity = 0.5;
-const friction = 0.99;
-const groundFriction = 0.8;
-const bounce = 0.7;
+// --- Physics Constants ---
+const GRAVITY = 0.45;
+const DAMPING = 0.995;
+const GROUND_Y = () => H - 40;
+const CONSTRAINT_ITERATIONS = 12;
+const JOINT_ITERATIONS = 8;
 
-// Simulation State
-let particles = [];
-let constraints = [];
-let obstacles = [];
-let ragdolls = [];
+// --- Slow Motion ---
 let timeScale = 1.0;
 let slowMoTimer = 0;
-let spawnTimer = 0;
-let particlesCount = 0;
+let slowMoDuration = 0;
 
-// Configuration
-const MAX_PARTICLES = 400; // Performance cap
-const RAGDOLL_SCALE = 1.0;
-const JOINT_STIFFNESS = 1.0;
+function triggerSlowMo(intensity) {
+  if (slowMoTimer > 0) return;
+  slowMoTimer = 90;
+  slowMoDuration = 90;
+  timeScale = Math.max(0.15, 1.0 - intensity * 0.7);
+}
 
-// --- Vector Math Helpers ---
-const vec = (x, y) => ({ x, y });
-const add = (v1, v2) => ({ x: v1.x + v2.x, y: v1.y + v2.y });
-const sub = (v1, v2) => ({ x: v1.x - v2.x, y: v1.y - v2.y });
-const mult = (v, s) => ({ x: v.x * s, y: v.y * s });
-const distSq = (v1, v2) => (v1.x - v2.x) ** 2 + (v1.y - v2.y) ** 2;
-const dist = (v1, v2) => Math.sqrt(distSq(v1, v2));
+function updateSlowMo() {
+  if (slowMoTimer > 0) {
+    slowMoTimer--;
+    if (slowMoTimer <= slowMoDuration * 0.3) {
+      timeScale += (1.0 - timeScale) * 0.04;
+    }
+  } else {
+    timeScale += (1.0 - timeScale) * 0.05;
+  }
+}
 
-// --- Classes ---
-
+// --- Particle ---
 class Particle {
-    constructor(x, y, mass = 1, isStatic = false) {
-        this.x = x;
-        this.y = y;
-        this.oldx = x;
-        this.oldy = y;
-        this.mass = mass;
-        this.isStatic = isStatic;
-        this.life = 1.0; // For fading out
-        this.dissolving = false;
+  constructor(x, y, radius = 3, pinned = false) {
+    this.x = x; this.y = y;
+    this.oldx = x; this.oldy = y;
+    this.radius = radius;
+    this.pinned = pinned;
+    this.mass = 1;
+    this.alive = true;
+    this.alpha = 1;
+    this.dissolving = false;
+    this.dissolveVx = 0;
+    this.dissolveVy = 0;
+  }
+  update(dt) {
+    if (!this.alive || this.pinned) return;
+    if (this.dissolving) {
+      this.x += this.dissolveVx * dt;
+      this.y += this.dissolveVy * dt;
+      this.dissolveVy += 0.05 * dt;
+      this.alpha -= 0.012 * dt;
+      if (this.alpha <= 0) this.alive = false;
+      return;
     }
-
-    update() {
-        if (this.isStatic) return;
-
-        if (this.dissolving) {
-            this.life -= 0.02;
-            return;
-        }
-
-        const vx = (this.x - this.oldx) * friction;
-        const vy = (this.y - this.oldy) * friction;
-
-        this.oldx = this.x;
-        this.oldy = this.y;
-
-        this.x += vx * timeScale;
-        this.y += vy * timeScale;
-        this.y += gravity * timeScale;
+    let vx = (this.x - this.oldx) * DAMPING;
+    let vy = (this.y - this.oldy) * DAMPING;
+    this.oldx = this.x;
+    this.oldy = this.y;
+    this.x += vx * dt;
+    this.y += (vy + GRAVITY * dt) * dt;
+  }
+  collideWithGround() {
+    if (!this.alive || this.pinned || this.dissolving) return;
+    let gy = GROUND_Y();
+    if (this.y + this.radius > gy) {
+      let vy = this.y - this.oldy;
+      this.y = gy - this.radius;
+      this.oldy = this.y + vy * 0.3;
+      this.oldx = this.x - (this.x - this.oldx) * 0.85;
     }
-
-    constrain() {
-        if (this.isStatic) return;
-
-        // Floor
-        if (this.y > height - 50) {
-            const vx = (this.x - this.oldx) * groundFriction;
-            this.y = height - 50;
-            this.oldy = this.y; // Kill vertical velocity
-            this.oldx = this.x - vx;
-        }
-
-        // Walls
-        if (this.x < 0) {
-            this.x = 0;
-            this.oldx = this.x + (this.x - this.oldx) * 0.5;
-        }
-        if (this.x > width) {
-            this.x = width;
-            this.oldx = this.x + (this.x - this.oldx) * 0.5;
-        }
-    }
+  }
+  collideWithWalls() {
+    if (!this.alive || this.pinned || this.dissolving) return;
+    if (this.x < this.radius) { this.x = this.radius; this.oldx = this.x + (this.x - this.oldx) * 0.5; }
+    if (this.x > W - this.radius) { this.x = W - this.radius; this.oldx = this.x + (this.x - this.oldx) * 0.5; }
+    if (this.y < this.radius) { this.y = this.radius; this.oldy = this.y + (this.y - this.oldy) * 0.5; }
+  }
 }
 
-class Constraint {
-    constructor(p1, p2, length = null, stiffness = 1.0) {
-        this.p1 = p1;
-        this.p2 = p2;
-        this.length = length || dist(p1, p2);
-        this.stiffness = stiffness;
-        this.active = true;
+// --- Constraints ---
+class DistanceConstraint {
+  constructor(a, b, length, stiffness = 1.0) {
+    this.a = a; this.b = b; this.length = length; this.stiffness = stiffness;
+  }
+  solve() {
+    if (!this.a.alive || !this.b.alive) return;
+    let dx = this.b.x - this.a.x;
+    let dy = this.b.y - this.a.y;
+    let dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < 0.001) return;
+    let diff = (this.length - dist) / dist * 0.5 * this.stiffness;
+    let ox = dx * diff;
+    let oy = dy * diff;
+    if (!this.a.pinned && !this.a.dissolving) {
+      this.a.x -= ox; this.a.y -= oy;
     }
-
-    resolve() {
-        if (!this.active) return;
-
-        const dx = this.p2.x - this.p1.x;
-        const dy = this.p2.y - this.p1.y;
-        const d = Math.sqrt(dx * dx + dy * dy);
-        
-        if (d === 0) return;
-
-        const diff = (this.length - d) / d * this.stiffness * timeScale;
-        const offsetX = dx * diff * 0.5;
-        const offsetY = dy * diff * 0.5;
-
-        if (!this.p1.isStatic) {
-            this.p1.x -= offsetX;
-            this.p1.y -= offsetY;
-        }
-        if (!this.p2.isStatic) {
-            this.p2.x += offsetX;
-            this.p2.y += offsetY;
-        }
+    if (!this.b.pinned && !this.b.dissolving) {
+      this.b.x += ox; this.b.y += oy;
     }
+  }
 }
 
+class AngleConstraint {
+  constructor(a, b, c, minAngle, maxAngle) {
+    this.a = a; this.b = b; this.c = c;
+    this.minAngle = minAngle; this.maxAngle = maxAngle;
+  }
+  solve() {
+    if (!this.a.alive || !this.b.alive || !this.c.alive) return;
+    let ba_x = this.a.x - this.b.x, ba_y = this.a.y - this.b.y;
+    let bc_x = this.c.x - this.b.x, bc_y = this.c.y - this.b.y;
+    let angle = Math.atan2(ba_x * bc_y - ba_y * bc_x, ba_x * bc_x + ba_y * bc_y);
+    if (angle < this.minAngle) {
+      let rot = this.minAngle - angle;
+      this.rotate(this.a, rot * 0.15);
+    } else if (angle > this.maxAngle) {
+      let rot = this.maxAngle - angle;
+      this.rotate(this.a, rot * 0.15);
+    }
+  }
+  rotate(p, angle) {
+    if (p.pinned || p.dissolving) return;
+    let cos = Math.cos(angle), sin = Math.sin(angle);
+    let dx = p.x - this.b.x, dy = p.y - this.b.y;
+    p.x = this.b.x + dx * cos - dy * sin;
+    p.y = this.b.y + dx * sin + dy * cos;
+  }
+}
+
+// --- Ragdoll ---
 class Ragdoll {
-    constructor(x, y, scale = 1) {
-        this.scale = scale;
-        this.particles = [];
-        this.constraints = [];
-        this.id = Math.random();
-        this.settledTime = 0;
+  constructor(x, y, scale = 1) {
+    this.particles = [];
+    this.constraints = [];
+    this.jointConstraints = [];
+    this.settledTime = 0;
+    this.alive = true;
+    this.dissolving = false;
+    this.dissolveTime = 0;
+    this.color = `hsl(${Math.random() * 360}, 70%, 65%)`;
+    this.scale = scale;
+    this.maxSpeed = 0;
 
-        // Body Proportions
-        const headR = 10 * scale;
-        const neckLen = 10 * scale;
-        const torsoLen = 35 * scale;
-        const armLen = 25 * scale;
-        const legLen = 35 * scale;
+    let s = scale;
+    // Head
+    let head = new Particle(x, y, 10 * s);
+    // Neck
+    let neck = new Particle(x, y + 14 * s, 3 * s);
+    // Shoulders
+    let lShoulder = new Particle(x - 10 * s, y + 18 * s, 3 * s);
+    let rShoulder = new Particle(x + 10 * s, y + 18 * s, 3 * s);
+    // Elbows
+    let lElbow = new Particle(x - 16 * s, y + 32 * s, 3 * s);
+    let rElbow = new Particle(x + 16 * s, y + 32 * s, 3 * s);
+    // Hands
+    let lHand = new Particle(x - 18 * s, y + 46 * s, 4 * s);
+    let rHand = new Particle(x + 18 * s, y + 46 * s, 4 * s);
+    // Hip
+    let hip = new Particle(x, y + 40 * s, 4 * s);
+    // Knees
+    let lKnee = new Particle(x - 7 * s, y + 60 * s, 3 * s);
+    let rKnee = new Particle(x + 7 * s, y + 60 * s, 3 * s);
+    // Feet
+    let lFoot = new Particle(x - 8 * s, y + 80 * s, 4 * s);
+    let rFoot = new Particle(x + 8 * s, y + 80 * s, 4 * s);
 
-        // Create Particles
-        const head = new Particle(x, y);
-        const neck = new Particle(x, y + headR + neckLen);
-        const shoulderL = new Particle(x - 10 * scale, y + headR + neckLen);
-        const shoulderR = new Particle(x + 10 * scale, y + headR + neckLen);
-        const hip = new Particle(x, y + headR + neckLen + torsoLen);
-        
-        const elbowL = new Particle(x - 20 * scale, y + headR + neckLen + armLen);
-        const handL = new Particle(x - 20 * scale, y + headR + neckLen + armLen * 2);
-        
-        const elbowR = new Particle(x + 20 * scale, y + headR + neckLen + armLen);
-        const handR = new Particle(x + 20 * scale, y + headR + neckLen + armLen * 2);
+    this.particles = [head, neck, lShoulder, rShoulder, lElbow, rElbow, lHand, rHand, hip, lKnee, rKnee, lFoot, rFoot];
 
-        const kneeL = new Particle(x - 10 * scale, y + headR + neckLen + torsoLen + legLen);
-        const footL = new Particle(x - 10 * scale, y + headR + neckLen + torsoLen + legLen * 2);
+    // Body constraints
+    this.constraints.push(new DistanceConstraint(head, neck, 14 * s, 1));
+    this.constraints.push(new DistanceConstraint(neck, lShoulder, 10 * s, 1));
+    this.constraints.push(new DistanceConstraint(neck, rShoulder, 10 * s, 1));
+    this.constraints.push(new DistanceConstraint(lShoulder, rShoulder, 20 * s, 1));
+    this.constraints.push(new DistanceConstraint(lShoulder, lElbow, 14 * s, 1));
+    this.constraints.push(new DistanceConstraint(rShoulder, rElbow, 14 * s, 1));
+    this.constraints.push(new DistanceConstraint(lElbow, lHand, 14 * s, 1));
+    this.constraints.push(new DistanceConstraint(rElbow, rHand, 14 * s, 1));
+    this.constraints.push(new DistanceConstraint(neck, hip, 22 * s, 1));
+    this.constraints.push(new DistanceConstraint(lShoulder, hip, 18 * s, 0.5));
+    this.constraints.push(new DistanceConstraint(rShoulder, hip, 18 * s, 0.5));
+    this.constraints.push(new DistanceConstraint(hip, lKnee, 20 * s, 1));
+    this.constraints.push(new DistanceConstraint(hip, rKnee, 20 * s, 1));
+    this.constraints.push(new DistanceConstraint(lKnee, lFoot, 20 * s, 1));
+    this.constraints.push(new DistanceConstraint(rKnee, rFoot, 20 * s, 1));
+    this.constraints.push(new DistanceConstraint(lFoot, rFoot, 16 * s, 0.3));
 
-        const kneeR = new Particle(x + 10 * scale, y + headR + neckLen + torsoLen + legLen);
-        const footR = new Particle(x + 10 * scale, y + headR + neckLen + torsoLen + legLen * 2);
+    // Joint limits
+    this.jointConstraints.push(new AngleConstraint(head, neck, lShoulder, -1.2, 1.2));
+    this.jointConstraints.push(new AngleConstraint(head, neck, rShoulder, -1.2, 1.2));
+    this.jointConstraints.push(new AngleConstraint(neck, hip, lKnee, -0.5, 2.0));
+    this.jointConstraints.push(new AngleConstraint(neck, hip, rKnee, -0.5, 2.0));
+    this.jointConstraints.push(new AngleConstraint(lShoulder, lElbow, lHand, -2.0, 0.5));
+    this.jointConstraints.push(new AngleConstraint(rShoulder, rElbow, rHand, -2.0, 0.5));
+    this.jointConstraints.push(new AngleConstraint(hip, lKnee, lFoot, -0.3, 1.5));
+    this.jointConstraints.push(new AngleConstraint(hip, rKnee, rFoot, -0.3, 1.5));
 
-        this.particles = [head, neck, shoulderL, shoulderR, hip, elbowL, handL, elbowR, handR, kneeL, footL, kneeR, footR];
-        particles.push(...this.particles);
+    // References for drawing
+    this.head = head; this.neck = neck;
+    this.lShoulder = lShoulder; this.rShoulder = rShoulder;
+    this.lElbow = lElbow; this.rElbow = rElbow;
+    this.lHand = lHand; this.rHand = rHand;
+    this.hip = hip; this.lKnee = lKnee; this.rKnee = rKnee;
+    this.lFoot = lFoot; this.rFoot = rFoot;
+  }
 
-        // Structural Constraints
-        this.addConstraint(head, neck);
-        this.addConstraint(neck, shoulderL);
-        this.addConstraint(neck, shoulderR);
-        this.addConstraint(shoulderL, shoulderR); // Collar bone
-        this.addConstraint(shoulderL, hip);
-        this.addConstraint(shoulderR, hip);
-        this.addConstraint(hip, kneeL);
-        this.addConstraint(hip, kneeR);
-        this.addConstraint(kneeL, footL);
-        this.addConstraint(kneeR, footR);
-        
-        // Arms
-        this.addConstraint(shoulderL, elbowL);
-        this.addConstraint(elbowL, handL);
-        this.addConstraint(shoulderR, elbowR);
-        this.addConstraint(elbowR, handR);
-
-        // Cross bracing (Internal organs/bones to prevent collapse)
-        this.addConstraint(head, shoulderL, null, 0.1);
-        this.addConstraint(head, shoulderR, null, 0.1);
-        this.addConstraint(shoulderL, elbowR, null, 0.05); // Soft cross
-        this.addConstraint(shoulderR, elbowL, null, 0.05);
-        this.addConstraint(hip, elbowL, null, 0.05);
-        this.addConstraint(hip, elbowR, null, 0.05);
-        this.addConstraint(kneeL, kneeR, null, 0.5); // Thigh width
-
-        ragdolls.push(this);
+  update(dt) {
+    if (!this.alive) return;
+    if (this.dissolving) {
+      this.dissolveTime += dt;
+      for (let p of this.particles) {
+        p.alpha = Math.max(0, 1 - this.dissolveTime / 120);
+        if (p.alpha <= 0) p.alive = false;
+      }
+      if (this.dissolveTime > 120) this.alive = false;
+      return;
     }
-
-    addConstraint(p1, p2, len = null, stiff = 1.0) {
-        const c = new Constraint(p1, p2, len, stiff);
-        this.constraints.push(c);
-        constraints.push(c);
+    for (let p of this.particles) p.update(dt);
+    for (let i = 0; i < CONSTRAINT_ITERATIONS; i++) {
+      for (let c of this.constraints) c.solve();
     }
-
-    checkSettled() {
-        // Check if all particles are moving slowly
-        let totalVel = 0;
-        for (let p of this.particles) {
-            if (p.dissolving) return;
-            totalVel += Math.abs(p.x - p.oldx) + Math.abs(p.y - p.oldy);
-        }
-        
-        if (totalVel < 1.0) {
-            this.settledTime++;
-        } else {
-            this.settledTime = 0;
-        }
-
-        // If settled for 100 frames, dissolve
-        if (this.settledTime > 100) {
-            this.dissolve();
-        }
+    for (let i = 0; i < JOINT_ITERATIONS; i++) {
+      for (let c of this.jointConstraints) c.solve();
     }
-
-    dissolve() {
-        for (let p of this.particles) {
-            p.dissolving = true;
-        }
-        // Remove constraints immediately to save CPU
-        this.constraints.forEach(c => c.active = false);
+    for (let p of this.particles) {
+      p.collideWithGround();
+      p.collideWithWalls();
     }
-
-    draw(ctx) {
-        ctx.strokeStyle = `rgba(255, 255, 255, ${this.particles[0].life})`;
-        ctx.lineWidth = 2;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-
-        ctx.beginPath();
-        // Draw Body
-        // Head
-        const head = this.particles[0];
-        const neck = this.particles[1];
-        const sL = this.particles[2];
-        const sR = this.particles[3];
-        const hip = this.particles[4];
-        
-        ctx.moveTo(head.x, head.y);
-        ctx.lineTo(neck.x, neck.y); // Neck
-        ctx.moveTo(sL.x, sL.y);
-        ctx.lineTo(sR.x, sR.y); // Shoulders
-        ctx.moveTo(sL.x, sL.y);
-        ctx.lineTo(hip.x, hip.y); // Side torso
-        ctx.moveTo(sR.x, sR.y);
-        ctx.lineTo(hip.x, hip.y); // Side torso
-        
-        // Arms
-        ctx.moveTo(sL.x, sL.y);
-        ctx.lineTo(this.particles[5].x, this.particles[5].y); // Elbow
-        ctx.lineTo(this.particles[6].x, this.particles[6].y); // Hand
-        
-        ctx.moveTo(sR.x, sR.y);
-        ctx.lineTo(this.particles[7].x, this.particles[7].y); // Elbow
-        ctx.lineTo(this.particles[8].x, this.particles[8].y); // Hand
-
-        // Legs
-        ctx.moveTo(hip.x, hip.y);
-        ctx.lineTo(this.particles[9].x, this.particles[9].y); // Knee
-        ctx.lineTo(this.particles[10].x, this.particles[10].y); // Foot
-
-        ctx.moveTo(hip.x, hip.y);
-        ctx.lineTo(this.particles[11].x, this.particles[11].y); // Knee
-        ctx.lineTo(this.particles[12].x, this.particles[12].y); // Foot
-
-        ctx.stroke();
-
-        // Draw Head Circle
-        ctx.beginPath();
-        ctx.arc(head.x, head.y, 10 * this.scale, 0, Math.PI * 2);
-        ctx.stroke();
+    // Track max speed
+    let maxSpd = 0;
+    for (let p of this.particles) {
+      let vx = p.x - p.oldx, vy = p.y - p.oldy;
+      maxSpd = Math.max(maxSpd, Math.sqrt(vx * vx + vy * vy));
     }
+    this.maxSpeed = maxSpd;
+    // Check if settled
+    if (maxSpd < 0.3 && this.head.y > H * 0.3) {
+      this.settledTime += dt;
+      if (this.settledTime > 180) {
+        this.startDissolving();
+      }
+    } else {
+      this.settledTime = Math.max(0, this.settledTime - dt * 0.5);
+    }
+  }
+
+  startDissolving() {
+    this.dissolving = true;
+    this.dissolveTime = 0;
+    for (let p of this.particles) {
+      p.dissolving = true;
+      p.dissolveVx = (Math.random() - 0.5) * 3;
+      p.dissolveVy = -Math.random() * 4 - 1;
+    }
+  }
+
+  draw() {
+    if (!this.alive) return;
+    let alpha = this.dissolving ? this.head.alpha : 1;
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = this.color;
+    ctx.lineWidth = 2.5 * this.scale;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    let drawLine = (a, b) => {
+      if (!a.alive || !b.alive) return;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    };
+
+    // Arms
+    drawLine(this.lShoulder, this.lElbow);
+    drawLine(this.lElbow, this.lHand);
+    drawLine(this.rShoulder, this.rElbow);
+    drawLine(this.rElbow, this.rHand);
+    // Legs
+    drawLine(this.hip, this.lKnee);
+    drawLine(this.lKnee, this.lFoot);
+    drawLine(this.hip, this.rKnee);
+    drawLine(this.rKnee, this.rFoot);
+    // Torso
+    drawLine(this.neck, this.hip);
+    drawLine(this.lShoulder, this.rShoulder);
+    // Head
+    if (this.head.alive) {
+      ctx.fillStyle = this.color;
+      ctx.beginPath();
+      ctx.arc(this.head.x, this.head.y, this.head.radius, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
 }
 
-// --- Obstacles ---
-
+// --- Course Elements ---
 class Trampoline {
-    constructor(x, y, w) {
-        this.x = x;
-        this.y = y;
-        this.w = w;
-        this.h = 10;
-        this.particles = [];
-        this.constraints = [];
-        const segments = 8;
-        const segW = w / segments;
-        
-        // Create anchor points
-        let prevP = new Particle(x, y, 0, true); // Static left
-        this.particles.push(prevP);
-
-        for (let i = 1; i <= segments; i++) {
-            const isStatic = i === segments;
-            const p = new Particle(x + i * segW, y, 1, isStatic);
-            this.particles.push(p);
-            constraints.push(new Constraint(prevP, p, segW, 1.0));
-            prevP = p;
+  constructor(x, y, width) {
+    this.x = x; this.y = y; this.width = width;
+    this.points = [];
+    let segs = 8;
+    for (let i = 0; i <= segs; i++) {
+      let px = x - width / 2 + (width / segs) * i;
+      this.points.push(new Particle(px, y, 2, false));
+    }
+    this.points[0].pinned = true;
+    this.points[this.points.length - 1].pinned = true;
+    this.constraints = [];
+    for (let i = 0; i < this.points.length - 1; i++) {
+      this.constraints.push(new DistanceConstraint(this.points[i], this.points[i + 1], width / segs, 0.8));
+    }
+    this.bounceStrength = 0.6;
+  }
+  update(dt) {
+    for (let p of this.points) p.update(dt);
+    for (let c of this.constraints) c.solve();
+    // Restore height
+    for (let i = 1; i < this.points.length - 1; i++) {
+      let p = this.points[i];
+      let targetY = this.y;
+      p.y += (targetY - p.y) * 0.15 * dt;
+      p.oldy = p.y - (p.y - p.oldy) * 0.8;
+    }
+  }
+  collideWith(particles) {
+    for (let p of particles) {
+      if (!p.alive || p.pinned || p.dissolving) continue;
+      for (let i = 0; i < this.points.length - 1; i++) {
+        let a = this.points[i], b = this.points[i + 1];
+        let hit = this.segmentCollision(p, a, b);
+        if (hit) {
+          let vy = p.y - p.oldy;
+          if (vy > 0) {
+            let impulse = Math.abs(vy) * this.bounceStrength;
+            p.oldy = p.y + impulse;
+            let impact = Math.abs(vy);
+            if (impact > 4) triggerSlowMo(impact * 0.1);
+          }
         }
+      }
     }
-
-    update() {
-        // Add upward force to non-static particles to simulate tension
-        this.particles.forEach(p => {
-            if (!p.isStatic && p.y > this.y) {
-                p.y -= 0.5 * timeScale; // Tension
-                p.y -= (p.y - this.y) * 0.1 * timeScale; // Spring back
-            }
-        });
+  }
+  segmentCollision(p, a, b) {
+    let dx = b.x - a.x, dy = b.y - a.y;
+    let lenSq = dx * dx + dy * dy;
+    if (lenSq < 0.01) return false;
+    let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+    let cx = a.x + t * dx, cy = a.y + t * dy;
+    let dist = Math.sqrt((p.x - cx) ** 2 + (p.y - cy) ** 2);
+    if (dist < p.radius + 3) {
+      let ny = (p.y - cy);
+      if (ny > 0) {
+        p.y = cy - p.radius;
+        return true;
+      }
     }
-
-    draw(ctx) {
-        ctx.fillStyle = '#00ffcc';
-        ctx.beginPath();
-        ctx.moveTo(this.particles[0].x, this.particles[0].y);
-        for(let i=1; i<this.particles.length; i++) {
-            ctx.lineTo(this.particles[i].x, this.particles[i].y);
-        }
-        ctx.lineWidth = 4;
-        ctx.strokeStyle = '#00ffcc';
-        ctx.stroke();
-        
-        // Draw legs
-        ctx.beginPath();
-        ctx.moveTo(this.particles[0].x, this.particles[0].y);
-        ctx.lineTo(this.particles[0].x, height);
-        ctx.moveTo(this.particles[this.particles.length-1].x, this.particles[this.particles.length-1].y);
-        ctx.lineTo(this.particles[this.particles.length-1].x, height);
-        ctx.strokeStyle = '#555';
-        ctx.lineWidth = 2;
-        ctx.stroke();
+    return false;
+  }
+  draw() {
+    ctx.strokeStyle = '#ff6b6b';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(this.points[0].x, this.points[0].y);
+    for (let i = 1; i < this.points.length; i++) {
+      ctx.lineTo(this.points[i].x, this.points[i].y);
     }
+    ctx.stroke();
+    // Glow
+    ctx.strokeStyle = 'rgba(255,107,107,0.3)';
+    ctx.lineWidth = 8;
+    ctx.beginPath();
+    ctx.moveTo(this.points[0].x, this.points[0].y);
+    for (let i = 1; i < this.points.length; i++) {
+      ctx.lineTo(this.points[i].x, this.points[i].y);
+    }
+    ctx.stroke();
+  }
 }
 
 class Seesaw {
-    constructor(x, y, w) {
-        this.pivot = new Particle(x, y, 0, true);
-        this.w = w;
-        this.particles = [];
-        
-        // Create a rigid body out of particles
-        const segments = 5;
-        const segW = w / segments;
-        
-        // Left side
-        for(let i=0; i<=segments; i++) {
-            this.particles.push(new Particle(x - (segments-i)*segW, y, 1));
-        }
-        // Right side
-        for(let i=1; i<=segments; i++) {
-            this.particles.push(new Particle(x + i*segW, y, 1));
-        }
-
-        // Constraints to make it rigid
-        for(let i=0; i<this.particles.length-1; i++) {
-            constraints.push(new Constraint(this.particles[i], this.particles[i+1], segW, 1.0));
-            constraints.push(new Constraint(this.particles[i], this.particles[i+2] || this.particles[this.particles.length-1], segW*2, 1.0));
-        }
-        
-        // Pivot constraint (Hinge)
-        // The middle particle is index segments
-        this.pivotConstraint = new Constraint(this.pivot, this.particles[segments], 0, 1.0);
-        constraints.push(this.pivotConstraint);
-        
-        // Add pivot to simulation
-        particles.push(this.pivot);
-        particles.push(...this.particles);
+  constructor(x, y, width) {
+    this.pivotX = x; this.pivotY = y; this.width = width;
+    this.angle = 0;
+    this.angularVel = 0;
+    this.particles = [];
+    this.leftEnd = new Particle(x - width / 2, y, 4);
+    this.rightEnd = new Particle(x + width / 2, y, 4);
+    this.particles.push(this.leftEnd, this.rightEnd);
+    this.pivot = new Particle(x, y, 6, true);
+  }
+  update(dt) {
+    let halfW = this.width / 2;
+    this.leftEnd.x = this.pivotX + Math.cos(this.angle) * (-halfW);
+    this.leftEnd.y = this.pivotY + Math.sin(this.angle) * (-halfW);
+    this.rightEnd.x = this.pivotX + Math.cos(this.angle) * halfW;
+    this.rightEnd.y = this.pivotY + Math.sin(this.angle) * halfW;
+    this.leftEnd.oldx = this.leftEnd.x - (this.leftEnd.x - this.leftEnd.oldx) * 0.5;
+    this.leftEnd.oldy = this.leftEnd.y - (this.leftEnd.y - this.leftEnd.oldy) * 0.5;
+    this.rightEnd.oldx = this.rightEnd.x - (this.rightEnd.x - this.rightEnd.oldx) * 0.5;
+    this.rightEnd.oldy = this.rightEnd.y - (this.rightEnd.y - this.rightEnd.oldy) * 0.5;
+    this.angularVel *= 0.98;
+    this.angle += this.angularVel * dt;
+    this.angle = Math.max(-0.6, Math.min(0.6, this.angle));
+    if (Math.abs(this.angle) < 0.01 && Math.abs(this.angularVel) < 0.001) {
+      this.angle *= 0.9;
+      this.angularVel *= 0.9;
     }
-
-    draw(ctx) {
-        ctx.fillStyle = '#ffaa00';
-        ctx.fillRect(this.pivot.x - 5, this.pivot.y, 10, height - this.pivot.y);
-        
-        ctx.beginPath();
-        ctx.moveTo(this.particles[0].x, this.particles[0].y);
-        for(let p of this.particles) {
-            ctx.lineTo(p.x, p.y);
+  }
+  collideWith(particles) {
+    let a = this.leftEnd, b = this.rightEnd;
+    for (let p of particles) {
+      if (!p.alive || p.pinned || p.dissolving) continue;
+      let dx = b.x - a.x, dy = b.y - a.y;
+      let lenSq = dx * dx + dy * dy;
+      if (lenSq < 0.01) continue;
+      let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq;
+      t = Math.max(0, Math.min(1, t));
+      let cx = a.x + t * dx, cy = a.y + t * dy;
+      let dist = Math.sqrt((p.x - cx) ** 2 + (p.y - cy) ** 2);
+      if (dist < p.radius + 5) {
+        let ny = p.y - cy;
+        if (ny > -2) {
+          p.y = cy - p.radius;
+          let vy = p.y - p.oldy;
+          if (vy > 0) {
+            let force = Math.abs(vy) * 0.3;
+            let lever = (t - 0.5) * 2;
+            this.angularVel += force * lever * 0.008;
+            p.oldy = p.y + Math.abs(vy) * 0.4;
+            let impact = Math.abs(vy);
+            if (impact > 3) triggerSlowMo(impact * 0.08);
+          }
         }
-        ctx.lineWidth = 8;
-        ctx.strokeStyle = '#ffaa00';
-        ctx.lineCap = 'round';
-        ctx.stroke();
-        
-        // Pivot circle
-        ctx.beginPath();
-        ctx.arc(this.pivot.x, this.pivot.y, 8, 0, Math.PI*2);
-        ctx.fillStyle = '#fff';
-        ctx.fill();
+      }
     }
+  }
+  draw() {
+    // Pivot
+    ctx.fillStyle = '#888';
+    ctx.beginPath();
+    ctx.arc(this.pivotX, this.pivotY, 8, 0, Math.PI * 2);
+    ctx.fill();
+    // Plank
+    ctx.strokeStyle = '#ffd93d';
+    ctx.lineWidth = 6;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(this.leftEnd.x, this.leftEnd.y);
+    ctx.lineTo(this.rightEnd.x, this.rightEnd.y);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,217,61,0.3)';
+    ctx.lineWidth = 12;
+    ctx.beginPath();
+    ctx.moveTo(this.leftEnd.x, this.leftEnd.y);
+    ctx.lineTo(this.rightEnd.x, this.rightEnd.y);
+    ctx.stroke();
+  }
 }
 
 class SwingingLog {
-    constructor(x, y, len) {
-        this.pivot = new Particle(x, y, 0, true);
-        this.len = len;
-        
-        // Log segments
-        const segments = 6;
-        const segLen = len / segments;
-        this.particles = [];
-        
-        for(let i=0; i<=segments; i++) {
-            this.particles.push(new Particle(x + i*segLen, y, 1));
-        }
-        
-        // Rigid constraints
-        for(let i=0; i<this.particles.length-1; i++) {
-            constraints.push(new Constraint(this.particles[i], this.particles[i+1], segLen, 1.0));
-            if(i < this.particles.length-2)
-                constraints.push(new Constraint(this.particles[i], this.particles[i+2], segLen*2, 1.0));
-        }
-        
-        // Hinge
-        constraints.push(new Constraint(this.pivot, this.particles[0], 0, 1.0));
-        
-        particles.push(this.pivot);
-        particles.push(...this.particles);
-    }
-
-    draw(ctx) {
-        ctx.beginPath();
-        ctx.moveTo(this.pivot.x, this.pivot.y);
-        ctx.lineTo(this.particles[this.particles.length-1].x, this.particles[this.particles.length-1].y);
-        ctx.lineWidth = 12;
-        ctx.strokeStyle = '#8b4513';
-        ctx.lineCap = 'round';
-        ctx.stroke();
-        
-        ctx.beginPath();
-        ctx.arc(this.pivot.x, this.pivot.y, 6, 0, Math.PI*2);
-        ctx.fillStyle = '#fff';
-        ctx.fill();
-    }
-}
-
-// --- Core Logic ---
-
-function resize() {
-    width = window.innerWidth;
-    height = window.innerHeight;
-    canvas.width = width;
-    canvas.height = height;
-    initLevel();
-}
-
-function initLevel() {
-    // Clear existing
-    particles = [];
-    constraints = [];
-    ragdolls = [];
-    obstacles = [];
-    
-    // Add Floor (Static particles)
-    const floorY = height - 50;
-    const floorSegs = width / 50;
-    let prevFloor = null;
-    for(let x=0; x<=width; x+=50) {
-        const p = new Particle(x, floorY, 0, true);
-        particles.push(p);
-        if(prevFloor) constraints.push(new Constraint(prevFloor, p, 50, 1.0));
-        prevFloor = p;
-    }
-
-    // Add Walls (Static)
-    particles.push(new Particle(0, 0, 0, true));
-    particles.push(new Particle(0, height, 0, true));
-    particles.push(new Particle(width, 0, 0, true));
-    particles.push(new Particle(width, height, 0, true));
-
-    // Obstacles
-    obstacles.push(new Trampoline(width * 0.2, height * 0.7, 150));
-    obstacles.push(new Trampoline(width * 0.7, height * 0.6, 150));
-    
-    obstacles.push(new Seesaw(width * 0.5, height * 0.85, 300));
-    obstacles.push(new Seesaw(width * 0.8, height * 0.6, 200));
-
-    obstacles.push(new SwingingLog(width * 0.3, height * 0.2, 200));
-    obstacles.push(new SwingingLog(width * 0.6, height * 0.3, 250));
-}
-
-function spawnRagdoll() {
-    const x = Math.random() * (width * 0.8) + width * 0.1;
-    const y = -50;
-    
-    // 10% chance of double spawn
-    if (Math.random() < 0.1) {
-        new Ragdoll(x, y);
-        new Ragdoll(x + 20, y + 20);
-    } else {
-        new Ragdoll(x, y);
-    }
-}
-
-function checkCollisions() {
-    // Simple Particle-Particle collision for ragdolls
-    // Optimization: Only check particles in ragdolls, not static floor
-    
-    // Check against Obstacles
-    obstacles.forEach(obs => {
-        if (obs instanceof Trampoline) {
-            // Trampoline collision is handled by physics constraints mostly, 
-            // but we need to push particles up if they penetrate too much
-            obs.particles.forEach(op => {
-                particles.forEach(rp => {
-                    if (rp.dissolving || rp.isStatic) return;
-                    const d = dist(rp, op);
-                    const r = 10;
-                    if (d < r) {
-                        const angle = Math.atan2(rp.y - op.y, rp.x - op.x);
-                        const force = 0.5; // Push out
-                        rp.x += Math.cos(angle) * force;
-                        rp.y += Math.sin(angle) * force;
-                    }
-                });
-            });
-        }
-    });
-
-    // Particle-Particle (Self and Inter-ragdoll)
-    // This is O(N^2) but N is small enough (<400)
-    for (let i = 0; i < particles.length; i++) {
-        for (let j = i + 1; j < particles.length; j++) {
-            const p1 = particles[i];
-            const p2 = particles[j];
-            
-            if (p1.isStatic || p2.isStatic) continue;
-            if (p1.dissolving || p2.dissolving) continue;
-
-            const dx = p1.x - p2.x;
-            const dy = p1.y - p2.y;
-            const d = Math.sqrt(dx*dx + dy*dy);
-            const minDist = 10; // Radius sum approx
-
-            if (d < minDist && d > 0) {
-                // Collision detected
-                
-                // Slow Motion Logic
-                const v1 = Math.abs(p1.x - p1.oldx) + Math.abs(p1.y - p1.oldy);
-                const v2 = Math.abs(p2.x - p2.oldx) + Math.abs(p2.y - p2.oldy);
-                if ((v1 + v2) > 15 && timeScale > 0.8) {
-                    triggerSlowMo();
-                }
-
-                // Resolve
-                const overlap = minDist - d;
-                const nx = dx / d;
-                const ny = dy / d;
-                
-                // Move apart
-                const moveX = nx * overlap * 0.5;
-                const moveY = ny * overlap * 0.5;
-                
-                p1.x += moveX;
-                p1.y += moveY;
-                p2.x -= moveX;
-                p2.y -= moveY;
-            }
-        }
-    }
-}
-
-function triggerSlowMo() {
-    timeScale = 0.1;
-    slowMoTimer = 60; // Frames to stay slow
-    slowmoText.style.opacity = 1;
-}
-
-function update() {
-    // Spawn Logic
-    spawnTimer++;
-    if (spawnTimer > 200 || particles.length < 20) {
-        spawnRagdoll();
-        spawnTimer = 0;
-    }
-
-    // Slow Mo Logic
-    if (slowMoTimer > 0) {
-        slowMoTimer--;
-        if (slowMoTimer <= 0) {
-            timeScale = 1.0;
-            slowmoText.style.opacity = 0;
-        }
-    }
-
-    // Verlet Integration
+  constructor(x, y, width, swingSpeed) {
+    this.pivotX = x; this.pivotY = y; this.width = width;
+    this.angle = 0;
+    this.swingSpeed = swingSpeed || 0.02;
+    this.swingPhase = Math.random() * Math.PI * 2;
+    this.particles = [];
+    this.leftEnd = new Particle(x, y, 4);
+    this.rightEnd = new Particle(x + width, y, 4);
+    this.particles.push(this.leftEnd, this.rightEnd);
+  }
+  update(dt) {
+    this.swingPhase += this.swingSpeed * dt;
+    this.angle = Math.sin(this.swingPhase) * 0.8;
+    let lx = this.pivotX + Math.cos(this.angle) * (-this.width / 2);
+    let ly = this.pivotY + Math.sin(this.angle) * (-this.width / 2);
+    let rx = this.pivotX + Math.cos(this.angle) * (this.width / 2);
+    let ry = this.pivotY + Math.sin(this.angle) * (this.width / 2);
+    this.leftEnd.x = lx; this.leftEnd.y = ly;
+    this.rightEnd.x = rx; this.rightEnd.y = ry;
+    this.leftEnd.oldx = this.leftEnd.x - (this.leftEnd.x - this.leftEnd.oldx) * 0.3;
+    this.leftEnd.oldy = this.leftEnd.y - (this.leftEnd.y - this.leftEnd.oldy) * 0.3;
+    this.rightEnd.oldx = this.rightEnd.x - (this.rightEnd.x - this.rightEnd.oldx) * 0.3;
+    this.rightEnd.oldy = this.rightEnd.y - (this.rightEnd.y - this.rightEnd.oldy) * 0.3;
+  }
+  collideWith(particles) {
+    let a = this.leftEnd, b = this.rightEnd;
     for (let p of particles) {
-        p.update();
-    }
-
-    // Constraints (Iterate multiple times for stiffness)
-    for (let i = 0; i < 5; i++) {
-        for (let c of constraints) {
-            c.resolve();
+      if (!p.alive || p.pinned || p.dissolving) continue;
+      let dx = b.x - a.x, dy = b.y - a.y;
+      let lenSq = dx * dx + dy * dy;
+      if (lenSq < 0.01) continue;
+      let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq;
+      t = Math.max(0, Math.min(1, t));
+      let cx = a.x + t * dx, cy = a.y + t * dy;
+      let dist = Math.sqrt((p.x - cx) ** 2 + (p.y - cy) ** 2);
+      if (dist < p.radius + 6) {
+        let nx = p.x - cx, ny = p.y - cy;
+        let nd = Math.sqrt(nx * nx + ny * ny);
+        if (nd > 0.01) {
+          nx /= nd; ny /= nd;
+          p.x = cx + nx * (p.radius + 6);
+          p.y = cy + ny * (p.radius + 6);
+          // Add some velocity from swing
+          let logVx = (this.rightEnd.x - this.rightEnd.oldx) * 0.5;
+          let logVy = (this.rightEnd.y - this.rightEnd.oldy) * 0.5;
+          p.oldx = p.x - (p.x - p.oldx) * 0.5 + logVx * 0.3;
+          p.oldy = p.y - (p.y - p.oldy) * 0.5 + logVy * 0.3;
+          let impact = Math.sqrt(logVx * logVx + logVy * logVy);
+          if (impact > 2) triggerSlowMo(impact * 0.1);
         }
-        for (let p of particles) {
-            p.constrain();
-        }
+      }
     }
+  }
+  draw() {
+    ctx.strokeStyle = '#6bcb77';
+    ctx.lineWidth = 10;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(this.leftEnd.x, this.leftEnd.y);
+    ctx.lineTo(this.rightEnd.x, this.rightEnd.y);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(107,203,119,0.3)';
+    ctx.lineWidth = 16;
+    ctx.beginPath();
+    ctx.moveTo(this.leftEnd.x, this.leftEnd.y);
+    ctx.lineTo(this.rightEnd.x, this.rightEnd.y);
+    ctx.stroke();
+    // Pivot
+    ctx.fillStyle = '#555';
+    ctx.beginPath();
+    ctx.arc(this.pivotX, this.pivotY, 6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
 
-    // Obstacles specific logic
-    obstacles.forEach(obs => {
-        if (obs.update) obs.update();
-    });
+// --- Scene Setup ---
+let trampolines = [];
+let seesaws = [];
+let swingingLogs = [];
+let ragdolls = [];
+let spawnTimer = 0;
+let spawnInterval = 200;
+let particles = []; // all particles for collision
 
-    checkCollisions();
+function buildCourse() {
+  trampolines = [];
+  seesaws = [];
+  swingingLogs = [];
 
-    // Ragdoll Logic
-    for (let i = ragdolls.length - 1; i >= 0; i--) {
-        const r = ragdolls[i];
-        r.checkSettled();
-        // Remove dead ragdolls
-        if (r.particles[0].life <= 0) {
-            // Clean up particles array
-            const pSet = new Set(r.particles);
-            particles = particles.filter(p => !pSet.has(p));
-            // Clean up constraints
-            constraints = constraints.filter(c => !r.constraints.includes(c));
-            
-            ragdolls.splice(i, 1);
-        }
+  // Ground trampolines
+  trampolines.push(new Trampoline(W * 0.2, GROUND_Y() - 10, 120));
+  trampolines.push(new Trampoline(W * 0.7, GROUND_Y() - 10, 120));
+  trampolines.push(new Trampoline(W * 0.5, GROUND_Y() - 10, 150));
+
+  // Mid-height trampolines
+  trampolines.push(new Trampoline(W * 0.35, H * 0.55, 100));
+  trampolines.push(new Trampoline(W * 0.65, H * 0.55, 100));
+
+  // Seesaws
+  seesaws.push(new Seesaw(W * 0.25, H * 0.4, 140));
+  seesaws.push(new Seesaw(W * 0.75, H * 0.35, 160));
+  seesaws.push(new Seesaw(W * 0.5, H * 0.65, 130));
+
+  // Swinging logs
+  swingingLogs.push(new SwingingLog(W * 0.15, H * 0.25, 100, 0.025));
+  swingingLogs.push(new SwingingLog(W * 0.85, H * 0.3, 120, 0.018));
+  swingingLogs.push(new SwingingLog(W * 0.5, H * 0.18, 140, 0.03));
+  swingingLogs.push(new SwingingLog(W * 0.35, H * 0.42, 90, 0.022));
+}
+
+function spawnRagdoll(doubleDrop) {
+  let x = W * 0.3 + Math.random() * W * 0.4;
+  let y = -60;
+  let s = 0.8 + Math.random() * 0.4;
+  let r = new Ragdoll(x, y, s);
+  ragdolls.push(r);
+  particles.push(...r.particles);
+
+  if (doubleDrop) {
+    let x2 = x + (Math.random() - 0.5) * 80;
+    let r2 = new Ragdoll(x2, y - 20, s * 0.9);
+    ragdolls.push(r2);
+    particles.push(...r2.particles);
+  }
+}
+
+function getAllParticles() {
+  let all = [];
+  for (let r of ragdolls) {
+    if (r.alive && !r.dissolving) {
+      all.push(...r.particles);
     }
+  }
+  return all;
+}
+
+function interRagdollCollision() {
+  let all = getAllParticles();
+  for (let i = 0; i < all.length; i++) {
+    for (let j = i + 1; j < all.length; j++) {
+      let a = all[i], b = all[j];
+      if (!a.alive || !b.alive || a.pinned || b.pinned) continue;
+      let dx = b.x - a.x, dy = b.y - a.y;
+      let dist = Math.sqrt(dx * dx + dy * dy);
+      let minDist = a.radius + b.radius;
+      if (dist < minDist && dist > 0.01) {
+        let nx = dx / dist, ny = dy / dist;
+        let overlap = (minDist - dist) * 0.5;
+        if (!a.pinned) { a.x -= nx * overlap; a.y -= ny * overlap; }
+        if (!b.pinned) { b.x += nx * overlap; b.y += ny * overlap; }
+        // Exchange some velocity
+        let va_x = a.x - a.oldx, va_y = a.y - a.oldy;
+        let vb_x = b.x - b.oldx, vb_y = b.y - b.oldy;
+        let relVx = va_x - vb_x, relVy = va_y - vb_y;
+        let impact = Math.sqrt(relVx * relVx + relVy * relVy);
+        if (impact > 3) triggerSlowMo(impact * 0.06);
+        let damp = 0.3;
+        if (!a.pinned) {
+          a.oldx = a.x - (va_x * (1 - damp) + vb_x * damp);
+          a.oldy = a.y - (va_y * (1 - damp) + vb_y * damp);
+        }
+        if (!b.pinned) {
+          b.oldx = b.x - (vb_x * (1 - damp) + va_x * damp);
+          b.oldy = b.y - (vb_y * (1 - damp) + va_y * damp);
+        }
+      }
+    }
+  }
+}
+
+// --- Background ---
+function drawBackground() {
+  // Gradient sky
+  let grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#0f0c29');
+  grad.addColorStop(0.5, '#1a1a3e');
+  grad.addColorStop(1, '#24243e');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Stars
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  for (let i = 0; i < 50; i++) {
+    let sx = (i * 137.5 + 50) % W;
+    let sy = (i * 97.3 + 30) % (H * 0.5);
+    let sr = 0.5 + (i % 3) * 0.5;
+    ctx.beginPath();
+    ctx.arc(sx, sy, sr, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Ground
+  ctx.fillStyle = '#2d2d44';
+  ctx.fillRect(0, GROUND_Y(), W, H - GROUND_Y());
+  ctx.strokeStyle = '#4a4a6a';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, GROUND_Y());
+  ctx.lineTo(W, GROUND_Y());
+  ctx.stroke();
+
+  // Ground pattern
+  ctx.strokeStyle = 'rgba(74,74,106,0.3)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < W; i += 40) {
+    ctx.beginPath();
+    ctx.moveTo(i, GROUND_Y());
+    ctx.lineTo(i, H);
+    ctx.stroke();
+  }
+}
+
+// --- Slow Motion Overlay ---
+function drawSlowMoOverlay() {
+  if (timeScale < 0.9) {
+    let intensity = 1 - timeScale;
+    ctx.fillStyle = `rgba(255,255,255,${intensity * 0.08})`;
+    ctx.fillRect(0, 0, W, H);
+    // Vignette
+    let grad = ctx.createRadialGradient(W / 2, H / 2, H * 0.3, W / 2, H / 2, H * 0.8);
+    grad.addColorStop(0, 'rgba(0,0,0,0)');
+    grad.addColorStop(1, `rgba(0,0,0,${intensity * 0.3})`);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+  }
+}
+
+// --- Speed Lines ---
+let speedLines = [];
+function updateSpeedLines() {
+  if (timeScale < 0.7) {
+    for (let i = 0; i < 3; i++) {
+      speedLines.push({
+        x: Math.random() * W,
+        y: Math.random() * H,
+        len: 30 + Math.random() * 60,
+        alpha: 0.1 + Math.random() * 0.2,
+        life: 20
+      });
+    }
+  }
+  speedLines = speedLines.filter(l => {
+    l.life--;
+    l.alpha *= 0.95;
+    return l.life > 0;
+  });
+}
+
+function drawSpeedLines() {
+  for (let l of speedLines) {
+    ctx.strokeStyle = `rgba(255,255,255,${l.alpha})`;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(l.x, l.y);
+    ctx.lineTo(l.x + l.len * 0.3, l.y + l.len);
+    ctx.stroke();
+  }
+}
+
+// --- Main Loop ---
+let frameCount = 0;
+function update() {
+  updateSlowMo();
+  let dt = timeScale;
+
+  // Spawn logic
+  spawnTimer += dt;
+  if (spawnTimer >= spawnInterval) {
+    spawnTimer = 0;
+    spawnInterval = 150 + Math.random() * 200;
+    let doubleDrop = Math.random() < 0.25;
+    spawnRagdoll(doubleDrop);
+  }
+
+  // Update course elements
+  for (let t of trampolines) {
+    t.update(dt);
+    t.collideWith(getAllParticles());
+  }
+  for (let s of seesaws) {
+    s.update(dt);
+    s.collideWith(getAllParticles());
+  }
+  for (let sl of swingingLogs) {
+    sl.update(dt);
+    sl.collideWith(getAllParticles());
+  }
+
+  // Update ragdolls
+  for (let r of ragdolls) r.update(dt);
+
+  // Inter-ragdoll collision
+  interRagdollCollision();
+
+  // Clean up dead ragdolls
+  ragdolls = ragdolls.filter(r => r.alive);
+
+  // Update particles list
+  particles = [];
+  for (let r of ragdolls) {
+    particles.push(...r.particles);
+  }
+
+  updateSpeedLines();
 }
 
 function draw() {
-    // Background
-    ctx.fillStyle = '#1a1a1a';
-    ctx.fillRect(0, 0, width, height);
+  drawBackground();
 
-    // Draw Floor
-    ctx.fillStyle = '#333';
-    ctx.fillRect(0, height - 50, width, 50);
-    ctx.strokeStyle = '#555';
-    ctx.beginPath();
-    ctx.moveTo(0, height - 50);
-    ctx.lineTo(width, height - 50);
-    ctx.stroke();
+  // Draw course elements
+  for (let s of seesaws) s.draw();
+  for (let t of trampolines) t.draw();
+  for (let sl of swingingLogs) sl.draw();
 
-    // Draw Obstacles
-    obstacles.forEach(obs => obs.draw(ctx));
+  // Draw ragdolls
+  for (let r of ragdolls) r.draw();
 
-    // Draw Ragdolls
-    ragdolls.forEach(r => r.draw(ctx));
+  drawSpeedLines();
+  drawSlowMoOverlay();
+
+  // Title
+  ctx.fillStyle = 'rgba(255,255,255,0.15)';
+  ctx.font = 'bold 14px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('RAGDOLL DOJO', 15, 25);
+  ctx.textAlign = 'right';
+  ctx.fillText(`ragdolls: ${ragdolls.length}`, W - 15, 25);
 }
 
 function loop() {
-    update();
-    draw();
-    requestAnimationFrame(loop);
+  update();
+  draw();
+  frameCount++;
+  requestAnimationFrame(loop);
 }
 
-// --- Initialization ---
-window.addEventListener('resize', resize);
-resize();
+buildCourse();
 loop();
-
 </script>
 </body>
 </html>

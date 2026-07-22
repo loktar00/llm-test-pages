@@ -1,271 +1,335 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Flowing Cloth Ribbons</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background-color: #050510;
-        }
-        canvas {
-            display: block;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Flowing Cloth Ribbons</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a12; }
+  canvas { display: block; width: 100%; height: 100%; }
+</style>
 </head>
 <body>
-    <canvas id="c"></canvas>
-    <script>
-        const canvas = document.getElementById('c');
-        const ctx = canvas.getContext('2d');
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
 
-        let width, height;
-        let time = 0;
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
 
-        // Configuration
-        const RIBBON_COUNT = 5;
-        const SEGMENT_HEIGHT = 15;
-        const GRAVITY = 0.5;
-        const FRICTION = 0.96;
-        const STIFFNESS = 0.8; // Higher is more rigid
-        
-        // Colors for the 5 ribbons
-        const PALETTES = [
-            { r: 60, g: 100, b: 200, a: 0.85 }, // Blue
-            { r: 180, g: 50, b: 200, a: 0.85 }, // Purple
-            { r: 220, g: 60, b: 120, a: 0.85 }, // Pink/Red
-            { r: 40, g: 180, b: 160, a: 0.85 }, // Teal
-            { r: 240, g: 180, b: 60, a: 0.85 }  // Gold
-        ];
+const NUM_RIBBONS = 5;
+const SEGMENTS_PER_RIBBON = 60;
+const RIBBON_WIDTH = 38;
+const GRAVITY = 0.15;
+const DAMPING = 0.985;
+const CONSTRAINT_ITERATIONS = 8;
 
-        class Point {
-            constructor(x, y) {
-                this.x = x;
-                this.y = y;
-                this.oldX = x;
-                this.oldY = y;
-            }
+const ribbonConfigs = [
+  { hue: 200, sat: 70, light: 45, lightDir: 0.8, phaseOff: 0 },
+  { hue: 280, sat: 60, light: 50, lightDir: 0.6, phaseOff: 1.2 },
+  { hue: 340, sat: 65, light: 48, lightDir: 0.9, phaseOff: 2.4 },
+  { hue: 160, sat: 55, light: 42, lightDir: 0.7, phaseOff: 3.6 },
+  { hue: 30,  sat: 75, light: 52, lightDir: 1.0, phaseOff: 4.8 },
+];
 
-            update() {
-                const vx = (this.x - this.oldX) * FRICTION;
-                const vy = (this.y - this.oldY) * FRICTION;
+class Segment {
+  constructor(x, y) {
+    this.x = x;
+    this.y = y;
+    this.oldX = x;
+    this.oldY = y;
+  }
+}
 
-                this.oldX = this.x;
-                this.oldY = this.y;
+class Ribbon {
+  constructor(index) {
+    const cfg = ribbonConfigs[index];
+    this.cfg = cfg;
+    this.segments = [];
+    this.numSeg = SEGMENTS_PER_RIBBON;
+    const spacing = H / (this.numSeg - 1);
+    const baseX = (W * 0.12) + (index * (W * 0.8 / (NUM_RIBBONS - 1)));
 
-                this.x += vx;
-                this.y += vy + GRAVITY;
-            }
+    for (let i = 0; i < this.numSeg; i++) {
+      const seg = new Segment(baseX, i * spacing);
+      this.segments.push(seg);
+    }
+  }
 
-            constrain() {
-                // Pin the top point (first segment)
-                // We don't physically pin it to a coordinate, but we reset its velocity/position relative to the anchor
-                // Actually, for a hanging cloth, the top point shouldn't move in X/Y, but let's let it sway slightly with the wind anchor
-                return; // Logic handled in Ribbon class for the anchor
-            }
-        }
+  applyWind(time, dt) {
+    const cfg = this.cfg;
+    const t = time * 0.0004;
 
-        class Ribbon {
-            constructor(index, total, startX, startY) {
-                this.points = [];
-                this.index = index;
-                this.total = total;
-                
-                // Calculate start position spread evenly across screen width
-                const spacing = width / (total + 1);
-                const x = spacing * (index + 1);
-                const y = startY;
+    for (let i = 0; i < this.numSeg; i++) {
+      const seg = this.segments[i];
+      const normalizedY = i / (this.numSeg - 1);
 
-                this.segmentCount = Math.floor(height / SEGMENT_HEIGHT);
+      // Base wind - gentle sway
+      const baseWind = Math.sin(t * 1.2 + normalizedY * 2.5 + cfg.phaseOff) * 0.8;
 
-                // Create points
-                for (let i = 0; i < this.segmentCount; i++) {
-                    this.points.push(new Point(x, y + i * SEGMENT_HEIGHT));
-                }
+      // Slow gust wave
+      const gustPhase = Math.sin(t * 0.3 + normalizedY * 0.8 + cfg.phaseOff * 0.5);
+      const gustStrength = Math.pow(Math.max(0, gustPhase), 3) * 3.5;
 
-                // Wind phase offset
-                this.windOffsetX = index * 1.5;
-                this.windOffsetY = index * 0.2;
-            }
+      // Secondary ripple wave
+      const ripple = Math.sin(t * 2.0 - normalizedY * 4.0 + cfg.phaseOff * 1.5) * 0.4;
 
-            update(windField) {
-                const topPoint = this.points[0];
-                
-                // Anchor top point to a swaying position
-                const anchorX = topPoint.x; // Keep anchor X fixed to the ribbon's start X
-                const anchorY = topPoint.y; // Keep anchor Y fixed
+      // Gust propagation - delay based on height
+      const gustDelay = Math.sin(t * 0.5 + normalizedY * 1.5);
+      const gust = Math.pow(Math.max(0, gustDelay), 2) * 4.0;
 
-                // 1. Update Physics (Verlet)
-                for (let p of this.points) {
-                    p.update();
-                }
+      const totalWind = baseWind + gustStrength + ripple + gust;
 
-                // 2. Apply Wind Force
-                // We pass the wind field value for the specific point's Y position
-                for (let i = 0; i < this.points.length; i++) {
-                    const p = this.points[i];
-                    const windVal = windField(p.x, p.y, time, i);
-                    
-                    // Apply wind as a force to velocity (implicit in Verlet via position change)
-                    // We add directly to X velocity approximation
-                    p.x += windVal;
-                }
+      // Wind affects current position directly (force-like)
+      const windForceX = totalWind * (1.0 - normalizedY * 0.3);
 
-                // 3. Constraints (Cloth)
-                // Solve distance constraints multiple times for rigidity
-                for (let iter = 0; iter < 3; iter++) {
-                    
-                    // Anchor constraint
-                    this.points[0].x = anchorX;
-                    this.points[0].y = anchorY;
+      seg.x += windForceX * dt;
+      seg.y += Math.sin(t + normalizedY * 3.0) * 0.05 * (1.0 - normalizedY);
+    }
+  }
 
-                    // Segment constraints
-                    for (let i = 0; i < this.points.length - 1; i++) {
-                        const p1 = this.points[i];
-                        const p2 = this.points[i + 1];
+  constrain() {
+    // Anchor top
+    const anchor = this.segments[0];
+    anchor.oldX = anchor.x;
+    anchor.oldY = anchor.y;
 
-                        const dx = p2.x - p1.x;
-                        const dy = p2.y - p1.y;
-                        const dist = Math.sqrt(dx * dx + dy * dy);
-                        const diff = (SEGMENT_HEIGHT - dist) / dist * STIFFNESS;
+    // Distance constraints
+    const spacing = H / (this.numSeg - 1);
+    for (let iter = 0; iter < CONSTRAINT_ITERATIONS; iter++) {
+      for (let i = 1; i < this.numSeg; i++) {
+        const curr = this.segments[i];
+        const prev = this.segments[i - 1];
 
-                        const offsetX = dx * diff;
-                        const offsetY = dy * diff;
+        const dx = curr.x - prev.x;
+        const dy = curr.y - prev.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const diff = (dist - spacing) / dist;
 
-                        // Move p1 (unless it's the anchor)
-                        if (i !== 0) {
-                            p1.x -= offsetX * 0.5;
-                            p1.y -= offsetY * 0.5;
-                        }
+        const offsetX = dx * diff * 0.5;
+        const offsetY = dy * diff * 0.5;
 
-                        // Move p2
-                        p2.x += offsetX * 0.5;
-                        p2.y += offsetY * 0.5;
-                    }
-                }
-            }
+        curr.x += offsetX;
+        curr.y += offsetY;
+        prev.x -= offsetX;
+        prev.y -= offsetY;
+      }
+    }
 
-            draw(ctx) {
-                const color = PALETTES[this.index];
-                
-                // Draw each segment
-                for (let i = 0; i < this.points.length - 1; i++) {
-                    const p1 = this.points[i];
-                    const p2 = this.points[i + 1];
+    // Apply velocity damping via Verlet
+    for (let i = 1; i < this.numSeg; i++) {
+      const seg = this.segments[i];
+      const vx = (seg.x - seg.oldX) * DAMPING;
+      const vy = (seg.y - seg.oldY) * DAMPING;
+      seg.oldX = seg.x - vx;
+      seg.oldY = seg.y - vy;
+    }
+  }
 
-                    // Vector of the segment
-                    const dx = p2.x - p1.x;
-                    const dy = p2.y - p1.y;
-                    
-                    // Normal vector (perpendicular) for lighting calculations
-                    const len = Math.sqrt(dx*dx + dy*dy);
-                    if(len === 0) continue;
-                    
-                    const nx = -dy / len;
-                    const ny = dx / len;
+  updatePositions() {
+    for (let i = 1; i < this.numSeg; i++) {
+      const seg = this.segments[i];
+      const vx = seg.x - seg.oldX;
+      const vy = seg.y - seg.oldY;
+      seg.oldX = seg.x;
+      seg.oldY = seg.y;
+      seg.x += vx;
+      seg.y += vy;
+    }
+  }
 
-                    // Light direction (0, -1) is straight down (top of screen)
-                    // We want to see the "front" of the ribbon when it bends towards top/left
-                    // Dot product of Normal and Light
-                    const dot = (nx * 0) + (ny * -1); // Light from top
-                    
-                    // Sheen calculation: 0 to 1
-                    const light = Math.max(0, dot);
-                    
-                    // Base color vs Highlight color
-                    const r = Math.min(255, color.r + light * 100);
-                    const g = Math.min(255, color.g + light * 120);
-                    const b = Math.min(255, color.b + light * 150);
+  draw(ctx, time) {
+    const cfg = this.cfg;
+    const lightAngle = cfg.lightDir;
 
-                    ctx.beginPath();
-                    ctx.moveTo(p1.x, p1.y);
-                    ctx.lineTo(p2.x, p2.y);
-                    
-                    // Thickness: slightly thinner at the bottom for perspective
-                    const thickness = 20 - (i / this.points.length) * 10;
-                    ctx.lineWidth = thickness;
-                    
-                    ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${color.a})`;
-                    ctx.lineCap = 'round';
-                    ctx.lineJoin = 'round';
-                    ctx.stroke();
+    // Build left and right edge points
+    const leftEdge = [];
+    const rightEdge = [];
 
-                    // Optional: Draw a subtle specular highlight line
-                    if (light > 0.8) {
-                        ctx.beginPath();
-                        ctx.moveTo(p1.x, p1.y);
-                        ctx.lineTo(p2.x, p2.y);
-                        ctx.strokeStyle = `rgba(255, 255, 255, ${light * 0.4})`;
-                        ctx.lineWidth = thickness * 0.3;
-                        ctx.stroke();
-                    }
-                }
-            }
-        }
+    for (let i = 0; i < this.numSeg; i++) {
+      const seg = this.segments[i];
 
-        let ribbons = [];
+      let nx = 0, ny = 0;
+      if (i < this.numSeg - 1) {
+        const dx = this.segments[i + 1].x - seg.x;
+        const dy = this.segments[i + 1].y - seg.y;
+        const len = Math.sqrt(dx * dx + dy * dy) || 1;
+        nx = -dy / len;
+        ny = dx / len;
+      } else {
+        const dx = seg.x - this.segments[i - 1].x;
+        const dy = seg.y - this.segments[i - 1].y;
+        const len = Math.sqrt(dx * dx + dy * dy) || 1;
+        nx = -dy / len;
+        ny = dx / len;
+      }
 
-        function init() {
-            resize();
-            ribbons = [];
-            for (let i = 0; i < RIBBON_COUNT; i++) {
-                ribbons.push(new Ribbon(i, RIBBON_COUNT, 0, 0));
-            }
-        }
+      // Normalize normal
+      const nlen = Math.sqrt(nx * nx + ny * ny) || 1;
+      nx /= nlen;
+      ny /= nlen;
 
-        function resize() {
-            width = canvas.width = window.innerWidth;
-            height = canvas.height = window.innerHeight;
-        }
+      // Width variation
+      const normY = i / (this.numSeg - 1);
+      const widthMod = RIBBON_WIDTH * (0.7 + 0.3 * Math.sin(normY * Math.PI));
 
-        function getWind(x, y, t, index) {
-            // Procedural wind field
-            // Combines sine waves for smooth, organic movement
-            
-            // Wave 1: Slow horizontal swell
-            const wave1 = Math.sin(y * 0.005 + t * 0.8);
-            
-            // Wave 2: Faster ripple
-            const wave2 = Math.sin(y * 0.02 + t * 1.5);
-            
-            // Wave 3: Sudden gusts (Gaussian-ish envelope)
-            const gust = Math.sin(t * 0.2 + index) * Math.cos(y * 0.01 - t * 0.5);
+      leftEdge.push({ x: seg.x + nx * widthMod * 0.5, y: seg.y + ny * widthMod * 0.5 });
+      rightEdge.push({ x: seg.x - nx * widthMod * 0.5, y: seg.y - ny * widthMod * 0.5 });
+    }
 
-            // Combine
-            let force = (wave1 * 2) + (wave2 * 1) + (gust * 3);
-            
-            // Increase force slightly towards the bottom (momentum)
-            force *= (1 + y * 0.0005);
-            
-            return force;
-        }
+    // Draw ribbon as filled path with gradient per segment
+    for (let i = 0; i < this.numSeg - 1; i++) {
+      const a = leftEdge[i];
+      const b = rightEdge[i];
+      const c = rightEdge[i + 1];
+      const d = leftEdge[i + 1];
 
-        function loop() {
-            // Trail effect
-            ctx.fillStyle = 'rgba(5, 5, 16, 0.3)'; // Dark background with transparency
-            ctx.fillRect(0, 0, width, height);
+      const normY = i / (this.numSeg - 1);
 
-            time += 0.03;
+      // Segment orientation for shading
+      const seg = this.segments[i];
+      const nextSeg = this.segments[i + 1];
+      const dx = nextSeg.x - seg.x;
+      const dy = nextSeg.y - seg.y;
+      const segLen = Math.sqrt(dx * dx + dy * dy) || 1;
+      const segAngle = Math.atan2(dy, dx);
 
-            // Update and Draw Ribbons
-            // We update based on the current time and the specific Y coordinate of each point
-            for (let ribbon of ribbons) {
-                ribbon.update(getWind);
-                ribbon.draw(ctx);
-            }
+      // Light direction
+      const lightDirX = Math.cos(lightAngle);
+      const lightDirY = Math.sin(lightAngle);
 
-            requestAnimationFrame(loop);
-        }
+      // Normal of segment surface
+      const surfNx = -dy / segLen;
+      const surfNy = dx / segLen;
 
-        window.addEventListener('resize', resize);
-        init();
-        loop();
+      // Dot product with light
+      const dot = surfNx * lightDirX + surfNy * lightDirY;
+      const sheen = Math.max(0, dot);
+      const baseLight = 0.3 + 0.7 * (0.5 + 0.5 * Math.sin(normY * Math.PI * 2));
 
-    </script>
+      const brightness = Math.min(1, baseLight + sheen * 0.6);
+
+      const h = cfg.hue;
+      const s = cfg.sat;
+      const l = cfg.light * brightness;
+
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.lineTo(c.x, c.y);
+      ctx.lineTo(d.x, d.y);
+      ctx.closePath();
+
+      ctx.fillStyle = `hsl(${h}, ${s}%, ${l}%)`;
+      ctx.fill();
+
+      // Subtle edge highlight
+      ctx.strokeStyle = `hsla(${h}, ${s - 10}%, ${l + 15}%, 0.3)`;
+      ctx.lineWidth = 0.5;
+      ctx.stroke();
+    }
+
+    // Draw connecting line for smoothness
+    ctx.beginPath();
+    ctx.moveTo(leftEdge[0].x, leftEdge[0].y);
+    for (let i = 1; i < leftEdge.length; i++) {
+      ctx.lineTo(leftEdge[i].x, leftEdge[i].y);
+    }
+    ctx.strokeStyle = `hsla(${cfg.hue}, ${cfg.sat}%, ${cfg.light + 10}%, 0.15)`;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(rightEdge[0].x, rightEdge[0].y);
+    for (let i = 1; i < rightEdge.length; i++) {
+      ctx.lineTo(rightEdge[i].x, rightEdge[i].y);
+    }
+    ctx.stroke();
+
+    // Sheen highlight along the ribbon
+    ctx.beginPath();
+    for (let i = 0; i < this.numSeg - 1; i++) {
+      const seg = this.segments[i];
+      const nextSeg = this.segments[i + 1];
+      const dx = nextSeg.x - seg.x;
+      const dy = nextSeg.y - seg.y;
+      const segLen = Math.sqrt(dx * dx + dy * dy) || 1;
+      const dot = (-dy / segLen) * Math.cos(lightAngle) + (dx / segLen) * Math.sin(lightAngle);
+
+      if (dot > 0.3) {
+        const alpha = (dot - 0.3) * 0.4;
+        const midX = (seg.x + nextSeg.x) / 2;
+        const midY = (seg.y + nextSeg.y) / 2;
+        if (i === 0) ctx.moveTo(midX, midY);
+        else ctx.lineTo(midX, midY);
+      }
+    }
+    ctx.strokeStyle = `hsla(${cfg.hue}, ${cfg.sat + 10}%, 85%, 0.25)`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+}
+
+const ribbons = [];
+for (let i = 0; i < NUM_RIBBONS; i++) {
+  ribbons.push(new Ribbon(i));
+}
+
+let lastTime = 0;
+function animate(time) {
+  const dt = Math.min((time - lastTime) / 16.67, 3);
+  lastTime = time;
+
+  ctx.clearRect(0, 0, W, H);
+
+  // Background gradient
+  const bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+  bgGrad.addColorStop(0, '#0d0d1a');
+  bgGrad.addColorStop(0.5, '#12122a');
+  bgGrad.addColorStop(1, '#0a0a14');
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Subtle ambient light
+  const ambGrad = ctx.createRadialGradient(W * 0.5, H * 0.3, 0, W * 0.5, H * 0.3, H * 0.8);
+  ambGrad.addColorStop(0, 'rgba(100, 100, 180, 0.04)');
+  ambGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  ctx.fillStyle = ambGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  for (const ribbon of ribbons) {
+    ribbon.applyWind(time, dt);
+    ribbon.constrain();
+    ribbon.updatePositions();
+  }
+
+  // Draw ribbons back to front
+  for (const ribbon of ribbons) {
+    ribbon.draw(ctx, time);
+  }
+
+  // Draw subtle connection lines at top
+  ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+  ctx.lineWidth = 1;
+  for (const ribbon of ribbons) {
+    ctx.beginPath();
+    const seg = ribbon.segments[0];
+    ctx.moveTo(seg.x - 2, seg.y);
+    ctx.lineTo(seg.x + 2, seg.y);
+    ctx.stroke();
+  }
+
+  requestAnimationFrame(animate);
+}
+
+requestAnimationFrame(animate);
+</script>
 </body>
 </html>

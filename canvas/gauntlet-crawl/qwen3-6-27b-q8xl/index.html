@@ -2,919 +2,1177 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Gauntlet Crawl</title>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: #000; overflow: hidden; }
-  canvas { display: block; width: 100vw; height: 100vh; image-rendering: pixelated; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; width: 100%; height: 100%; }
 </style>
 </head>
 <body>
-<canvas id="gc"></canvas>
+<canvas id="c"></canvas>
 <script>
 window.ASSET_MANIFEST = {
-  floor:     { file: "assets/floor.png",     prompt: "seamless 512x512 dungeon stone floor tile, top-down view, dark gray cobblestone pattern, subtle cracks and moss, fantasy game asset, neutral lighting, no borders" },
-  wall:      { file: "assets/wall.png",      prompt: "seamless 512x512 dungeon wall tile, top-down view, dark gray stone blocks with mortar lines, subtle shadow on bottom edge, fantasy game asset, neutral lighting, no borders" },
-  hero:      { file: "assets/hero.png",      prompt: "top-down knight hero sprite, 64x64 centered, wearing golden armor and blue cape, holding a sword, plain dark background, pixel art style, fantasy game asset, facing forward" },
-  ghost:     { file: "assets/ghost.png",      prompt: "top-down ghost enemy sprite, 48x48 centered, translucent pale green ghost with glowing red eyes and flowing bottom, plain dark background, pixel art style, fantasy game asset" },
-  grunt:     { file: "assets/grunt.png",      prompt: "top-down orc grunt enemy sprite, 48x48 centered, green skin, brown armor, holding a club, plain dark background, pixel art style, fantasy game asset, facing forward" },
-  generator: { file: "assets/generator.png", prompt: "top-down monster generator portal, 64x64 centered, swirling purple vortex with dark rim and glowing particles, plain dark background, pixel art style, fantasy game asset" },
-  key:       { file: "assets/key.png",       prompt: "top-down golden key sprite, 32x32 centered, ornate fantasy key with round bow and single tooth, glowing golden aura, plain dark background, pixel art style, game asset" },
-  food:      { file: "assets/food.png",       prompt: "top-down food item sprite, 32x32 centered, golden bread loaf with warm glow, plain dark background, pixel art style, fantasy game asset" },
-  treasure:  { file: "assets/treasure.png",  prompt: "top-down treasure chest sprite, 32x32 centered, open wooden chest overflowing with gold coins and gems, warm golden glow, plain dark background, pixel art style, game asset" },
-  exit:      { file: "assets/exit.png",      prompt: "top-down dungeon exit stairway, 64x64 centered, descending stone spiral staircase with blue magical glow, plain dark background, pixel art style, fantasy game asset" }
+  floor:     { file: "assets/floor.png",     prompt: "Top-down seamless dungeon floor tile, stone brick pattern with subtle cracks and moss, dark gray and brown palette, 512x512 pixels, game asset, isometric-free orthographic view, RPG dungeon crawler style" },
+  wall:      { file: "assets/wall.png",      prompt: "Top-down seamless dungeon wall tile, rough hewn stone blocks with mortar lines, dark charcoal and slate gray palette, 512x512 pixels, game asset, orthographic view, medieval fantasy dungeon style" },
+  hero:      { file: "assets/hero.png",      prompt: "Top-down view hero knight sprite, centered on plain dark background, wearing golden armor with red cape, holding sword and shield, pixel art style, 64x64 pixels, game asset, fantasy RPG character" },
+  ghost:     { file: "assets/ghost.png",      prompt: "Top-down view translucent ghost enemy sprite, centered on plain dark background, pale blue glowing apparition with flowing form and menacing eyes, 64x64 pixels, game asset, arcade dungeon crawler style" },
+  grunt:     { file: "assets/grunt.png",       prompt: "Top-down view orc grunt enemy sprite, centered on plain dark background, green-skinned humanoid with crude armor and club, 64x64 pixels, game asset, fantasy dungeon crawler style" },
+  generator: { file: "assets/generator.png", prompt: "Top-down view monster generator portal, centered on plain dark background, dark swirling vortex with purple and black energy, pulsating magical circle, 64x64 pixels, game asset, fantasy dungeon style" },
+  key:       { file: "assets/key.png",       prompt: "Top-down view golden skeleton key, centered on plain dark background, ornate medieval key with skull bow and intricate bit, glowing gold, 64x64 pixels, game asset, fantasy RPG collectible" },
+  food:      { file: "assets/food.png",       prompt: "Top-down view magical healing food item, centered on plain dark background, glowing red apple with golden aura, 64x64 pixels, game asset, fantasy RPG collectible, pixel art style" },
+  treasure:  { file: "assets/treasure.png",  prompt: "Top-down view treasure chest, centered on plain dark background, ornate golden chest with jewels and lock, slightly open revealing glowing contents, 64x64 pixels, game asset, fantasy RPG collectible" },
+  exit:      { file: "assets/exit.png",      prompt: "Top-down view dungeon exit stairway, centered on plain dark background, descending stone spiral staircase with blue magical glow, 64x64 pixels, game asset, fantasy dungeon crawler style" }
 };
 
-const canvas = document.getElementById('gc');
-const ctx = canvas.getContext('2d');
+(function() {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
 
-// --- Constants ---
-const TILE = 40;
-const MAP_W = 40, MAP_H = 30;
-const PLAYER_SPEED = 180;
-const PROJ_SPEED = 400;
-const GHOST_SPEED = 55;
-const GRUNT_SPEED = 70;
-const GEN_HP = 4;
-const GRUNT_HP = 2;
-const GHOST_HP = 1;
-const HEALTH_DRAIN_RATE = 0.3;
-const MAX_HEALTH = 100;
-const INACTIVITY_TIMEOUT = 10000;
-
-// --- Asset Loading ---
-const assets = {};
-for (const [key, val] of Object.entries(window.ASSET_MANIFEST)) {
-  const img = new Image();
-  img.src = val.file;
-  img.onload = () => { assets[key] = img; };
-  img.onerror = () => {};
-}
-
-// --- Input ---
-const keys = {};
-let lastInputTime = 0;
-let playerControl = false;
-
-window.addEventListener('keydown', e => {
-  keys[e.code] = true;
-  lastInputTime = Date.now();
-  if (!playerControl) playerControl = true;
-});
-window.addEventListener('keyup', e => { keys[e.code] = false; });
-window.addEventListener('touchstart', () => {
-  lastInputTime = Date.now();
-  if (!playerControl) playerControl = true;
-});
-
-// --- Noise & Maze ---
-function seededRandom(seed) {
-  let s = seed;
-  return () => { s = (s * 16807 + 0) % 2147483647; return (s - 1) / 2147483646; };
-}
-
-function generateMaze(level) {
-  const rng = seededRandom(level * 1337 + 42);
-  const grid = [];
-  for (let y = 0; y < MAP_H; y++) {
-    grid[y] = [];
-    for (let x = 0; x < MAP_W; x++) {
-      grid[y][x] = 1; // wall
-    }
+  // --- Asset Loading ---
+  const assets = {};
+  for (const [slot, info] of Object.entries(window.ASSET_MANIFEST)) {
+    const img = new Image();
+    img.onload = () => { assets[slot] = img; };
+    img.onerror = () => { assets[slot] = null; };
+    img.src = info.file;
   }
 
-  // Recursive backtracker
-  const visited = Array.from({length: MAP_H}, () => Array(MAP_W).fill(false));
-  const stack = [];
+  // --- Constants ---
+  const TILE = 32;
+  const MAP_W = 40, MAP_H = 30;
+  const WALL = 0, FLOOR = 1, DOOR = 2, EXIT = 3;
+  const HERO_SPEED = 2;
+  const PROJ_SPEED = 6;
+  const GHOST_SPEED = 1.2;
+  const GRUNT_SPEED = 0.8;
+  const GEN_SPAWN_INTERVAL = 180;
+  const HEALTH_DRAIN_RATE = 60;
+  const MAX_HEALTH = 100;
+  const GAME_OVER_DURATION = 120;
 
-  function carve(x, y) {
-    visited[y][x] = true;
-    grid[y][x] = 0;
-    const dirs = [[0,-2],[0,2],[-2,0],[2,0]].sort(() => rng() - 0.5);
-    for (const [dx, dy] of dirs) {
-      const nx = x + dx, ny = y + dy;
-      if (nx > 0 && nx < MAP_W-1 && ny > 0 && ny < MAP_H-1 && !visited[ny][nx]) {
-        grid[y + dy/2][x + dx/2] = 0;
+  // --- Game State ---
+  let map, hero, enemies, projectiles, items, generators, particles;
+  let score, keys, level, health, gameState, gameTimer;
+  let lastTime, frameCount;
+  let camera = { x: 0, y: 0 };
+  let input = { up: false, down: false, left: false, right: false, shoot: false };
+  let humanControl = false;
+  let humanActiveTime = 0;
+  let gameOverTimer = 0;
+  let genSpawnTimers = {};
+  let aiTarget = null;
+  let aiPath = [];
+  let aiPathTimer = 0;
+  let aiShootTimer = 0;
+  let screenShake = 0;
+  let flashAlpha = 0;
+  let levelTransition = 0;
+
+  function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // --- Maze Generation ---
+  function generateMaze() {
+    map = [];
+    for (let y = 0; y < MAP_H; y++) {
+      map[y] = [];
+      for (let x = 0; x < MAP_W; x++) {
+        map[y][x] = WALL;
+      }
+    }
+
+    // Recursive backtracking
+    const visited = Array.from({ length: MAP_H }, () => Array(MAP_W).fill(false));
+    const stack = [];
+
+    function carve(x, y) {
+      visited[y][x] = true;
+      map[y][x] = FLOOR;
+    }
+
+    const dirs = [[0,-2],[0,2],[-2,0],[2,0]];
+    const startCX = 1, startCY = 1;
+    carve(startCX, startCY);
+    stack.push([startCX, startCY]);
+
+    while (stack.length > 0) {
+      const [cx, cy] = stack[stack.length - 1];
+      const neighbors = [];
+      for (const [dx, dy] of dirs) {
+        const nx = cx + dx, ny = cy + dy;
+        if (nx > 0 && nx < MAP_W - 1 && ny > 0 && ny < MAP_H - 1 && !visited[ny][nx]) {
+          neighbors.push([nx, ny, dx, dy]);
+        }
+      }
+      if (neighbors.length > 0) {
+        const [nx, ny, dx, dy] = neighbors[Math.floor(Math.random() * neighbors.length)];
+        map[cy + dy/2][cx + dx/2] = FLOOR;
         carve(nx, ny);
-        return;
+        stack.push([nx, ny]);
+      } else {
+        stack.pop();
       }
     }
-  }
 
-  carve(1, 1);
-
-  // Open up some extra passages for loops
-  for (let i = 0; i < MAP_W * MAP_H * 0.08; i++) {
-    const x = 1 + Math.floor(rng() * (MAP_W - 2));
-    const y = 1 + Math.floor(rng() * (MAP_H - 2));
-    if (grid[y][x] === 1) {
-      let adj = 0;
-      if (y > 0 && grid[y-1][x] === 0) adj++;
-      if (y < MAP_H-1 && grid[y+1][x] === 0) adj++;
-      if (x > 0 && grid[y][x-1] === 0) adj++;
-      if (x < MAP_W-1 && grid[y][x+1] === 0) adj++;
-      if (adj >= 2) grid[y][x] = 0;
-    }
-  }
-
-  return grid;
-}
-
-function findFloorTiles(grid) {
-  const tiles = [];
-  for (let y = 1; y < MAP_H-1; y++)
-    for (let x = 1; x < MAP_W-1; x++)
-      if (grid[y][x] === 0) tiles.push({x, y});
-  return tiles;
-}
-
-function dist(a, b) { return Math.abs(a.x - b.x) + Math.abs(a.y - b.y); }
-
-// --- Game State ---
-let level = 1;
-let score = 0;
-let health = MAX_HEALTH;
-let keysCollected = 0;
-let grid = [];
-let exitPos = {x: 0, y: 0};
-let player = {x: 1.5, y: 1.5, dir: 0, shootTimer: 0, invuln: 0};
-let projectiles = [];
-let enemies = [];
-let generators = [];
-let items = [];
-let particles = [];
-let lastTime = 0;
-let spawnTimer = 0;
-
-function initLevel() {
-  grid = generateMaze(level);
-  const floors = findFloorTiles(grid);
-  
-  // Player start
-  player.x = 1.5;
-  player.y = 1.5;
-  player.dir = 0;
-  player.shootTimer = 0;
-  player.invuln = 0;
-
-  // Exit far from player
-  let bestExit = floors[0];
-  let bestDist = 0;
-  for (const t of floors) {
-    const d = dist(t, {x:1, y:1});
-    if (d > bestDist && t.x > MAP_W/3 && t.y > MAP_H/3) {
-      bestDist = d;
-      bestExit = t;
-    }
-  }
-  exitPos = bestExit;
-
-  projectiles = [];
-  enemies = [];
-  generators = [];
-  items = [];
-  particles = [];
-  keysCollected = 0;
-
-  // Place generators
-  const genCount = 2 + Math.floor(level * 0.5);
-  const used = new Set();
-  used.add('1,1');
-  used.add(`${exitPos.x},${exitPos.y}`);
-  
-  for (let i = 0; i < genCount; i++) {
-    let attempts = 0;
-    while (attempts < 200) {
-      const t = floors[Math.floor(Math.random() * floors.length)];
-      const k = `${t.x},${t.y}`;
-      if (!used.has(k) && dist(t, {x:1, y:1}) > 8) {
-        generators.push({x: t.x + 0.5, y: t.y + 0.5, hp: GEN_HP, type: Math.random() < 0.5 ? 'ghost' : 'grunt'});
-        used.add(k);
-        break;
-      }
-      attempts++;
-    }
-  }
-
-  // Place keys
-  const keyCount = 1 + Math.floor(level / 3);
-  for (let i = 0; i < keyCount; i++) {
-    let attempts = 0;
-    while (attempts < 200) {
-      const t = floors[Math.floor(Math.random() * floors.length)];
-      const k = `${t.x},${t.y}`;
-      if (!used.has(k)) {
-        items.push({x: t.x + 0.5, y: t.y + 0.5, type: 'key'});
-        used.add(k);
-        break;
-      }
-      attempts++;
-    }
-  }
-
-  // Place food
-  const foodCount = 3 + Math.floor(Math.random() * 3);
-  for (let i = 0; i < foodCount; i++) {
-    let attempts = 0;
-    while (attempts < 200) {
-      const t = floors[Math.floor(Math.random() * floors.length)];
-      const k = `${t.x},${t.y}`;
-      if (!used.has(k)) {
-        items.push({x: t.x + 0.5, y: t.y + 0.5, type: 'food'});
-        used.add(k);
-        break;
-      }
-      attempts++;
-    }
-  }
-
-  // Place treasure
-  const treasureCount = 3 + Math.floor(Math.random() * 4);
-  for (let i = 0; i < treasureCount; i++) {
-    let attempts = 0;
-    while (attempts < 200) {
-      const t = floors[Math.floor(Math.random() * floors.length)];
-      const k = `${t.x},${t.y}`;
-      if (!used.has(k)) {
-        items.push({x: t.x + 0.5, y: t.y + 0.5, type: 'treasure'});
-        used.add(k);
-        break;
-      }
-      attempts++;
-    }
-  }
-}
-
-function canMove(x, y, radius) {
-  const r = radius || 0.3;
-  return grid[Math.floor(y - r)]?.[Math.floor(x - r)] === 0 &&
-         grid[Math.floor(y - r)]?.[Math.floor(x + r)] === 0 &&
-         grid[Math.floor(y + r)]?.[Math.floor(x - r)] === 0 &&
-         grid[Math.floor(y + r)]?.[Math.floor(x + r)] === 0;
-}
-
-function addParticles(x, y, color, count) {
-  for (let i = 0; i < count; i++) {
-    particles.push({
-      x, y,
-      vx: (Math.random() - 0.5) * 120,
-      vy: (Math.random() - 0.5) * 120,
-      life: 0.3 + Math.random() * 0.4,
-      color,
-      size: 2 + Math.random() * 3
-    });
-  }
-}
-
-// --- Drawing Functions ---
-function drawTile(type, x, y, s) {
-  if (assets[type]) {
-    ctx.drawImage(assets[type], x * s, y * s, s, s);
-    return;
-  }
-  if (type === 'floor') {
-    ctx.fillStyle = '#2a2a35';
-    ctx.fillRect(x * s, y * s, s, s);
-    ctx.fillStyle = '#252530';
-    ctx.fillRect(x * s + 1, y * s + 1, s - 2, s - 2);
-    ctx.strokeStyle = '#333340';
-    ctx.lineWidth = 0.5;
-    ctx.strokeRect(x * s + 0.5, y * s + 0.5, s - 1, s - 1);
-  } else if (type === 'wall') {
-    ctx.fillStyle = '#4a4a5a';
-    ctx.fillRect(x * s, y * s, s, s);
-    ctx.fillStyle = '#555568';
-    ctx.fillRect(x * s + 2, y * s + 2, s - 4, s - 4);
-    ctx.fillStyle = '#3a3a4a';
-    ctx.fillRect(x * s + s - 3, y * s + 2, 3, s - 4);
-    ctx.fillRect(x * s + 2, y * s + s - 3, s - 4, 3);
-  }
-}
-
-function drawHero(px, py, s) {
-  if (assets.hero) {
-    ctx.drawImage(assets.hero, px * s - s/2, py * s - s/2, s, s);
-    return;
-  }
-  const cx = px * s, cy = py * s;
-  // Body
-  ctx.fillStyle = '#4488cc';
-  ctx.fillRect(cx - s*0.25, cy - s*0.25, s*0.5, s*0.5);
-  // Helmet
-  ctx.fillStyle = '#cccc44';
-  ctx.fillRect(cx - s*0.2, cy - s*0.3, s*0.4, s*0.25);
-  // Cape
-  ctx.fillStyle = '#cc2222';
-  const capeDir = [Math.cos(player.dir), Math.sin(player.dir)];
-  ctx.beginPath();
-  ctx.moveTo(cx - s*0.15, cy + s*0.1);
-  ctx.lineTo(cx + capeDir[0] * s*0.3, cy + capeDir[1] * s*0.3);
-  ctx.lineTo(cx + s*0.15, cy + s*0.1);
-  ctx.fill();
-  // Eyes
-  ctx.fillStyle = '#fff';
-  ctx.fillRect(cx - s*0.08, cy - s*0.18, s*0.06, s*0.06);
-  ctx.fillRect(cx + s*0.02, cy - s*0.18, s*0.06, s*0.06);
-}
-
-function drawEnemy(e, s) {
-  const cx = e.x * s, cy = e.y * s;
-  const type = e.type;
-  
-  if (type === 'ghost' && assets.ghost) {
-    ctx.drawImage(assets.ghost, cx - s/2, cy - s/2, s, s);
-    return;
-  }
-  if (type === 'grunt' && assets.grunt) {
-    ctx.drawImage(assets.grunt, cx - s/2, cy - s/2, s, s);
-    return;
-  }
-
-  if (type === 'ghost') {
-    ctx.globalAlpha = 0.7;
-    ctx.fillStyle = '#88cc44';
-    ctx.beginPath();
-    ctx.arc(cx, cy - s*0.1, s*0.3, Math.PI, 0);
-    ctx.lineTo(cx + s*0.3, cy + s*0.2);
-    for (let i = 0; i < 4; i++) {
-      const wx = cx + s*0.3 - (i+0.5) * s*0.15;
-      ctx.lineTo(wx, cy + s*0.2 + (i%2 ? -s*0.08 : s*0.08));
-    }
-    ctx.lineTo(cx - s*0.3, cy + s*0.2);
-    ctx.fill();
-    // Eyes
-    ctx.fillStyle = '#ff2222';
-    ctx.fillRect(cx - s*0.12, cy - s*0.15, s*0.08, s*0.08);
-    ctx.fillRect(cx + s*0.04, cy - s*0.15, s*0.08, s*0.08);
-    ctx.globalAlpha = 1;
-  } else {
-    // Grunt
-    ctx.fillStyle = '#448833';
-    ctx.fillRect(cx - s*0.25, cy - s*0.25, s*0.5, s*0.5);
-    ctx.fillStyle = '#664422';
-    ctx.fillRect(cx - s*0.3, cy - s*0.15, s*0.6, s*0.12);
-    ctx.fillStyle = '#ffcc44';
-    ctx.fillRect(cx - s*0.1, cy - s*0.2, s*0.08, s*0.08);
-    ctx.fillRect(cx + s*0.02, cy - s*0.2, s*0.08, s*0.08);
-    ctx.fillStyle = '#884422';
-    ctx.fillRect(cx + s*0.2, cy - s*0.05, s*0.15, s*0.08);
-  }
-}
-
-function drawGenerator(g, s) {
-  const cx = g.x * s, cy = g.y * s;
-  if (assets.generator) {
-    ctx.drawImage(assets.generator, cx - s/2, cy - s/2, s, s);
-    return;
-  }
-  const t = Date.now() / 500;
-  ctx.fillStyle = '#220033';
-  ctx.beginPath();
-  ctx.arc(cx, cy, s*0.4, 0, Math.PI*2);
-  ctx.fill();
-  for (let i = 0; i < 6; i++) {
-    const a = t + i * Math.PI / 3;
-    ctx.fillStyle = `hsl(${270 + i*20}, 80%, ${50 + Math.sin(t*2+i)*20}%)`;
-    ctx.beginPath();
-    ctx.arc(cx + Math.cos(a)*s*0.2, cy + Math.sin(a)*s*0.2, s*0.1, 0, Math.PI*2);
-    ctx.fill();
-  }
-  ctx.strokeStyle = '#aa44ff';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(cx, cy, s*0.35, 0, Math.PI*2);
-  ctx.stroke();
-}
-
-function drawItem(item, s) {
-  const cx = item.x * s, cy = item.y * s;
-  const t = Date.now() / 300;
-  const bob = Math.sin(t + item.x * 3) * s * 0.05;
-
-  if (item.type === 'key' && assets.key) {
-    ctx.drawImage(assets.key, cx - s/2, cy - s/2 + bob, s, s);
-    return;
-  }
-  if (item.type === 'food' && assets.food) {
-    ctx.drawImage(assets.food, cx - s/2, cy - s/2 + bob, s, s);
-    return;
-  }
-  if (item.type === 'treasure' && assets.treasure) {
-    ctx.drawImage(assets.treasure, cx - s/2, cy - s/2 + bob, s, s);
-    return;
-  }
-
-  if (item.type === 'key') {
-    ctx.fillStyle = '#ffdd44';
-    ctx.beginPath();
-    ctx.arc(cx, cy + bob - s*0.1, s*0.12, 0, Math.PI*2);
-    ctx.fill();
-    ctx.fillRect(cx - s*0.03, cy + bob, s*0.06, s*0.2);
-    ctx.fillRect(cx + s*0.03, cy + bob + s*0.1, s*0.1, s*0.04);
-    ctx.fillStyle = '#ffee88';
-    ctx.beginPath();
-    ctx.arc(cx, cy + bob - s*0.1, s*0.06, 0, Math.PI*2);
-    ctx.fill();
-  } else if (item.type === 'food') {
-    ctx.fillStyle = '#dd8833';
-    ctx.beginPath();
-    ctx.ellipse(cx, cy + bob, s*0.2, s*0.15, 0, 0, Math.PI*2);
-    ctx.fill();
-    ctx.fillStyle = '#eeaa44';
-    ctx.beginPath();
-    ctx.ellipse(cx, cy + bob - s*0.05, s*0.15, s*0.1, 0, 0, Math.PI*2);
-    ctx.fill();
-  } else if (item.type === 'treasure') {
-    ctx.fillStyle = '#884422';
-    ctx.fillRect(cx - s*0.2, cy + bob - s*0.15, s*0.4, s*0.3);
-    ctx.fillStyle = '#ffcc22';
-    ctx.fillRect(cx - s*0.15, cy + bob - s*0.1, s*0.3, s*0.2);
-    ctx.fillStyle = '#ff4444';
-    ctx.beginPath();
-    ctx.arc(cx - s*0.05, cy + bob, s*0.04, 0, Math.PI*2);
-    ctx.fill();
-    ctx.fillStyle = '#4444ff';
-    ctx.beginPath();
-    ctx.arc(cx + s*0.05, cy + bob + s*0.03, s*0.03, 0, Math.PI*2);
-    ctx.fill();
-  }
-}
-
-function drawExit(s) {
-  const cx = exitPos.x * s + s/2, cy = exitPos.y * s + s/2;
-  if (assets.exit) {
-    ctx.drawImage(assets.exit, exitPos.x * s, exitPos.y * s, s, s);
-    return;
-  }
-  const t = Date.now() / 400;
-  for (let i = 3; i >= 0; i--) {
-    ctx.fillStyle = `rgba(40, 80, 200, ${0.3 + i * 0.15})`;
-    ctx.beginPath();
-    ctx.arc(cx, cy, s*0.35 - i*s*0.08, 0, Math.PI*2);
-    ctx.fill();
-  }
-  ctx.fillStyle = '#4488ff';
-  ctx.beginPath();
-  ctx.arc(cx, cy, s*0.15 + Math.sin(t)*s*0.05, 0, Math.PI*2);
-  ctx.fill();
-  ctx.strokeStyle = '#66aaff';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(cx, cy, s*0.3, 0, Math.PI*2);
-  ctx.stroke();
-}
-
-// --- AI Controller ---
-function aiUpdate(dt) {
-  let dx = 0, dy = 0;
-  
-  // Find nearest interesting target
-  let target = null;
-  let minDist = Infinity;
-  
-  // Prioritize: food (if low health) > keys > treasure > exit > generators > enemies
-  if (health < 40) {
-    for (const item of items) {
-      if (item.type === 'food') {
-        const d = dist(player, item);
-        if (d < minDist) { minDist = d; target = item; }
-      }
-    }
-  }
-  if (!target) {
-    for (const item of items) {
-      if (item.type === 'key') {
-        const d = dist(player, item);
-        if (d < minDist) { minDist = d; target = item; }
-      }
-    }
-  }
-  if (!target) {
-    for (const item of items) {
-      if (item.type === 'treasure') {
-        const d = dist(player, item);
-        if (d < minDist) { minDist = d; target = item; }
-      }
-    }
-  }
-  if (!target && keysCollected >= 1 + Math.floor(level / 3)) {
-    const d = dist(player, exitPos);
-    if (d < minDist) { minDist = d; target = exitPos; }
-  }
-  if (!target) {
-    for (const g of generators) {
-      const d = dist(player, g);
-      if (d < minDist) { minDist = d; target = g; }
-    }
-  }
-  if (!target) {
-    for (const e of enemies) {
-      const d = dist(player, e);
-      if (d < minDist && d < 5) { minDist = d; target = e; }
-    }
-  }
-  if (!target) {
-    // Wander toward center
-    target = {x: MAP_W/2, y: MAP_H/2};
-  }
-
-  // Move toward target with simple pathfinding
-  const tdx = target.x - player.x;
-  const tdy = target.y - player.y;
-  const tdist = Math.sqrt(tdx*tdx + tdy*tdy);
-  
-  if (tdist > 0.5) {
-    const nx = tdx / tdist;
-    const ny = tdy / tdist;
-    
-    // Try to move, with obstacle avoidance
-    const moves = [
-      {dx: Math.sign(nx), dy: 0},
-      {dx: 0, dy: Math.sign(ny)},
-      {dx: Math.sign(nx), dy: Math.sign(ny)},
-      {dx: -Math.sign(ny), dy: Math.sign(nx)},
-      {dx: Math.sign(ny), dy: -Math.sign(nx)},
-    ];
-    
-    for (const m of moves) {
-      if (canMove(player.x + m.dx * dt * PLAYER_SPEED / TILE, player.y + m.dy * dt * PLAYER_SPEED / TILE, 0.25)) {
-        dx = m.dx;
-        dy = m.dy;
-        break;
-      }
-    }
-  }
-
-  // Shoot if enemy or generator nearby
-  let shooting = false;
-  for (const e of enemies) {
-    const d = dist(player, e);
-    if (d < 4) { shooting = true; break; }
-  }
-  if (!shooting) {
-    for (const g of generators) {
-      const d = dist(player, g);
-      if (d < 5) { shooting = true; break; }
-    }
-  }
-
-  return {dx, dy, shooting};
-}
-
-// --- Main Update ---
-function update(dt) {
-  // Check inactivity
-  if (playerControl && Date.now() - lastInputTime > INACTIVITY_TIMEOUT) {
-    playerControl = false;
-  }
-
-  let moveX = 0, moveY = 0, shooting = false;
-
-  if (playerControl) {
-    if (keys['ArrowUp'] || keys['KeyW']) moveY = -1;
-    if (keys['ArrowDown'] || keys['KeyS']) moveY = 1;
-    if (keys['ArrowLeft'] || keys['KeyA']) moveX = -1;
-    if (keys['ArrowRight'] || keys['KeyD']) moveX = 1;
-    shooting = !!keys['Space'];
-  } else {
-    const ai = aiUpdate(dt);
-    moveX = ai.dx;
-    moveY = ai.dy;
-    shooting = ai.shooting;
-  }
-
-  // Normalize movement
-  if (moveX !== 0 || moveY !== 0) {
-    const len = Math.sqrt(moveX*moveX + moveY*moveY);
-    moveX /= len;
-    moveY /= len;
-    player.dir = Math.atan2(moveY, moveX);
-  }
-
-  // Move player
-  const speed = PLAYER_SPEED * dt;
-  const nx = player.x + moveX * speed / TILE;
-  const ny = player.y + moveY * speed / TILE;
-  
-  if (canMove(nx, player.y, 0.25)) player.x = nx;
-  if (canMove(player.x, ny, 0.25)) player.y = ny;
-
-  // Clamp to map
-  player.x = Math.max(0.3, Math.min(MAP_W - 0.3, player.x));
-  player.y = Math.max(0.3, Math.min(MAP_H - 0.3, player.y));
-
-  // Shooting
-  player.shootTimer -= dt;
-  if (shooting && player.shootTimer <= 0) {
-    player.shootTimer = 0.25;
-    const pdx = Math.cos(player.dir);
-    const pdy = Math.sin(player.dir);
-    projectiles.push({
-      x: player.x + pdx * 0.4,
-      y: player.y + pdy * 0.4,
-      vx: pdx * PROJ_SPEED,
-      vy: pdy * PROJ_SPEED,
-      life: 2
-    });
-  }
-
-  // Update projectiles
-  for (let i = projectiles.length - 1; i >= 0; i--) {
-    const p = projectiles[i];
-    p.x += p.vx * dt / TILE;
-    p.y += p.vy * dt / TILE;
-    p.life -= dt;
-
-    // Hit wall
-    if (p.life <= 0 || grid[Math.floor(p.y)]?.[Math.floor(p.x)] === 1) {
-      addParticles(p.x, p.y, '#ffaa44', 3);
-      projectiles.splice(i, 1);
-      continue;
-    }
-
-    // Hit enemies
-    let hit = false;
-    for (let j = enemies.length - 1; j >= 0; j--) {
-      const e = enemies[j];
-      if (Math.abs(p.x - e.x) < 0.4 && Math.abs(p.y - e.y) < 0.4) {
-        e.hp--;
-        addParticles(e.x, e.y, e.type === 'ghost' ? '#88cc44' : '#448833', 5);
-        if (e.hp <= 0) {
-          score += e.type === 'ghost' ? 100 : 150;
-          addParticles(e.x, e.y, '#ffffff', 8);
-          enemies.splice(j, 1);
+    // Add some random openings for more open areas
+    for (let i = 0; i < MAP_W * MAP_H * 0.05; i++) {
+      const rx = 1 + Math.floor(Math.random() * (MAP_W - 2));
+      const ry = 1 + Math.floor(Math.random() * (MAP_H - 2));
+      if (map[ry][rx] === WALL) {
+        let adjFloor = 0;
+        for (const [dx, dy] of [[0,1],[0,-1],[1,0],[-1,0]]) {
+          if (map[ry+dy] && map[ry+dy][rx+dx] === FLOOR) adjFloor++;
         }
-        projectiles.splice(i, 1);
-        hit = true;
-        break;
+        if (adjFloor >= 2) map[ry][rx] = FLOOR;
       }
     }
-    if (hit) continue;
 
-    // Hit generators
-    for (let j = generators.length - 1; j >= 0; j--) {
-      const g = generators[j];
-      if (Math.abs(p.x - g.x) < 0.5 && Math.abs(p.y - g.y) < 0.5) {
-        g.hp--;
-        addParticles(g.x, g.y, '#aa44ff', 5);
-        if (g.hp <= 0) {
-          score += 500;
-          addParticles(g.x, g.y, '#ff44ff', 12);
-          generators.splice(j, 1);
+    // Place doors along corridors
+    const doorPositions = [];
+    for (let y = 1; y < MAP_H - 1; y++) {
+      for (let x = 1; x < MAP_W - 1; x++) {
+        if (map[y][x] === FLOOR) {
+          const hWall = (map[y][x-1] === WALL && map[y][x+1] === FLOOR) || (map[y][x-1] === FLOOR && map[y][x+1] === WALL);
+          const vWall = (map[y-1] && map[y-1][x] === WALL && map[y+1] && map[y+1][x] === FLOOR) || (map[y-1] && map[y-1][x] === FLOOR && map[y+1] && map[y+1][x] === WALL);
+          if ((hWall || vWall) && Math.random() < 0.15) {
+            map[y][x] = DOOR;
+            doorPositions.push({x, y});
+          }
         }
-        projectiles.splice(i, 1);
-        break;
+      }
+    }
+
+    // Find all floor positions
+    const floors = [];
+    for (let y = 1; y < MAP_H - 1; y++) {
+      for (let x = 1; x < MAP_W - 1; x++) {
+        if (map[y][x] === FLOOR) floors.push({x, y});
+      }
+    }
+
+    // Shuffle floors
+    for (let i = floors.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [floors[i], floors[j]] = [floors[j], floors[i]];
+    }
+
+    // Place exit far from start
+    let exitPos = floors.pop() || {x: MAP_W-2, y: MAP_H-2};
+    map[exitPos.y][exitPos.x] = EXIT;
+
+    // Place hero near start
+    const heroStart = {x: 1, y: 1};
+    map[heroStart.y][heroStart.x] = FLOOR;
+
+    // Place generators (2-4)
+    const numGen = 2 + Math.min(level, 3);
+    generators = [];
+    for (let i = 0; i < numGen && floors.length > 0; i++) {
+      const pos = floors.pop();
+      if (pos) {
+        generators.push({ x: pos.x * TILE + TILE/2, y: pos.y * TILE + TILE/2, timer: 0, type: Math.random() < 0.5 ? 'ghost' : 'grunt' });
+      }
+    }
+
+    // Place keys (1-3)
+    const numKeys = 1 + Math.floor(Math.random() * 3);
+    items = [];
+    for (let i = 0; i < numKeys && floors.length > 0; i++) {
+      const pos = floors.pop();
+      items.push({ type: 'key', x: pos.x * TILE + TILE/2, y: pos.y * TILE + TILE/2 });
+    }
+
+    // Place food (3-5)
+    const numFood = 3 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < numFood && floors.length > 0; i++) {
+      const pos = floors.pop();
+      items.push({ type: 'food', x: pos.x * TILE + TILE/2, y: pos.y * TILE + TILE/2 });
+    }
+
+    // Place treasure (2-4)
+    const numTreasure = 2 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < numTreasure && floors.length > 0; i++) {
+      const pos = floors.pop();
+      items.push({ type: 'treasure', x: pos.x * TILE + TILE/2, y: pos.y * TILE + TILE/2 });
+    }
+
+    return { heroStart, exitPos, doorPositions };
+  }
+
+  function initGame() {
+    const { heroStart, exitPos, doorPositions } = generateMaze();
+    hero = {
+      x: heroStart.x * TILE + TILE/2,
+      y: heroStart.y * TILE + TILE/2,
+      vx: 0, vy: 0,
+      dir: { x: 1, y: 0 },
+      health: MAX_HEALTH,
+      shootTimer: 0,
+      invincible: 0
+    };
+    enemies = [];
+    projectiles = [];
+    particles = [];
+    score = score || 0;
+    keys = 0;
+    health = MAX_HEALTH;
+    level = level || 1;
+    gameState = 'playing';
+    gameTimer = 0;
+    gameOverTimer = 0;
+    aiTarget = null;
+    aiPath = [];
+    aiPathTimer = 0;
+    aiShootTimer = 0;
+    screenShake = 0;
+    flashAlpha = 0;
+    levelTransition = 0;
+    genSpawnTimers = {};
+    generators.forEach((g, i) => genSpawnTimers[i] = Math.floor(Math.random() * 60));
+  }
+
+  // --- Pathfinding (BFS) ---
+  function bfs(sx, sy, ex, ey) {
+    const sxT = Math.floor(sx / TILE), syT = Math.floor(sy / TILE);
+    const exT = Math.floor(ex / TILE), eyT = Math.floor(ey / TILE);
+
+    if (sxT === exT && syT === eyT) return [{x: sxT, y: syT}];
+
+    const visited = new Set();
+    const queue = [{x: sxT, y: syT, path: [{x: sxT, y: syT}]}];
+    visited.add(`${sxT},${syT}`);
+
+    while (queue.length > 0) {
+      const cur = queue.shift();
+      if (cur.x === exT && cur.y === eyT) return cur.path;
+
+      for (const [dx, dy] of [[0,-1],[0,1],[-1,0],[1,0]]) {
+        const nx = cur.x + dx, ny = cur.y + dy;
+        const key = `${nx},${ny}`;
+        if (nx >= 0 && nx < MAP_W && ny >= 0 && ny < MAP_H && !visited.has(key)) {
+          const tile = map[ny][nx];
+          if (tile === FLOOR || tile === EXIT || tile === DOOR) {
+            visited.add(key);
+            queue.push({x: nx, y: ny, path: [...cur.path, {x: nx, y: ny}]});
+          }
+        }
+      }
+    }
+    return [];
+  }
+
+  function dist(a, b) {
+    return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
+  }
+
+  // --- AI ---
+  function updateAI() {
+    aiPathTimer++;
+    if (aiPathTimer > 15 || aiPath.length === 0) {
+      aiPathTimer = 0;
+
+      // Determine target
+      let target = null;
+      let minDist = Infinity;
+
+      // If health is low, seek food
+      if (health < 40) {
+        for (const item of items) {
+          if (item.type === 'food') {
+            const d = dist(hero, item);
+            if (d < minDist) { minDist = d; target = item; }
+          }
+        }
+      }
+
+      // Seek keys if doors exist
+      if (!target) {
+        const hasDoors = map.some(row => row.some(t => t === DOOR));
+        if (hasDoors && keys === 0) {
+          for (const item of items) {
+            if (item.type === 'key') {
+              const d = dist(hero, item);
+              if (d < minDist) { minDist = d; target = item; }
+            }
+          }
+        }
+      }
+
+      // Seek treasure
+      if (!target) {
+        for (const item of items) {
+          if (item.type === 'treasure') {
+            const d = dist(hero, item);
+            if (d < minDist) { minDist = d; target = item; }
+          }
+        }
+      }
+
+      // Seek exit
+      if (!target) {
+        for (let y = 0; y < MAP_H; y++) {
+          for (let x = 0; x < MAP_W; x++) {
+            if (map[y][x] === EXIT) {
+              const ex = x * TILE + TILE/2, ey = y * TILE + TILE/2;
+              const d = dist(hero, {x: ex, y: ey});
+              if (d < minDist) { minDist = d; target = {x: ex, y: ey}; }
+            }
+          }
+        }
+      }
+
+      // Seek generators to destroy
+      if (!target) {
+        for (const gen of generators) {
+          const d = dist(hero, gen);
+          if (d < minDist && d < 300) { minDist = d; target = gen; }
+        }
+      }
+
+      // If no target, wander
+      if (!target) {
+        const wanderX = hero.x + (Math.random() - 0.5) * 400;
+        const wanderY = hero.y + (Math.random() - 0.5) * 400;
+        target = { x: wanderX, y: wanderY };
+      }
+
+      aiTarget = target;
+      if (target) {
+        aiPath = bfs(hero.x, hero.y, target.x, target.y);
+      }
+    }
+
+    // Follow path
+    if (aiPath.length > 0) {
+      const next = aiPath[0];
+      const tx = next.x * TILE + TILE/2;
+      const ty = next.y * TILE + TILE/2;
+      const dx = tx - hero.x;
+      const dy = ty - hero.y;
+      const d = Math.sqrt(dx*dx + dy*dy);
+      if (d > 2) {
+        hero.vx = (dx / d) * HERO_SPEED;
+        hero.vy = (dy / d) * HERO_SPEED;
+        hero.dir = { x: dx / d, y: dy / d };
+      } else {
+        aiPath.shift();
+      }
+    }
+
+    // Shoot at nearby enemies
+    aiShootTimer++;
+    if (aiShootTimer > 10) {
+      aiShootTimer = 0;
+      let closestEnemy = null;
+      let closestDist = 200;
+      for (const e of enemies) {
+        const d = dist(hero, e);
+        if (d < closestDist) { closestDist = d; closestEnemy = e; }
+      }
+      if (closestEnemy) {
+        const dx = closestEnemy.x - hero.x;
+        const dy = closestEnemy.y - hero.y;
+        const d = Math.sqrt(dx*dx + dy*dy);
+        hero.dir = { x: dx/d, y: dy/d };
+        fireProjectile();
       }
     }
   }
 
-  // Spawn enemies from generators
-  spawnTimer -= dt;
-  if (spawnTimer <= 0 && generators.length > 0) {
-    spawnTimer = 2 + Math.random() * 2;
-    const g = generators[Math.floor(Math.random() * generators.length)];
-    if (enemies.length < 20 + level * 2) {
-      enemies.push({
-        x: g.x + (Math.random()-0.5)*0.5,
-        y: g.y + (Math.random()-0.5)*0.5,
-        type: g.type,
-        hp: g.type === 'ghost' ? GHOST_HP : GRUNT_SPEED,
-        speed: g.type === 'ghost' ? GHOST_SPEED : GRUNT_SPEED
+  // --- Projectile ---
+  function fireProjectile() {
+    if (hero.shootTimer > 0) return;
+    hero.shootTimer = 12;
+    const p = {
+      x: hero.x + hero.dir.x * 12,
+      y: hero.y + hero.dir.y * 12,
+      vx: hero.dir.x * PROJ_SPEED,
+      vy: hero.dir.y * PROJ_SPEED,
+      life: 60
+    };
+    projectiles.push(p);
+  }
+
+  // --- Collision ---
+  function tileAt(x, y) {
+    const tx = Math.floor(x / TILE);
+    const ty = Math.floor(y / TILE);
+    if (tx < 0 || tx >= MAP_W || ty < 0 || ty >= MAP_H) return WALL;
+    return map[ty][tx];
+  }
+
+  function isWalkable(x, y, radius) {
+    const r = radius || 8;
+    return tileAt(x - r, y - r) !== WALL &&
+           tileAt(x + r, y - r) !== WALL &&
+           tileAt(x - r, y + r) !== WALL &&
+           tileAt(x + r, y + r) !== WALL;
+  }
+
+  function isDoorAt(x, y) {
+    const tx = Math.floor(x / TILE);
+    const ty = Math.floor(y / TILE);
+    if (tx < 0 || tx >= MAP_W || ty < 0 || ty >= MAP_H) return false;
+    return map[ty][tx] === DOOR;
+  }
+
+  // --- Particles ---
+  function spawnParticles(x, y, color, count) {
+    for (let i = 0; i < count; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 1 + Math.random() * 3;
+      particles.push({
+        x, y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        life: 20 + Math.random() * 20,
+        maxLife: 40,
+        color,
+        size: 2 + Math.random() * 3
       });
     }
   }
 
-  // Update enemies
-  for (const e of enemies) {
-    const dx = player.x - e.x;
-    const dy = player.y - e.y;
-    const d = Math.sqrt(dx*dx + dy*dy);
-    if (d > 0.3) {
-      const ex = (dx/d) * e.speed * dt / TILE;
-      const ey = (dy/d) * e.speed * dt / TILE;
-      const enx = e.x + ex;
-      const eny = e.y + ey;
-      if (canMove(enx, e.y, 0.25)) e.x = enx;
-      if (canMove(e.x, eny, 0.25)) e.y = eny;
+  // --- Update ---
+  function update() {
+    frameCount++;
+    gameTimer++;
+
+    if (gameState === 'gameover') {
+      gameOverTimer--;
+      if (gameOverTimer <= 0) {
+        level = 1;
+        score = 0;
+        initGame();
+      }
+      updateParticles();
+      return;
     }
 
-    // Damage player
-    if (Math.abs(e.x - player.x) < 0.5 && Math.abs(e.y - player.y) < 0.5) {
-      if (player.invuln <= 0) {
-        health -= 10;
-        player.invuln = 0.5;
-        addParticles(player.x, player.y, '#ff4444', 6);
+    if (levelTransition > 0) {
+      levelTransition--;
+      if (levelTransition === 0) {
+        level++;
+        initGame();
+      }
+      updateParticles();
+      return;
+    }
+
+    // Health drain
+    if (gameTimer % HEALTH_DRAIN_RATE === 0 && health > 0) {
+      health--;
+      if (health <= 0) {
+        health = 0;
+        gameState = 'gameover';
+        gameOverTimer = GAME_OVER_DURATION;
+        spawnParticles(hero.x, hero.y, '#ff4444', 30);
+        screenShake = 15;
       }
     }
-  }
 
-  player.invuln -= dt;
+    // Human input or AI
+    if (humanControl) {
+      humanActiveTime++;
+      let dx = 0, dy = 0;
+      if (input.up) dy -= 1;
+      if (input.down) dy += 1;
+      if (input.left) dx -= 1;
+      if (input.right) dy += 0;
+      if (input.right) dx += 1;
 
-  // Health drain
-  health -= HEALTH_DRAIN_RATE * dt;
-
-  // Collect items
-  for (let i = items.length - 1; i >= 0; i--) {
-    const item = items[i];
-    if (Math.abs(item.x - player.x) < 0.5 && Math.abs(item.y - player.y) < 0.5) {
-      if (item.type === 'key') {
-        keysCollected++;
-        addParticles(item.x, item.y, '#ffdd44', 6);
-      } else if (item.type === 'food') {
-        health = Math.min(MAX_HEALTH, health + 25);
-        addParticles(item.x, item.y, '#44ff44', 6);
-      } else if (item.type === 'treasure') {
-        score += 200;
-        addParticles(item.x, item.y, '#ffcc22', 6);
-      }
-      items.splice(i, 1);
-    }
-  }
-
-  // Check exit
-  if (Math.abs(exitPos.x + 0.5 - player.x) < 0.5 && Math.abs(exitPos.y + 0.5 - player.y) < 0.5) {
-    if (keysCollected >= 1 + Math.floor(level / 3)) {
-      level++;
-      initLevel();
-    }
-  }
-
-  // Death
-  if (health <= 0) {
-    health = MAX_HEALTH;
-    score = Math.max(0, score - 500);
-    level = 1;
-    initLevel();
-  }
-
-  // Update particles
-  for (let i = particles.length - 1; i >= 0; i--) {
-    const p = particles[i];
-    p.x += p.vx * dt / TILE;
-    p.y += p.vy * dt / TILE;
-    p.life -= dt;
-    if (p.life <= 0) particles.splice(i, 1);
-  }
-}
-
-// --- Render ---
-function render() {
-  const w = canvas.width;
-  const h = canvas.height;
-  
-  // Camera
-  const camX = player.x * TILE - w / 2;
-  const camY = player.y * TILE - h / 2;
-  
-  ctx.fillStyle = '#111';
-  ctx.fillRect(0, 0, w, h);
-  
-  ctx.save();
-  ctx.translate(-camX, -camY);
-
-  // Draw tiles
-  const startX = Math.max(0, Math.floor(camX / TILE));
-  const startY = Math.max(0, Math.floor(camY / TILE));
-  const endX = Math.min(MAP_W, Math.ceil((camX + w) / TILE) + 1);
-  const endY = Math.min(MAP_H, Math.ceil((camY + h) / TILE) + 1);
-
-  for (let y = startY; y < endY; y++) {
-    for (let x = startX; x < endX; x++) {
-      if (grid[y][x] === 1) {
-        drawTile('wall', x, y, TILE);
+      if (dx !== 0 || dy !== 0) {
+        const len = Math.sqrt(dx*dx + dy*dy);
+        hero.vx = (dx / len) * HERO_SPEED;
+        hero.vy = (dy / len) * HERO_SPEED;
+        hero.dir = { x: dx / len, y: dy / len };
       } else {
-        drawTile('floor', x, y, TILE);
+        hero.vx = 0;
+        hero.vy = 0;
       }
+
+      if (input.shoot) {
+        fireProjectile();
+      }
+    } else {
+      humanActiveTime = 0;
+      updateAI();
+    }
+
+    // Move hero
+    const nx = hero.x + hero.vx;
+    const ny = hero.y + hero.vy;
+
+    // Check door collision
+    if (isDoorAt(nx, ny) && keys > 0) {
+      const tx = Math.floor(nx / TILE);
+      const ty = Math.floor(ny / TILE);
+      map[ty][tx] = FLOOR;
+      keys--;
+      score += 50;
+      spawnParticles(nx, ny, '#ffdd00', 10);
+    }
+
+    if (isWalkable(nx, hero.y, 10)) hero.x = nx;
+    if (isWalkable(hero.x, ny, 10)) hero.y = ny;
+
+    // Check exit
+    if (tileAt(hero.x, hero.y) === EXIT) {
+      levelTransition = 30;
+      flashAlpha = 1;
+      score += 200 * level;
+      spawnParticles(hero.x, hero.y, '#44ff44', 20);
+    }
+
+    // Hero shoot timer
+    if (hero.shootTimer > 0) hero.shootTimer--;
+    if (hero.invincible > 0) hero.invincible--;
+
+    // Update projectiles
+    for (let i = projectiles.length - 1; i >= 0; i--) {
+      const p = projectiles[i];
+      p.x += p.vx;
+      p.y += p.vy;
+      p.life--;
+
+      if (p.life <= 0 || tileAt(p.x, p.y) === WALL) {
+        projectiles.splice(i, 1);
+        continue;
+      }
+
+      // Hit enemies
+      let hit = false;
+      for (let j = enemies.length - 1; j >= 0; j--) {
+        const e = enemies[j];
+        if (dist(p, e) < 14) {
+          e.health--;
+          spawnParticles(p.x, p.y, e.type === 'ghost' ? '#88ccff' : '#88ff44', 5);
+          if (e.health <= 0) {
+            score += e.type === 'ghost' ? 25 : 15;
+            spawnParticles(e.x, e.y, e.type === 'ghost' ? '#88ccff' : '#88ff44', 12);
+            enemies.splice(j, 1);
+          }
+          hit = true;
+          break;
+        }
+      }
+
+      // Hit generators
+      if (!hit) {
+        for (let j = generators.length - 1; j >= 0; j--) {
+          const g = generators[j];
+          if (dist(p, g) < 16) {
+            score += 100;
+            spawnParticles(g.x, g.y, '#aa44ff', 15);
+            generators.splice(j, 1);
+            hit = true;
+            break;
+          }
+        }
+      }
+
+      if (hit) {
+        projectiles.splice(i, 1);
+      }
+    }
+
+    // Update enemies
+    for (const e of enemies) {
+      const dx = hero.x - e.x;
+      const dy = hero.y - e.y;
+      const d = Math.sqrt(dx*dx + dy*dy);
+      if (d > 0) {
+        const speed = e.type === 'ghost' ? GHOST_SPEED : GRUNT_SPEED;
+        const nx = e.x + (dx / d) * speed;
+        const ny = e.y + (dy / d) * speed;
+
+        // Ghosts can pass through walls, grunts cannot
+        if (e.type === 'ghost' || (isWalkable(nx, e.y, 8) && isWalkable(e.x, ny, 8))) {
+          e.x = nx;
+          e.y = ny;
+        }
+      }
+
+      // Damage hero on contact
+      if (dist(e, hero) < 16 && hero.invincible <= 0) {
+        health -= 10;
+        hero.invincible = 30;
+        screenShake = 8;
+        spawnParticles(hero.x, hero.y, '#ff4444', 8);
+        if (health <= 0) {
+          health = 0;
+          gameState = 'gameover';
+          gameOverTimer = GAME_OVER_DURATION;
+          spawnParticles(hero.x, hero.y, '#ff4444', 30);
+        }
+      }
+    }
+
+    // Generator spawning
+    for (let i = generators.length - 1; i >= 0; i--) {
+      const g = generators[i];
+      genSpawnTimers[i] = (genSpawnTimers[i] || 0) + 1;
+      if (genSpawnTimers[i] >= GEN_SPAWN_INTERVAL) {
+        genSpawnTimers[i] = 0;
+        const type = g.type;
+        const angle = Math.random() * Math.PI * 2;
+        enemies.push({
+          x: g.x + Math.cos(angle) * 16,
+          y: g.y + Math.sin(angle) * 16,
+          type,
+          health: type === 'ghost' ? 3 : 5,
+          maxHealth: type === 'ghost' ? 3 : 5
+        });
+        spawnParticles(g.x, g.y, '#aa44ff', 6);
+      }
+    }
+
+    // Collect items
+    for (let i = items.length - 1; i >= 0; i--) {
+      const item = items[i];
+      if (dist(item, hero) < 16) {
+        if (item.type === 'key') {
+          keys++;
+          score += 75;
+          spawnParticles(item.x, item.y, '#ffdd00', 10);
+        } else if (item.type === 'food') {
+          health = Math.min(MAX_HEALTH, health + 30);
+          spawnParticles(item.x, item.y, '#ff4444', 10);
+        } else if (item.type === 'treasure') {
+          score += 150;
+          spawnParticles(item.x, item.y, '#ffaa00', 12);
+        }
+        items.splice(i, 1);
+      }
+    }
+
+    // Camera
+    camera.x = hero.x - canvas.width / 2;
+    camera.y = hero.y - canvas.height / 2;
+
+    // Screen shake
+    if (screenShake > 0) screenShake--;
+    if (flashAlpha > 0) flashAlpha -= 0.05;
+
+    updateParticles();
+  }
+
+  function updateParticles() {
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vx *= 0.95;
+      p.vy *= 0.95;
+      p.life--;
+      if (p.life <= 0) particles.splice(i, 1);
     }
   }
 
-  // Draw exit
-  drawExit(TILE);
-
-  // Draw items
-  for (const item of items) {
-    drawItem(item, TILE);
+  // --- Drawing ---
+  function drawTile(type, x, y) {
+    if (type === WALL) {
+      ctx.fillStyle = '#3a3a4a';
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = '#4a4a5a';
+      ctx.fillRect(x + 1, y + 1, TILE - 2, TILE - 2);
+      ctx.fillStyle = '#333340';
+      ctx.fillRect(x + TILE/2 - 1, y, 2, TILE);
+      ctx.fillRect(x, y + TILE/2 - 1, TILE, 2);
+      // Brick detail
+      ctx.fillStyle = '#2e2e3c';
+      ctx.fillRect(x + 1, y + TILE/4, TILE/2 - 2, 1);
+      ctx.fillRect(x + TILE/2 + 1, y + TILE*3/4, TILE/2 - 2, 1);
+    } else if (type === FLOOR) {
+      ctx.fillStyle = '#1a1a24';
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = '#222230';
+      ctx.fillRect(x + 2, y + 2, TILE - 4, TILE - 4);
+      // Subtle floor detail
+      ctx.fillStyle = '#1e1e28';
+      if ((Math.floor(x/TILE) + Math.floor(y/TILE)) % 2 === 0) {
+        ctx.fillRect(x + 4, y + 4, 4, 4);
+      }
+    } else if (type === DOOR) {
+      ctx.fillStyle = '#1a1a24';
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = '#664422';
+      ctx.fillRect(x + 2, y + 2, TILE - 4, TILE - 4);
+      ctx.fillStyle = '#886633';
+      ctx.fillRect(x + 4, y + 4, TILE - 8, TILE - 8);
+      // Lock
+      ctx.fillStyle = '#ffdd00';
+      ctx.fillRect(x + TILE/2 - 3, y + TILE/2 - 3, 6, 6);
+      ctx.fillStyle = '#aa8800';
+      ctx.fillRect(x + TILE/2 - 1, y + TILE/2 - 1, 2, 2);
+    } else if (type === EXIT) {
+      ctx.fillStyle = '#1a1a24';
+      ctx.fillRect(x, y, TILE, TILE);
+      // Staircase spiral
+      for (let i = 3; i >= 0; i--) {
+        const s = i * 6;
+        ctx.fillStyle = i % 2 === 0 ? '#2244aa' : '#3366cc';
+        ctx.fillRect(x + TILE/2 - s, y + TILE/2 - s, s * 2, s * 2);
+      }
+      // Glow
+      ctx.fillStyle = `rgba(68, 136, 255, ${0.3 + Math.sin(frameCount * 0.1) * 0.2})`;
+      ctx.fillRect(x + TILE/2 - 4, y + TILE/2 - 4, 8, 8);
+    }
   }
 
-  // Draw generators
-  for (const g of generators) {
-    drawGenerator(g, TILE);
+  function drawHero() {
+    if (hero.invincible > 0 && Math.floor(frameCount / 3) % 2 === 0) return;
+
+    const x = hero.x - camera.x;
+    const y = hero.y - camera.y;
+
+    // Body
+    ctx.fillStyle = '#cc8833';
+    ctx.beginPath();
+    ctx.arc(x, y, 10, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Armor
+    ctx.fillStyle = '#ddaa44';
+    ctx.beginPath();
+    ctx.arc(x, y, 8, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Helmet
+    ctx.fillStyle = '#eebb55';
+    ctx.beginPath();
+    ctx.arc(x, y, 6, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Eyes
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(x - 3, y - 3, 2, 2);
+    ctx.fillRect(x + 1, y - 3, 2, 2);
+
+    // Cape
+    ctx.fillStyle = '#cc2222';
+    const capeAngle = Math.atan2(hero.dir.y, hero.dir.x);
+    ctx.beginPath();
+    ctx.moveTo(x - Math.cos(capeAngle) * 6, y - Math.sin(capeAngle) * 6);
+    ctx.lineTo(x - Math.cos(capeAngle) * 16, y - Math.sin(capeAngle) * 16);
+    ctx.lineTo(x - Math.cos(capeAngle) * 12, y - Math.sin(capeAngle) * 12 + Math.sin(frameCount * 0.2) * 3);
+    ctx.fill();
+
+    // Direction indicator (weapon)
+    ctx.strokeStyle = '#ffcc44';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x + hero.dir.x * 8, y + hero.dir.y * 8);
+    ctx.lineTo(x + hero.dir.x * 16, y + hero.dir.y * 16);
+    ctx.stroke();
   }
 
-  // Draw enemies
-  for (const e of enemies) {
-    drawEnemy(e, TILE);
+  function drawEnemy(e) {
+    const x = e.x - camera.x;
+    const y = e.y - camera.y;
+
+    if (e.type === 'ghost') {
+      // Ghost body
+      const alpha = 0.6 + Math.sin(frameCount * 0.15) * 0.2;
+      ctx.fillStyle = `rgba(136, 204, 255, ${alpha})`;
+      ctx.beginPath();
+      ctx.arc(x, y - 2, 10, Math.PI, 0);
+      ctx.lineTo(x + 10, y + 8);
+      // Wavy bottom
+      for (let i = 0; i < 4; i++) {
+        const wx = x + 10 - i * 5;
+        const wy = y + 8 + (i % 2 === 0 ? 4 : 0);
+        ctx.lineTo(wx, wy);
+      }
+      ctx.fill();
+
+      // Eyes
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(x - 4, y - 3, 3, 0, Math.PI * 2);
+      ctx.arc(x + 4, y - 3, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#220044';
+      ctx.beginPath();
+      ctx.arc(x - 4, y - 3, 1.5, 0, Math.PI * 2);
+      ctx.arc(x + 4, y - 3, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      // Grunt body
+      ctx.fillStyle = '#448822';
+      ctx.beginPath();
+      ctx.arc(x, y, 11, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Armor plates
+      ctx.fillStyle = '#556633';
+      ctx.beginPath();
+      ctx.arc(x, y, 9, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Eyes
+      ctx.fillStyle = '#ff4444';
+      ctx.beginPath();
+      ctx.arc(x - 4, y - 3, 2.5, 0, Math.PI * 2);
+      ctx.arc(x + 4, y - 3, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Club
+      ctx.fillStyle = '#886644';
+      const clubAngle = Math.atan2(hero.y - y, hero.x - x);
+      ctx.fillRect(x + Math.cos(clubAngle) * 10 - 2, y + Math.sin(clubAngle) * 10 - 2, 4, 10);
+    }
+
+    // Health bar
+    if (e.health < e.maxHealth) {
+      ctx.fillStyle = '#440000';
+      ctx.fillRect(x - 10, y - 16, 20, 3);
+      ctx.fillStyle = '#ff4444';
+      ctx.fillRect(x - 10, y - 16, 20 * (e.health / e.maxHealth), 3);
+    }
   }
 
-  // Draw player
-  if (player.invuln <= 0 || Math.floor(Date.now() / 100) % 2 === 0) {
-    drawHero(player.x, player.y, TILE);
+  function drawGenerator(g) {
+    const x = g.x - camera.x;
+    const y = g.y - camera.y;
+
+    // Outer ring
+    ctx.fillStyle = '#442266';
+    ctx.beginPath();
+    ctx.arc(x, y, 14, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Swirl
+    for (let i = 0; i < 3; i++) {
+      const angle = frameCount * 0.05 + i * Math.PI * 2 / 3;
+      ctx.fillStyle = i % 2 === 0 ? '#8844cc' : '#aa66ee';
+      ctx.beginPath();
+      ctx.arc(x + Math.cos(angle) * 6, y + Math.sin(angle) * 6, 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Center
+    ctx.fillStyle = '#cc88ff';
+    ctx.beginPath();
+    ctx.arc(x, y, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Glow
+    ctx.fillStyle = `rgba(170, 102, 238, ${0.2 + Math.sin(frameCount * 0.08) * 0.15})`;
+    ctx.beginPath();
+    ctx.arc(x, y, 18, 0, Math.PI * 2);
+    ctx.fill();
   }
 
-  // Draw projectiles
-  for (const p of projectiles) {
+  function drawItem(item) {
+    const x = item.x - camera.x;
+    const y = item.y - camera.y;
+
+    if (item.type === 'key') {
+      // Key
+      ctx.fillStyle = '#ffdd00';
+      ctx.beginPath();
+      ctx.arc(x, y - 4, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ccaa00';
+      ctx.fillRect(x - 2, y - 1, 4, 8);
+      ctx.fillRect(x + 2, y + 4, 4, 2);
+      ctx.fillRect(x + 2, y + 2, 3, 2);
+      // Glow
+      ctx.fillStyle = `rgba(255, 221, 0, ${0.2 + Math.sin(frameCount * 0.1) * 0.15})`;
+      ctx.beginPath();
+      ctx.arc(x, y, 12, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (item.type === 'food') {
+      // Apple
+      ctx.fillStyle = '#cc2222';
+      ctx.beginPath();
+      ctx.arc(x, y, 7, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#44aa22';
+      ctx.fillRect(x - 1, y - 9, 2, 4);
+      ctx.fillStyle = '#66cc44';
+      ctx.beginPath();
+      ctx.ellipse(x + 3, y - 7, 4, 2, 0.5, 0, Math.PI * 2);
+      ctx.fill();
+      // Shine
+      ctx.fillStyle = 'rgba(255,255,255,0.3)';
+      ctx.beginPath();
+      ctx.arc(x - 2, y - 2, 2, 0, Math.PI * 2);
+      ctx.fill();
+      // Glow
+      ctx.fillStyle = `rgba(255, 68, 68, ${0.15 + Math.sin(frameCount * 0.08) * 0.1})`;
+      ctx.beginPath();
+      ctx.arc(x, y, 12, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (item.type === 'treasure') {
+      // Chest
+      ctx.fillStyle = '#886622';
+      ctx.fillRect(x - 10, y - 6, 20, 14);
+      ctx.fillStyle = '#aa8833';
+      ctx.fillRect(x - 8, y - 4, 16, 10);
+      ctx.fillStyle = '#ccaa44';
+      ctx.fillRect(x - 8, y - 4, 16, 3);
+      // Lock
+      ctx.fillStyle = '#ffdd00';
+      ctx.fillRect(x - 3, y - 2, 6, 5);
+      // Glow
+      ctx.fillStyle = `rgba(255, 170, 0, ${0.2 + Math.sin(frameCount * 0.1) * 0.15})`;
+      ctx.beginPath();
+      ctx.arc(x, y, 14, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function drawProjectile(p) {
+    const x = p.x - camera.x;
+    const y = p.y - camera.y;
+    ctx.fillStyle = '#ffcc44';
+    ctx.beginPath();
+    ctx.arc(x, y, 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255, 204, 68, 0.4)';
+    ctx.beginPath();
+    ctx.arc(x, y, 6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawParticles() {
+    for (const p of particles) {
+      const alpha = p.life / p.maxLife;
+      ctx.fillStyle = p.color;
+      ctx.globalAlpha = alpha;
+      ctx.fillRect(p.x - camera.x - p.size/2, p.y - camera.y - p.size/2, p.size, p.size);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawHUD() {
+    const pad = 16;
+    const barW = 200;
+    const barH = 16;
+
+    // Background panel
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+    ctx.fillRect(0, 0, canvas.width, 50);
+    ctx.fillStyle = 'rgba(100, 80, 40, 0.5)';
+    ctx.fillRect(0, 48, canvas.width, 2);
+
+    // Health bar
+    ctx.fillStyle = '#440000';
+    ctx.fillRect(pad, 12, barW, barH);
+    const healthPct = health / MAX_HEALTH;
+    const healthColor = healthPct > 0.5 ? '#44cc44' : healthPct > 0.25 ? '#cccc44' : '#cc4444';
+    ctx.fillStyle = healthColor;
+    ctx.fillRect(pad, 12, barW * healthPct, barH);
+    ctx.strokeStyle = '#888';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(pad, 12, barW, barH);
+
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 11px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(`HP ${health}/${MAX_HEALTH}`, pad + barW/2, 24);
+
+    // Score
+    ctx.textAlign = 'left';
+    ctx.font = 'bold 16px monospace';
     ctx.fillStyle = '#ffdd44';
-    ctx.beginPath();
-    ctx.arc(p.x * TILE, p.y * TILE, 4, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.arc(p.x * TILE, p.y * TILE, 2, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.fillText(`SCORE: ${score}`, pad + barW + 20, 26);
+
+    // Level
+    ctx.fillStyle = '#88ccff';
+    ctx.fillText(`LEVEL ${level}`, pad + barW + 160, 26);
+
+    // Keys
+    ctx.fillStyle = '#ffdd00';
+    ctx.fillText(`KEYS: ${keys}`, pad + barW + 280, 26);
+
+    // Attract mode indicator
+    if (!humanControl) {
+      ctx.fillStyle = `rgba(100, 255, 100, ${0.5 + Math.sin(frameCount * 0.05) * 0.3})`;
+      ctx.font = '12px monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText('▶ ATTRACTION MODE', canvas.width - pad, 26);
+    } else {
+      ctx.fillStyle = `rgba(255, 100, 100, ${0.5 + Math.sin(frameCount * 0.05) * 0.3})`;
+      ctx.font = '12px monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText('▶ PLAYER CONTROL', canvas.width - pad, 26);
+    }
   }
 
-  // Draw particles
-  for (const p of particles) {
-    ctx.globalAlpha = p.life / 0.5;
-    ctx.fillStyle = p.color;
-    ctx.fillRect(p.x * TILE - p.size/2, p.y * TILE - p.size/2, p.size, p.size);
-  }
-  ctx.globalAlpha = 1;
+  function drawGameOver() {
+    ctx.fillStyle = `rgba(0, 0, 0, 0.7)`;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  ctx.restore();
+    ctx.fillStyle = '#ff4444';
+    ctx.font = 'bold 64px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('GAME OVER', canvas.width/2, canvas.height/2 - 20);
 
-  // --- HUD ---
-  const hudY = 10;
-  const hudX = 10;
-  
-  ctx.fillStyle = 'rgba(0,0,0,0.7)';
-  ctx.fillRect(0, 0, w, 50);
-  ctx.strokeStyle = '#444';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(0, 50);
-  ctx.lineTo(w, 50);
-  ctx.stroke();
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = '24px monospace';
+    ctx.fillText(`Score: ${score}  Level: ${level}`, canvas.width/2, canvas.height/2 + 30);
 
-  ctx.font = 'bold 16px monospace';
-  ctx.textBaseline = 'middle';
-
-  // Health bar
-  ctx.fillStyle = '#441111';
-  ctx.fillRect(hudX, hudY + 10, 150, 16);
-  const hpPct = Math.max(0, health / MAX_HEALTH);
-  ctx.fillStyle = hpPct > 0.3 ? '#cc2222' : '#ff4444';
-  ctx.fillRect(hudX, hudY + 10, 150 * hpPct, 16);
-  ctx.strokeStyle = '#888';
-  ctx.strokeRect(hudX, hudY + 10, 150, 16);
-  ctx.fillStyle = '#fff';
-  ctx.fillText(`HP ${Math.ceil(health)}/${MAX_HEALTH}`, hudX + 5, hudY + 18);
-
-  // Score
-  ctx.fillStyle = '#ffcc44';
-  ctx.fillText(`SCORE: ${score}`, hudX + 170, hudY + 18);
-
-  // Level
-  ctx.fillStyle = '#44aaff';
-  ctx.fillText(`LEVEL ${level}`, hudX + 370, hudY + 18);
-
-  // Keys
-  const needed = 1 + Math.floor(level / 3);
-  ctx.fillStyle = '#ffdd44';
-  ctx.fillText(`KEYS: ${keysCollected}/${needed}`, hudX + 500, hudY + 18);
-
-  // Mode indicator
-  if (!playerControl) {
-    ctx.fillStyle = '#888';
-    ctx.font = '12px monospace';
-    ctx.fillText('ATTRACT MODE — Press any key to play', hudX, hudY + 38);
-  } else {
-    ctx.fillStyle = '#44ff44';
-    ctx.font = '12px monospace';
-    ctx.fillText('PLAYER CONTROL', hudX, hudY + 38);
+    ctx.fillStyle = '#aaa';
+    ctx.font = '16px monospace';
+    ctx.fillText('Restarting...', canvas.width/2, canvas.height/2 + 65);
   }
 
-  // Enemies remaining hint
-  if (generators.length > 0) {
-    ctx.fillStyle = '#aa44ff';
-    ctx.font = '12px monospace';
-    ctx.fillText(`${generators.length} generator${generators.length>1?'s':''} active`, hudX + 200, hudY + 38);
+  function drawLevelTransition() {
+    ctx.fillStyle = `rgba(0, 0, 100, ${levelTransition / 30 * 0.8})`;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.fillStyle = '#88ccff';
+    ctx.font = 'bold 48px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`LEVEL ${level}`, canvas.width/2, canvas.height/2 - 20);
+
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = '20px monospace';
+    ctx.fillText(`Score: ${score}`, canvas.width/2, canvas.height/2 + 30);
   }
-}
 
-// --- Resize ---
-function resize() {
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
-}
-window.addEventListener('resize', resize);
-resize();
+  // --- Main Draw ---
+  function draw() {
+    ctx.fillStyle = '#0a0a12';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-// --- Game Loop ---
-initLevel();
-lastTime = performance.now();
+    const shakeX = screenShake > 0 ? (Math.random() - 0.5) * screenShake : 0;
+    const shakeY = screenShake > 0 ? (Math.random() - 0.5) * screenShake : 0;
 
-function gameLoop(now) {
-  const dt = Math.min((now - lastTime) / 1000, 0.05);
-  lastTime = now;
-  
-  update(dt);
-  render();
-  
+    ctx.save();
+    ctx.translate(shakeX, shakeY);
+
+    // Draw map
+    const startTX = Math.max(0, Math.floor(camera.x / TILE) - 1);
+    const startTY = Math.max(0, Math.floor(camera.y / TILE) - 1);
+    const endTX = Math.min(MAP_W, Math.ceil((camera.x + canvas.width) / TILE) + 1);
+    const endTY = Math.min(MAP_H, Math.ceil((camera.y + canvas.height) / TILE) + 1);
+
+    for (let y = startTY; y < endTY; y++) {
+      for (let x = startTX; x < endTX; x++) {
+        const sx = x * TILE - camera.x;
+        const sy = y * TILE - camera.y;
+        drawTile(map[y][x], sx, sy);
+      }
+    }
+
+    // Draw items
+    for (const item of items) {
+      drawItem(item);
+    }
+
+    // Draw generators
+    for (const g of generators) {
+      drawGenerator(g);
+    }
+
+    // Draw enemies
+    for (const e of enemies) {
+      drawEnemy(e);
+    }
+
+    // Draw hero
+    if (gameState !== 'gameover') {
+      drawHero();
+    }
+
+    // Draw projectiles
+    for (const p of projectiles) {
+      drawProjectile(p);
+    }
+
+    // Draw particles
+    drawParticles();
+
+    ctx.restore();
+
+    // Flash effect
+    if (flashAlpha > 0) {
+      ctx.fillStyle = `rgba(255, 255, 255, ${flashAlpha})`;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+
+    // HUD
+    drawHUD();
+
+    // Game over
+    if (gameState === 'gameover') {
+      drawGameOver();
+    }
+
+    // Level transition
+    if (levelTransition > 0) {
+      drawLevelTransition();
+    }
+  }
+
+  // --- Input ---
+  document.addEventListener('keydown', (e) => {
+    if (gameState === 'gameover') return;
+    humanControl = true;
+    humanActiveTime = 0;
+
+    switch(e.key) {
+      case 'ArrowUp': case 'w': case 'W': input.up = true; break;
+      case 'ArrowDown': case 's': case 'S': input.down = true; break;
+      case 'ArrowLeft': case 'a': case 'A': input.left = true; break;
+      case 'ArrowRight': case 'd': case 'D': input.right = true; break;
+      case ' ': case 'Enter': input.shoot = true; break;
+    }
+  });
+
+  document.addEventListener('keyup', (e) => {
+    switch(e.key) {
+      case 'ArrowUp': case 'w': case 'W': input.up = false; break;
+      case 'ArrowDown': case 's': case 'S': input.down = false; break;
+      case 'ArrowLeft': case 'a': case 'A': input.left = false; break;
+      case 'ArrowRight': case 'd': case 'D': input.right = false; break;
+      case ' ': case 'Enter': input.shoot = false; break;
+    }
+  });
+
+  // --- Game Loop ---
+  let lastFrame = 0;
+  let accumulator = 0;
+  const TICK = 1000 / 60;
+
+  function gameLoop(timestamp) {
+    if (!lastFrame) lastFrame = timestamp;
+    const delta = timestamp - lastFrame;
+    lastFrame = timestamp;
+
+    accumulator += delta;
+
+    // Check for human control timeout
+    if (humanControl && humanActiveTime > 600) { // ~10 seconds at 60fps
+      humanControl = false;
+      input = { up: false, down: false, left: false, right: false, shoot: false };
+    }
+
+    while (accumulator >= TICK) {
+      update();
+      accumulator -= TICK;
+    }
+
+    draw();
+    requestAnimationFrame(gameLoop);
+  }
+
+  // --- Start ---
+  initGame();
   requestAnimationFrame(gameLoop);
-}
-
-requestAnimationFrame(gameLoop);
+})();
 </script>
 </body>
 </html>

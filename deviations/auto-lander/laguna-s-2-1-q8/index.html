@@ -1,622 +1,522 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Autonomous Lunar Lander</title>
-<style>
-  * { margin: 0; padding: 0; overflow: hidden; }
-  body, html { width: 100%; height: 100%; background: #000; }
-  canvas { display: block; background: #000; }
-  #ui {
-    position: absolute;
-    top: 10px;
-    left: 10px;
-    color: #fff;
-    font-family: monospace;
-    font-size: 14px;
-    z-index: 10;
-  }
-</style>
+    <meta charset="UTF-8">
+    <title>Autonomous Lunar Lander</title>
+    <style>
+        * { margin: 0; padding: 0; overflow: hidden; }
+        body { background: #000; }
+        canvas { display: block; }
+    </style>
 </head>
 <body>
-<div id="ui">Fuel: <span id="fuel">100</span>%</div>
-<canvas id="canvas"></canvas>
+<canvas id="game"></canvas>
 <script>
-(() => {
-  const canvas = document.getElementById('canvas');
-  const ctx = canvas.getContext('2d');
-  const fuelDisplay = document.getElementById('fuel');
-  
-  let width, height;
-  
-  function resize() {
-    width = canvas.width = window.innerWidth;
-    height = canvas.height = window.innerHeight;
-  }
-  
-  window.addEventListener('resize', resize);
-  resize();
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
 
-  // Physics constants
-  const GRAVITY = 0.15;
-  const THRUST_POWER = 0.3;
-  const MAX_FUEL = 100;
-  const FUEL_CONSUMPTION_RATE = 0.05;
-  const LANDER_WIDTH = 12;
-  const LANDER_HEIGHT = 20;
-  const PAD_WIDTH = 50;
-  const PAD_HEIGHT = 5;
-  const CAMERA_HEIGHT = 200;
-  const VIEW_HEIGHT = 600;
-  
-  // Lander state
-  const lander = {
-    x: width / 2,
+// Set canvas to full window size
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+
+// Physics constants
+const GRAVITY = 0.15;
+const THRUST = 0.3;
+const FUEL_CAPACITY = 1000;
+const MAX_SPEED_LAND = 2;
+
+// Game state
+let lander = {
+    x: canvas.width / 2,
     y: 50,
     vx: 0,
     vy: 0,
-    fuel: MAX_FUEL,
-    thrusting: false,
-    crashed: false,
+    fuel: FUEL_CAPACITY,
+    rotation: 0,
     landed: false,
-    targetY: 0,
-    scrollSpeed: 0,
-    cycleComplete: false
-  };
-  
-  // Terrain generation
-  let terrain = [];
-  let terrainOffset = 0;
-  let landingPads = [];
-  let currentPad = null;
-  let cycleStarted = false;
-  let dustParticles = [];
-  let cycleCount = 0;
-  let state = 'descending'; // descending, landing, lifting, crashed, regenerating
-  
-  // Particle system for exhaust
-  class Particle {
-    constructor(x, y, vx, vy, life, color) {
-      this.x = x;
-      this.y = y;
-      this.vx = vx;
-      this.vy = vy;
-      this.life = life;
-      this.maxLife = life;
-      this.color = color;
-      this.size = Math.random() * 3 + 1;
-    }
-    
-    update() {
-      this.vy += GRAVITY * 0.5;
-      this.x += this.vx;
-      this.y += this.vy;
-      this.life -= 1;
-    }
-    
-    draw(ctx) {
-      const alpha = this.life / this.maxLife;
-      ctx.save();
-      ctx.globalAlpha = alpha;
-      ctx.fillStyle = this.color;
-      ctx.beginPath();
-      ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-    }
-  }
-  
-  // Regolith particles
-  class Dust {
-    constructor(x, y, vx, vy) {
-      this.x = x;
-      this.y = y;
-      this.vx = vx;
-      this.vy = vy;
-      this.life = Math.random() * 30 + 20;
-      this.size = Math.random() * 2 + 1;
-    }
-    
-    update() {
-      this.vy += GRAVITY * 0.3;
-      this.x += this.vx;
-      this.y += this.vy;
-      this.life -= 1;
-    }
-    
-    draw(ctx, cameraY) {
-      const screenY = height - (this.y - cameraY) * 0.5;
-      const screenX = this.x;
-      if (screenY < height && screenY > 0) {
-        const alpha = Math.max(0, this.life / 50);
-        ctx.save();
-        ctx.globalAlpha = alpha * 0.6;
-        ctx.fillStyle = '#a67c52';
-        ctx.fillRect(screenX - this.size/2, screenY - this.size/2, this.size, this.size);
-        ctx.restore();
-      }
-    }
-  }
-  
-  // Generate terrain with hills and landing pads
-  function generateTerrain() {
+    phase: 'descent' // descent, landed, liftOff
+};
+
+let terrain = [];
+let pad = {};
+let particles = [];
+let lights = [];
+let scrollY = 0;
+let targetX = 0;
+let targetY = canvas.height - 100;
+let cycleCount = 0;
+let crash = false;
+
+// Generate procedural terrain
+function generateTerrain() {
     terrain = [];
-    landingPads = [];
-    terrainOffset = 0;
-    
-    const noiseSeed = Math.random() * 1000;
     let x = 0;
-    let y = 300 + Math.random() * 50;
-    const segmentWidth = 20;
-    const terrainLength = 3000;
+    let y = canvas.height * 0.8 + (Math.random() - 0.5) * 40;
     
-    // Generate base terrain with hills
-    while (x < terrainLength) {
-      const noise1 = Math.sin(x * 0.005 + noiseSeed) * 30;
-      const noise2 = Math.sin(x * 0.01 + noiseSeed * 0.7) * 15;
-      const noise3 = Math.sin(x * 0.002 + noiseSeed * 0.3) * 20;
-      y = 350 + noise1 + noise2 + noise3;
-      
-      // Occasionally create a flat landing pad
-      if (Math.random() < 0.02 && x > 200) {
-        const padY = y;
-        for (let i = 0; i < PAD_WIDTH / segmentWidth; i++) {
-          terrain.push({ x: x + i * segmentWidth, y: padY });
-        }
-        landingPads.push({
-          x: x + PAD_WIDTH / 2,
-          y: padY,
-          width: PAD_WIDTH
-        });
-        x += PAD_WIDTH + segmentWidth;
-        y = padY + (Math.random() * 30 - 15);
-        continue;
-      }
-      
-      terrain.push({ x, y });
-      x += segmentWidth;
-    }
-    
-    // Ensure at least one pad near the middle-bottom area
-    if (landingPads.length === 0) {
-      landingPads.push({ x: 400, y: 350, width: PAD_WIDTH });
-    }
-    
-    // Select the first pad as target
-    currentPad = landingPads[0];
-    lander.targetY = currentPad.y;
-    
-    return terrain;
-  }
-  
-  // Get terrain height at x
-  function getTerrainHeight(x) {
-    for (let i = 0; i < terrain.length - 1; i++) {
-      if (terrain[i].x <= x && terrain[i+1].x >= x) {
-        const t = (x - terrain[i].x) / (terrain[i+1].x - terrain[i].x);
-        return terrain[i].y + t * (terrain[i+1].y - terrain[i].y);
-      }
-    }
-    return 400;
-  }
-  
-  // Check if point is on a landing pad
-  function isOnLandingPad(x, y) {
-    if (!currentPad) return false;
-    const padTop = currentPad.y;
-    const padBottom = currentPad.y + PAD_HEIGHT;
-    return x >= currentPad.x - currentPad.width/2 &&
-           x <= currentPad.x + currentPad.width/2 &&
-           y >= padTop && y <= padBottom;
-  }
-  
-  // Get camera Y based on lander position
-  function getCameraY() {
-    return Math.max(0, lander.y - CAMERA_HEIGHT);
-  }
-  
-  // Start a new landing cycle
-  function startNewCycle() {
-    cycleStarted = true;
-    cycleCount++;
-    state = 'descending';
-    lander.fuel = MAX_FUEL;
-    lander.crashed = false;
-    lander.landed = false;
-    
-    // Position lander above a new pad
-    const pad = landingPads[cycleCount % landingPads.length] || landingPads[0];
-    currentPad = pad;
-    lander.x = pad.x;
-    lander.y = pad.y - 200;
-    lander.vx = 0;
-    lander.vy = 0;
-    lander.targetY = pad.y;
-    lander.cycleComplete = false;
-    
-    fuelDisplay.textContent = Math.floor(lander.fuel);
-  }
-  
-  // AI autopilot - controls the thruster
-  function autopilot() {
-    if (lander.crashed || state === 'crashed' || lander.fuel <= 0) {
-      lander.thrusting = false;
-      return;
-    }
-    
-    const terrainHeight = getTerrainHeight(lander.x);
-    const distanceToGround = terrainHeight - lander.y;
-    const speed = Math.abs(lander.vy);
-    
-    // Decision logic for thrusting
-    let shouldThrust = false;
-    
-    if (state === 'descending') {
-      // Calculate when to start braking based on current descent
-      const terminalVelocity = Math.sqrt(2 * GRAVITY * Math.max(1, distanceToGround));
-      
-      // Soft landing logic: thrust when speed is too high or getting close to ground
-      if (speed > terminalVelocity * 0.7 || distanceToGround < 100) {
-        shouldThrust = true;
-      }
-      
-      // If very close to pad, ensure gentle approach
-      if (distanceToGround < 50 && speed > 1) {
-        shouldThrust = true;
-      }
-      
-      // Hard landing condition - ran out of fuel and too fast
-      if (speed > 5 && distanceToGround < 60) {
-        // Misjudge - won't make it
-      }
-      
-    } else if (state === 'landing') {
-      // Fine-tune landing
-      if (lander.vy > 0 && distanceToGround < 30) {
-        shouldThrust = true;
-      } else if (distanceToGround < 5) {
-        shouldThrust = true;
-      }
-    }
-    
-    // Occasionally misjudge (10% chance) - don't thrust when we should
-    const misjudgment = Math.random() < 0.005;
-    if (misjudgment && distanceToGround < 80) {
-      shouldThrust = false;
-    }
-    
-    // Apply thrust
-    if (shouldThrust && lander.fuel > 0) {
-      lander.thrusting = true;
-      lander.vy -= THRUST_POWER;
-      lander.fuel -= FUEL_CONSUMPTION_RATE;
-      lander.fuel = Math.max(0, lander.fuel);
-      
-      // Add exhaust particles
-      for (let i = 0; i < 3; i++) {
-        const px = lander.x + (Math.random() - 0.5) * LANDER_WIDTH;
-        const py = lander.y + LANDER_HEIGHT/2;
-        const pvx = (Math.random() - 0.5) * 0.5;
-        const pvy = 2 + Math.random() * 2;
-        dustParticles.push(new Particle(px, py, pvx, pvy, 20, '#ff8800'));
-      }
-    } else {
-      lander.thrusting = false;
-    }
-    
-    fuelDisplay.textContent = Math.floor(lander.fuel);
-  }
-  
-  // Update game state
-  function update() {
-    if (!cycleStarted) {
-      startNewCycle();
-      return;
-    }
-    
-    // Apply gravity
-    lander.vy += GRAVITY;
-    
-    // Apply autopilot
-    autopilot();
-    
-    // Update position
-    lander.x += lander.vx;
-    lander.y += lander.vy;
-    
-    // Boundary checks
-    if (lander.x < 5) {
-      lander.x = 5;
-      lander.vx = 0;
-    } else if (lander.x > terrain[terrain.length - 1].x - 5) {
-      lander.x = terrain[terrain.length - 1].x - 5;
-      lander.vx = 0;
-    }
-    
-    // Check for landing/crash
-    const terrainHeight = getTerrainHeight(lander.x);
-    const landerBottom = lander.y + LANDER_HEIGHT/2;
-    const landerTop = lander.y - LANDER_HEIGHT/2;
-    
-    if (state === 'descending' || state === 'landing') {
-      if (landerBottom >= terrainHeight - 1) {
-        lander.y = terrainHeight - LANDER_HEIGHT/2;
+    while (x < canvas.width + 100) {
+        let segmentWidth = 20 + Math.random() * 30;
+        let slope = (Math.random() - 0.5) * 0.6;
         
-        // Check if landed on pad
-        if (isOnLandingPad(lander.x, landerBottom)) {
-          const impactVelocity = Math.abs(lander.vy);
-          if (impactVelocity < 2.5) {
-            // Gentle landing
-            lander.landed = true;
-            lander.vx = 0;
-            lander.vy = 0;
-            state = 'landing';
-            lander.cycleComplete = true;
-            
-            // Create dust cloud on landing
-            for (let i = 0; i < 20; i++) {
-              dustParticles.push(new Dust(
-                lander.x + (Math.random() - 0.5) * 30,
-                lander.y + 20,
-                (Math.random() - 0.5) * 2,
-                Math.random() * -1
-              ));
-            }
-          } else {
-            // Hard landing - crash
-            lander.crashed = true;
-            state = 'crashed';
-            
-            // Create bigger dust cloud
-            for (let i = 0; i < 30; i++) {
-              dustParticles.push(new Dust(
-                lander.x + (Math.random() - 0.5) * 40,
-                lander.y + 20,
-                (Math.random() - 0.5) * 3,
-                Math.random() * -2
-              ));
-            }
-          }
-        } else {
-          // Crashed into terrain
-          lander.crashed = true;
-          state = 'crashed';
-          
-          for (let i = 0; i < 25; i++) {
-            dustParticles.push(new Dust(
-              lander.x + (Math.random() - 0.5) * 30,
-              lander.y + 20,
-              (Math.random() - 0.5) * 2,
-              Math.random() * -1
-            ));
-          }
+        for (let i = 0; i < segmentWidth; i++) {
+            terrain.push({x: x + i, y: y});
+            y += slope;
         }
-      }
+        
+        x += segmentWidth;
+        
+        // Add some wider flat areas occasionally
+        if (Math.random() < 0.3) {
+            let flatLength = 80 + Math.random() * 100;
+            for (let i = 0; i < flatLength; i++) {
+                terrain.push({x: x + i, y: y});
+            }
+            x += flatLength;
+        }
     }
     
-    // Handle landing lift-off and regeneration
-    if (state === 'landing' && lander.cycleComplete) {
-      // Wait a moment then lift off
-      setTimeout(() => {
-        lander.vy = -3;
-        state = 'lifting';
-      }, 1000);
+    // Find a suitable flat area for landing pad
+    findLandingPad();
+}
+
+// Find a flat area for the landing pad
+function findLandingPad() {
+    let bestStart = 0;
+    let bestFlatness = 0;
+    
+    for (let i = 0; i < terrain.length - 30; i++) {
+        let flatness = 0;
+        for (let j = 1; j < 30; j++) {
+            if (Math.abs(terrain[i+j].y - terrain[i].y) < 3) {
+                flatness++;
+            }
+        }
+        if (flatness > bestFlatness) {
+            bestFlatness = flatness;
+            bestStart = i;
+        }
     }
     
-    if (state === 'lifting') {
-      if (lander.y < lander.targetY - 150) {
-        // Scroll to new landing site
-        state = 'regenerating';
-        setTimeout(() => {
-          generateTerrain();
-          startNewCycle();
-          dustParticles = [];
-        }, 1000);
-      }
+    let padX = terrain[bestStart + 15].x;
+    let padY = terrain[bestStart + 15].y;
+    
+    pad = {
+        x: padX,
+        y: padY,
+        width: 40,
+        height: 8
+    };
+    
+    targetX = pad.x + pad.width/2;
+    targetY = pad.y - 50;
+}
+
+// Reset game cycle
+function resetCycle() {
+    lander.x = canvas.width / 2;
+    lander.y = -50;
+    lander.vx = (Math.random() - 0.5) * 2;
+    lander.vy = 0;
+    lander.fuel = FUEL_CAPACITY;
+    lander.rotation = 0;
+    lander.landed = false;
+    lander.phase = 'descent';
+    scrollY = 0;
+    crash = false;
+    generateTerrain();
+    cycleCount++;
+}
+
+// Create exhaust particles
+function createExhaust() {
+    for (let i = 0; i < 5; i++) {
+        particles.push({
+            x: lander.x + (Math.random() - 0.5) * 12,
+            y: lander.y + 15,
+            vx: (Math.random() - 0.5) * 2 - lander.vx * 0.5,
+            vy: -3 + Math.random() * 1 - lander.vy,
+            life: 0.5 + Math.random() * 0.3,
+            size: 2 + Math.random() * 2,
+            r: 255,
+            g: 100 + Math.random() * 80,
+            b: 0
+        });
     }
     
-    if (state === 'crashed') {
-      // Wait then restart
-      setTimeout(() => {
-        generateTerrain();
-        startNewCycle();
-        dustParticles = [];
-      }, 2000);
+    // Create light particles that illuminate terrain
+    if (Math.random() < 0.3) {
+        lights.push({
+            x: lander.x + (Math.random() - 0.5) * 15,
+            y: lander.y + 15,
+            vx: (Math.random() - 0.5) * 1,
+            vy: -1 - lander.vy * 0.5,
+            life: 0.4 + Math.random() * 0.2,
+            intensity: 0.5 + Math.random() * 0.5
+        });
+    }
+}
+
+// Create dust particles on hard landing
+function createDust() {
+    for (let i = 0; i < 30; i++) {
+        particles.push({
+            x: lander.x + (Math.random() - 0.5) * 20,
+            y: lander.y + 15,
+            vx: (Math.random() - 0.5) * 6,
+            vy: -2 + Math.random() * 2,
+            life: 0.8 + Math.random() * 0.4,
+            size: 3 + Math.random() * 3,
+            r: 180 + Math.random() * 50,
+            g: 140 + Math.random() * 40,
+            b: 80 + Math.random() * 30
+        });
+    }
+}
+
+// Auto-pilot control logic
+function autoPilot() {
+    if (lander.phase !== 'descent' || lander.fuel <= 0) return;
+    
+    // Calculate desired thrust based on position relative to target
+    let dx = targetX - lander.x;
+    let dy = targetY - lander.y;
+    
+    // Horizontal correction
+    let desiredVx = dx * 0.02;
+    let thrustX = (desiredVx - lander.vx) * 0.3;
+    
+    // Apply horizontal thrust (tilt the lander)
+    if (Math.abs(thrustX) > 0.05 && lander.fuel > 10) {
+        lander.rotation = Math.max(-Math.PI/4, Math.min(Math.PI/4, thrustX * 0.8));
+        lander.vx += thrustX * 0.7;
+        lander.fuel -= Math.abs(thrustX) * 0.5;
+        createExhaust();
+    } else {
+        lander.rotation *= 0.9; // Return to upright
+    }
+    
+    // Vertical control - check ground height ahead
+    let groundHeight = getGroundHeight(lander.x);
+    let distanceToGround = groundHeight - lander.y;
+    
+    // Calculate required deceleration for soft landing
+    let requiredDecel = (lander.vy * lander.vy) / (2 * Math.max(distanceToGround, 10));
+    let neededThrust = requiredDecel + GRAVITY;
+    
+    // Apply vertical thrust
+    if (lander.fuel > 5) {
+        if (Math.abs(neededThrust) > 0.1 || distanceToGround < 100) {
+            let thrustPower = Math.min(THRUST, Math.max(0, neededThrust)) * 0.8 + 0.2;
+            lander.vy -= thrustPower;
+            lander.fuel -= thrustPower * 2;
+            createExhaust();
+        }
+    }
+}
+
+// Get terrain height at x coordinate
+function getGroundHeight(x) {
+    if (terrain.length === 0) return canvas.height;
+    
+    // Find closest terrain point
+    let closest = terrain[0];
+    let minDist = Math.abs(terrain[0].x - x);
+    
+    for (let i = 1; i < terrain.length; i++) {
+        let dist = Math.abs(terrain[i].x - x);
+        if (dist < minDist) {
+            minDist = dist;
+            closest = terrain[i];
+        }
+    }
+    
+    return closest.y;
+}
+
+// Update game state
+function update() {
+    if (lander.phase === 'liftOff' || lander.phase === 'landedTransition') {
+        // Scroll terrain upward for lift-off effect
+        scrollY -= 3;
+        if (scrollY < -canvas.height) {
+            resetCycle();
+        }
+        // Apply some upward velocity during lift-off
+        lander.y -= 2;
+        lander.vy = -2;
+        return;
+    }
+    
+    if (lander.phase === 'descent') {
+        // Apply gravity
+        lander.vy += GRAVITY;
+        
+        // Run autopilot
+        autoPilot();
+        
+        // Update position
+        lander.x += lander.vx;
+        lander.y += lander.vy;
+        
+        // Boundary checks
+        if (lander.x < 10) { lander.x = 10; lander.vx *= -0.5; }
+        if (lander.x > canvas.width - 10) { lander.x = canvas.width - 10; lander.vx *= -0.5; }
+        
+        // Check for landing
+        let groundHeight = getGroundHeight(lander.x);
+        
+        if (lander.y + 10 > groundHeight) {
+            lander.y = groundHeight - 10;
+            
+            // Check if landing pad is nearby
+            let onPad = Math.abs(lander.x - pad.x) < pad.width;
+            let speed = Math.sqrt(lander.vx * lander.vx + lander.vy * lander.vy);
+            
+            if (onPad && speed < MAX_SPEED_LAND) {
+                // Successful landing
+                lander.landed = true;
+                lander.vx *= 0.3;
+                lander.vy = 0;
+                lander.phase = 'landed';
+                
+                // Brief pause then lift off
+                setTimeout(() => {
+                    lander.phase = 'liftOff';
+                }, 1000);
+            } else {
+                // Crash landing
+                crash = true;
+                lander.vx *= 0.5;
+                lander.vy *= 0.5;
+                createDust();
+                
+                // Still lift off after delay even if crashed
+                setTimeout(() => {
+                    lander.phase = 'liftOff';
+                    lander.landed = false;
+                }, 1500);
+            }
+        }
     }
     
     // Update particles
-    for (let i = dustParticles.length - 1; i >= 0; i--) {
-      dustParticles[i].update();
-      if (dustParticles[i].life <= 0) {
-        dustParticles.splice(i, 1);
-      }
-    }
-  }
-  
-  // Draw terrain with lighting effect
-  function drawTerrain(cameraY) {
-    if (terrain.length === 0) return;
-    
-    const scale = 0.5;
-    ctx.save();
-    
-    // Draw filled terrain
-    ctx.fillStyle = '#8B7D6B';
-    ctx.beginPath();
-    ctx.moveTo(0, height);
-    
-    for (let i = 0; i < terrain.length; i++) {
-      const screenX = terrain[i].x * scale;
-      const screenY = height - (terrain[i].y - cameraY) * scale;
-      
-      if (screenX < -100) continue;
-      if (screenX > width + 100) break;
-      
-      ctx.lineTo(screenX, screenY);
+    for (let i = particles.length - 1; i >= 0; i--) {
+        let p = particles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vy += 0.05; // slight gravity on particles
+        p.life -= 0.016;
+        
+        if (p.life <= 0) {
+            particles.splice(i, 1);
+        }
     }
     
-    ctx.lineTo(width, height);
-    ctx.closePath();
-    ctx.fill();
-    
-    // Draw landing pads
-    ctx.fillStyle = '#444';
-    ctx.strokeStyle = '#66aaff';
-    ctx.lineWidth = 2;
-    for (const pad of landingPads) {
-      const screenX = pad.x * scale;
-      const screenY = height - (pad.y - cameraY) * scale;
-      ctx.fillRect(screenX - pad.width/2 * scale, screenY, pad.width * scale, PAD_HEIGHT * scale);
-      ctx.strokeRect(screenX - pad.width/2 * scale, screenY, pad.width * scale, PAD_HEIGHT * scale);
+    // Update light particles
+    for (let i = lights.length - 1; i >= 0; i--) {
+        let l = lights[i];
+        l.x += l.vx;
+        l.y += l.vy;
+        l.life -= 0.016;
+        
+        if (l.life <= 0) {
+            lights.splice(i, 1);
+        }
     }
     
-    ctx.restore();
-  }
-  
-  // Draw light cone from thruster
-  function drawThrusterLight(cameraY) {
-    if (!lander.thrusting) return;
-    
-    const scale = 0.5;
-    const lightX = lander.x * scale;
-    const lightY = height - (lander.y + LANDER_HEIGHT/2 - cameraY) * scale;
-    
-    const gradient = ctx.createRadialGradient(lightX, lightY, 0, lightX, lightY, 80);
-    gradient.addColorStop(0, 'rgba(255, 136, 0, 0.4)');
-    gradient.addColorStop(0.6, 'rgba(255, 136, 0, 0.1)');
-    gradient.addColorStop(1, 'rgba(255, 136, 0, 0)');
-    
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.fillStyle = gradient;
-    ctx.fillRect(lightX - 80, lightY - 20, 160, 120);
-    ctx.restore();
-  }
-  
-  // Draw lander
-  function drawLander(cameraY) {
-    const scale = 0.5;
-    const screenX = lander.x * scale;
-    const screenY = height - (lander.y - cameraY) * scale;
-    
-    ctx.save();
-    
-    // Lander body
-    ctx.fillStyle = '#ccc';
-    ctx.strokeStyle = '#aaa';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(screenX - LANDER_WIDTH/2 * scale, screenY - LANDER_HEIGHT/2 * scale);
-    ctx.lineTo(screenX + LANDER_WIDTH/2 * scale, screenY - LANDER_HEIGHT/2 * scale);
-    ctx.lineTo(screenX + LANDER_WIDTH/2 * scale, screenY + LANDER_HEIGHT/2 * scale);
-    ctx.lineTo(screenX - LANDER_WIDTH/2 * scale, screenY + LANDER_HEIGHT/2 * scale);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-    
-    // Lander details
-    ctx.fillStyle = '#999';
-    ctx.fillRect(screenX - LANDER_WIDTH/2 * scale + 2, screenY - LANDER_HEIGHT/2 * scale + 2, 4, 4);
-    ctx.fillRect(screenX + LANDER_WIDTH/2 * scale - 6, screenY - LANDER_HEIGHT/2 * scale + 2, 4, 4);
-    
-    // Thruster
-    if (lander.thrusting) {
-      ctx.fillStyle = '#ff6600';
-      ctx.beginPath();
-      ctx.moveTo(screenX - 4 * scale, screenY + LANDER_HEIGHT/2 * scale);
-      ctx.lineTo(screenX + 4 * scale, screenY + LANDER_HEIGHT/2 * scale);
-      ctx.lineTo(screenX, screenY + (LANDER_HEIGHT/2 + 8) * scale);
-      ctx.closePath();
-      ctx.fill();
+    // Apply drag to lander
+    if (lander.phase === 'descent') {
+        lander.vx *= 0.98;
     }
-    
-    ctx.restore();
-  }
-  
-  // Draw fuel gauge
-  function drawFuelGauge() {
-    const gaugeWidth = 200;
-    const gaugeHeight = 15;
-    ctx.save();
-    ctx.fillStyle = '#333';
-    ctx.fillRect(10, 40, gaugeWidth, gaugeHeight);
-    ctx.strokeStyle = '#fff';
-    ctx.strokeRect(10, 40, gaugeWidth, gaugeHeight);
-    
-    ctx.fillStyle = '#4CAF50';
-    const fuelWidth = (lander.fuel / MAX_FUEL) * (gaugeWidth - 2);
-    ctx.fillRect(11, 41, fuelWidth, gaugeHeight - 2);
-    ctx.restore();
-  }
-  
-  // Main render function
-  function render() {
+}
+
+// Render everything
+function render() {
     // Clear canvas
     ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, width, height);
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
     
-    const cameraY = getCameraY();
-    
-    // Draw stars
+    // Draw starry background
     ctx.fillStyle = '#fff';
     for (let i = 0; i < 200; i++) {
-      const starX = (i * 13.7) % width;
-      const starY = (i * 7.3) % height;
-      const size = (i % 3) * 0.5 + 0.5;
-      ctx.globalAlpha = 0.5 + Math.sin(i) * 0.3;
-      ctx.fillRect(starX, starY, size, size);
+        let x = (i * 53 + scrollY * 0.1) % canvas.width;
+        let y = (i * 77 + scrollY * 0.2) % canvas.height;
+        let size = Math.sin(i + scrollY * 0.01) * 0.5 + 0.5;
+        ctx.fillRect(x, y, size, size);
     }
-    ctx.globalAlpha = 1;
     
-    // Draw thruster light
-    drawThrusterLight(cameraY);
+    // Apply scroll offset to terrain drawing
+    let terrainOffset = scrollY;
     
     // Draw terrain
-    drawTerrain(cameraY);
+    ctx.fillStyle = '#554433';
+    ctx.beginPath();
+    ctx.moveTo(0, canvas.height);
+    ctx.lineTo(terrain[0].x, terrain[0].y + terrainOffset);
     
-    // Draw dust particles
-    for (const dust of dustParticles) {
-      dust.draw(ctx, cameraY);
+    for (let i = 1; i < terrain.length; i++) {
+        ctx.lineTo(terrain[i].x, terrain[i].y + terrainOffset);
+    }
+    
+    ctx.lineTo(canvas.width, canvas.height);
+    ctx.fill();
+    
+    // Draw landing pad
+    ctx.fillStyle = '#ff0000';
+    ctx.fillRect(
+        pad.x, 
+        pad.y + terrainOffset, 
+        pad.width, 
+        pad.height
+    );
+    
+    // Draw pad markings
+    ctx.strokeStyle = '#ffff00';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(pad.x + 5, pad.y + terrainOffset + 4);
+    ctx.lineTo(pad.x + pad.width - 5, pad.y + terrainOffset + 4);
+    ctx.stroke();
+    
+    // Draw landing indicator light
+    ctx.fillStyle = '#00ffff';
+    ctx.beginPath();
+    ctx.arc(pad.x + pad.width/2, pad.y + terrainOffset + 4, 3, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Draw light particles (for terrain illumination effect)
+    for (let light of lights) {
+        ctx.save();
+        ctx.translate(light.x, light.y + terrainOffset);
+        let gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, 40);
+        gradient.addColorStop(0, `rgba(255, 200, 100, ${light.intensity})`);
+        gradient.addColorStop(1, 'rgba(255, 200, 100, 0)');
+        ctx.fillStyle = gradient;
+        ctx.fillRect(-40, -40, 80, 80);
+        ctx.restore();
     }
     
     // Draw exhaust particles
-    for (const p of dustParticles) {
-      p.draw(ctx);
+    for (let p of particles) {
+        ctx.fillStyle = `rgb(${p.r}, ${p.g}, ${p.b})`;
+        ctx.globalAlpha = Math.max(0, p.life);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y + terrainOffset, p.size, 0, Math.PI * 2);
+        ctx.fill();
     }
+    ctx.globalAlpha = 1;
     
     // Draw lander
-    drawLander(cameraY);
+    drawLander();
     
     // Draw fuel gauge
     drawFuelGauge();
     
-    // Draw status
+    // Draw cycle counter
     ctx.fillStyle = '#fff';
-    ctx.font = '14px monospace';
-    ctx.textAlign = 'left';
-    ctx.fillText(`Cycle: ${cycleCount}`, 10, height - 20);
-    ctx.fillText(`State: ${state}`, 10, height - 6);
+    ctx.font = '16px Arial';
+    ctx.fillText(`Landings: ${cycleCount}`, 10, 30);
     
-    if (lander.crashed) {
-      ctx.fillStyle = 'rgba(255, 0, 0, 0.7)';
-      ctx.font = '20px monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText('HARD LANDING - RECOVERING...', width/2, height/2);
+    if (crash) {
+        ctx.fillStyle = '#ff5555';
+        ctx.font = '20px Arial';
+        ctx.fillText('ROUGH LANDING!', canvas.width/2 - 60, 50);
     }
-  }
-  
-  // Game loop
-  function gameLoop() {
+}
+
+// Draw the lunar lander craft
+function drawLander() {
+    ctx.save();
+    ctx.translate(lander.x, lander.y);
+    ctx.rotate(lander.rotation);
+    
+    // Main body
+    ctx.fillStyle = '#cccccc';
+    ctx.beginPath();
+    ctx.moveTo(-10, -20);
+    ctx.lineTo(10, -20);
+    ctx.lineTo(10, 10);
+    ctx.lineTo(-10, 10);
+    ctx.fill();
+    
+    // Top dome
+    ctx.beginPath();
+    ctx.arc(0, -20, 10, Math.PI, 0, false);
+    ctx.fill();
+    
+    // Engine section
+    ctx.fillStyle = '#aaaaaa';
+    ctx.fillRect(-8, 10, 16, 10);
+    
+    // Landing gear
+    ctx.strokeStyle = '#888888';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-10, 18);
+    ctx.lineTo(-18, 30);
+    ctx.moveTo(10, 18);
+    ctx.lineTo(18, 30);
+    ctx.stroke();
+    
+    // Landing pads
+    ctx.fillStyle = '#666666';
+    ctx.fillRect(-20, 28, 4, 4);
+    ctx.fillRect(16, 28, 4, 4);
+    
+    // Windows
+    ctx.fillStyle = '#88ccff';
+    ctx.beginPath();
+    ctx.arc(-4, -10, 2, 0, Math.PI * 2);
+    ctx.arc(4, -10, 2, 0, Math.PI * 2);
+    ctx.fill();
+    
+    ctx.restore();
+}
+
+// Draw fuel gauge UI
+function drawFuelGauge() {
+    let gaugeX = canvas.width - 150;
+    let gaugeY = 20;
+    let gaugeWidth = 120;
+    let gaugeHeight = 20;
+    
+    // Background
+    ctx.fillStyle = '#333';
+    ctx.fillRect(gaugeX, gaugeY, gaugeWidth, gaugeHeight);
+    
+    // Fuel level
+    let fuelPercent = lander.fuel / FUEL_CAPACITY;
+    let fuelColor = fuelPercent > 0.3 ? '#00ff00' : fuelPercent > 0.1 ? '#ffff00' : '#ff0000';
+    ctx.fillStyle = fuelColor;
+    ctx.fillRect(gaugeX, gaugeY, gaugeWidth * fuelPercent, gaugeHeight);
+    
+    // Border
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(gaugeX, gaugeY, gaugeWidth, gaugeHeight);
+    
+    // Label
+    ctx.fillStyle = '#fff';
+    ctx.font = '14px Arial';
+    ctx.fillText('FUEL', gaugeX - 30, gaugeY + 14);
+}
+
+// Handle window resize
+window.addEventListener('resize', () => {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    generateTerrain();
+});
+
+// Initialize and start game loop
+generateTerrain();
+
+function gameLoop() {
     update();
     render();
     requestAnimationFrame(gameLoop);
-  }
-  
-  // Initialize
-  generateTerrain();
-  gameLoop();
-})();
+}
+
+gameLoop();
 </script>
 </body>
 </html>

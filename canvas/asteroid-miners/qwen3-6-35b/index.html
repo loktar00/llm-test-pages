@@ -1,624 +1,1180 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Asteroid Miners</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background-color: #050505;
-        }
-        canvas {
-            display: block;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Asteroid Miners</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; }
+canvas { display: block; }
+</style>
 </head>
 <body>
-    <canvas id="gameCanvas"></canvas>
-    <script>
-        // --- Setup ---
-        const canvas = document.getElementById('gameCanvas');
-        const ctx = canvas.getContext('2d');
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
 
-        let width, height;
-        function resize() {
-            width = canvas.width = window.innerWidth;
-            height = canvas.height = window.innerHeight;
+// --- Utility ---
+const TAU = Math.PI * 2;
+const rand = (a, b) => Math.random() * (b - a) + a;
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const lerp = (a, b, t) => a + (b - a) * t;
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const angleTo = (a, b) => Math.atan2(b.y - a.y, b.x - a.x);
+
+// --- Stars ---
+const stars = [];
+for (let i = 0; i < 600; i++) {
+  stars.push({ x: rand(-4000, 4000), y: rand(-4000, 4000), s: rand(0.3, 2), b: rand(0.2, 1) });
+}
+
+// --- Camera ---
+const cam = { x: 0, y: 0, targetX: 0, targetY: 0, zoom: 1 };
+
+// --- Station ---
+const station = {
+  x: 0, y: 0, angle: 0, rotSpeed: 0.003,
+  radius: 60,
+  dockAngle: 0,
+  oreCapacity: 100,
+  currentOre: 0,
+  update(dt) {
+    this.angle += this.rotSpeed * dt;
+    this.dockAngle += 0.01 * dt;
+  },
+  draw(ctx) {
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    // Outer ring
+    ctx.rotate(this.angle);
+    ctx.strokeStyle = '#4488cc';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(0, 0, this.radius, 0, TAU);
+    ctx.stroke();
+    // Inner ring
+    ctx.strokeStyle = '#66aadd';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0, 0, this.radius * 0.6, 0, TAU);
+    ctx.stroke();
+    // Spokes
+    for (let i = 0; i < 4; i++) {
+      const a = (TAU / 4) * i;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a) * 15, Math.sin(a) * 15);
+      ctx.lineTo(Math.cos(a) * this.radius, Math.sin(a) * this.radius);
+      ctx.strokeStyle = '#5599dd';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    // Center hub
+    ctx.fillStyle = '#88ccff';
+    ctx.beginPath();
+    ctx.arc(0, 0, 15, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = '#aaddff';
+    ctx.beginPath();
+    ctx.arc(0, 0, 8, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+    // Docking port
+    const da = this.dockAngle;
+    ctx.fillStyle = '#ffaa00';
+    ctx.beginPath();
+    ctx.arc(Math.cos(da) * (this.radius + 10), Math.sin(da) * (this.radius + 10), 6, 0, TAU);
+    ctx.fill();
+    // Label
+    ctx.fillStyle = '#88ccff';
+    ctx.font = '11px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('STATION', this.x, this.y - this.radius - 15);
+    ctx.fillStyle = '#ffaa00';
+    ctx.fillText(`Ore: ${Math.floor(this.currentOre)}/${this.oreCapacity}`, this.x, this.y - this.radius - 3);
+  }
+};
+
+// --- Asteroid Belt ---
+const asteroids = [];
+const beltCenter = { x: 1200, y: 0 };
+const beltRadius = 600;
+
+function createAsteroid(x, y, r) {
+  const oreTypes = [
+    { color: '#ff6644', name: 'Iron', glow: '#ff3311' },
+    { color: '#44aaff', name: 'Cobalt', glow: '#1188ff' },
+    { color: '#aaff44', name: 'Uranium', glow: '#88ff11' },
+    { color: '#ffaa00', name: 'Gold', glow: '#ff8800' },
+    { color: '#ff44ff', name: 'Platinum', glow: '#ff11ff' },
+  ];
+  const ore = oreTypes[Math.floor(Math.random() * oreTypes.length)];
+  const verts = [];
+  const n = Math.floor(rand(8, 14));
+  for (let i = 0; i < n; i++) {
+    const a = (TAU / n) * i;
+    const rr = r * rand(0.7, 1.0);
+    verts.push({ x: Math.cos(a) * rr, y: Math.sin(a) * rr });
+  }
+  return {
+    x: x || rand(beltCenter.x - beltRadius, beltCenter.x + beltRadius),
+    y: y || rand(-beltRadius, beltRadius),
+    vx: rand(-0.3, 0.3),
+    vy: rand(-0.3, 0.3),
+    r: r || rand(25, 70),
+    angle: rand(0, TAU),
+    rotSpeed: rand(-0.005, 0.005),
+    verts,
+    ore,
+    health: r * 2,
+    maxHealth: r * 2,
+    depleted: false,
+    depletionTimer: 0
+  };
+}
+
+function initAsteroids() {
+  asteroids.length = 0;
+  for (let i = 0; i < 35; i++) {
+    const a = rand(0, TAU);
+    const r = rand(beltRadius * 0.3, beltRadius * 1.2);
+    asteroids.push(createAsteroid(beltCenter.x + Math.cos(a) * r, Math.sin(a) * r, rand(20, 65)));
+  }
+}
+initAsteroids();
+
+function respawnAsteroids() {
+  const depleted = asteroids.filter(a => a.depleted);
+  if (depleted.length > 0 && asteroids.length < 45) {
+    const a = rand(0, TAU);
+    const r = rand(beltRadius * 0.2, beltRadius * 1.3);
+    asteroids.push(createAsteroid(beltCenter.x + Math.cos(a) * r, Math.sin(a) * r, rand(25, 55)));
+  }
+}
+
+function splitAsteroid(ast) {
+  if (ast.r < 15) {
+    ast.depleted = true;
+    ast.depletionTimer = rand(600, 1200);
+    return;
+  }
+  const half = ast.r * 0.5;
+  const a1 = createAsteroid(ast.x, ast.y, half);
+  const a2 = createAsteroid(ast.x, ast.y, half * 0.8);
+  a1.vx = ast.vx + rand(-1.5, 1.5);
+  a1.vy = ast.vy + rand(-1.5, 1.5);
+  a2.vx = ast.vx + rand(-1.5, 1.5);
+  a2.vy = ast.vy + rand(-1.5, 1.5);
+  asteroids.push(a1, a2);
+  ast.depleted = true;
+  ast.depletionTimer = rand(400, 800);
+  // Spawn ore chunks
+  for (let i = 0; i < 3; i++) {
+    const angle = rand(0, TAU);
+    oreChunks.push({
+      x: ast.x + Math.cos(angle) * ast.r * 0.5,
+      y: ast.y + Math.sin(angle) * ast.r * 0.5,
+      vx: Math.cos(angle) * rand(0.5, 2),
+      vy: Math.sin(angle) * rand(0.5, 2),
+      r: rand(3, 6),
+      ore: ast.ore,
+      grabbed: false,
+      trail: []
+    });
+  }
+  // Particles
+  for (let i = 0; i < 15; i++) {
+    const angle = rand(0, TAU);
+    const speed = rand(1, 4);
+    particles.push({
+      x: ast.x, y: ast.y,
+      vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+      life: rand(30, 80),
+      maxLife: 80,
+      color: ast.ore.glow,
+      size: rand(2, 5)
+    });
+  }
+}
+
+// --- Ore Chunks ---
+const oreChunks = [];
+
+// --- Particles ---
+const particles = [];
+
+// --- Hauler Ships ---
+const haulers = [];
+const haulerColors = ['#ff4444', '#44ff44', '#4444ff', '#ffff44', '#ff44ff'];
+const haulerNames = ['Hauler-1', 'Hauler-2', 'Hauler-3', 'Hauler-4', 'Hauler-5'];
+
+function createHauler(i) {
+  return {
+    x: rand(-200, 200),
+    y: rand(-200, 200),
+    vx: 0, vy: 0,
+    angle: 0,
+    r: 18,
+    speed: 2.5,
+    turnSpeed: 0.04,
+    maxOre: 20,
+    currentOre: 0,
+    state: 'idle', // idle, traveling_to_belt, mining, traveling_to_station, docking, unloading
+    targetAsteroid: null,
+    targetOre: null,
+    beamActive: false,
+    beamTarget: null,
+    beamTimer: 0,
+    stateTimer: 0,
+    color: haulerColors[i],
+    name: haulerNames[i],
+    docked: false,
+    miningProgress: 0,
+    tractorRange: 80,
+    unloadingProgress: 0,
+    alive: true,
+    respawnTimer: 0
+  };
+}
+
+for (let i = 0; i < 5; i++) haulers.push(createHauler(i));
+
+function findNearestAsteroid(ship) {
+  let best = null, bestDist = Infinity;
+  for (const a of asteroids) {
+    if (a.depleted) continue;
+    const d = dist(ship, a);
+    if (d < bestDist) { bestDist = d; best = a; }
+  }
+  return best;
+}
+
+function findNearestOre(ship) {
+  let best = null, bestDist = Infinity;
+  for (const o of oreChunks) {
+    if (o.grabbed) continue;
+    const d = dist(ship, o);
+    if (d < bestDist) { bestDist = d; best = o; }
+  }
+  return best;
+}
+
+function updateHauler(h, dt) {
+  if (!h.alive) {
+    h.respawnTimer -= dt;
+    if (h.respawnTimer <= 0) {
+      h.alive = true;
+      h.x = station.x + rand(-100, 100);
+      h.y = station.y + rand(-100, 100);
+      h.state = 'idle';
+      h.currentOre = 0;
+    }
+    return;
+  }
+
+  h.stateTimer += dt;
+
+  // State machine
+  switch (h.state) {
+    case 'idle':
+      if (h.stateTimer > 60) {
+        h.state = 'traveling_to_belt';
+        h.stateTimer = 0;
+        h.targetAsteroid = findNearestAsteroid(h);
+      }
+      break;
+
+    case 'traveling_to_belt':
+      if (!h.targetAsteroid || h.targetAsteroid.depleted) {
+        h.targetAsteroid = findNearestAsteroid(h);
+      }
+      if (h.targetAsteroid) {
+        const a = angleTo(h, h.targetAsteroid);
+        h.angle = lerp(h.angle, a, 0.05);
+        h.vx += Math.cos(h.angle) * h.speed * 0.1;
+        h.vy += Math.sin(h.angle) * h.speed * 0.1;
+        const d = dist(h, h.targetAsteroid);
+        if (d < h.targetAsteroid.r + 30) {
+          h.state = 'mining';
+          h.stateTimer = 0;
+          h.miningProgress = 0;
         }
-        window.addEventListener('resize', resize);
-        resize();
-
-        // --- Constants ---
-        const WORLD_WIDTH = 3000;
-        const WORLD_HEIGHT = 2000;
-        const STATION_POS = { x: 200, y: WORLD_HEIGHT / 2 };
-        const BELT_CENTER = { x: 1500, y: WORLD_HEIGHT / 2 };
-        const BELT_RADIUS = 600;
-        const NUM_ASTEROIDS = 25;
-        const NUM_HAULERS = 5;
-        const NUM_PIRATES = 3;
-        const NUM_DRONES = 2;
-
-        // --- State ---
-        let camera = { x: 0, y: 0 };
-        let asteroids = [];
-        let haulers = [];
-        let pirates = [];
-        let drones = [];
-        let particles = [];
-        let stars = [];
-        let time = 0;
-
-        // --- Classes ---
-
-        class Vector {
-            constructor(x, y) { this.x = x; this.y = y; }
-            add(v) { return new Vector(this.x + v.x, this.y + v.y); }
-            sub(v) { return new Vector(this.x - v.x, this.y - v.y); }
-            mult(n) { return new Vector(this.x * n, this.y * n); }
-            mag() { return Math.sqrt(this.x * this.x + this.y * this.y); }
-            norm() { 
-                const m = this.mag(); 
-                return m === 0 ? new Vector(0,0) : new Vector(this.x/m, this.y/m); 
-            }
-            dist(v) { return Math.sqrt((this.x - v.x)**2 + (this.y - v.y)**2); }
+        if (d > 800) {
+          h.state = 'traveling_to_belt';
+          h.targetAsteroid = findNearestAsteroid(h);
         }
+      } else {
+        // No asteroids, go to station
+        h.state = 'traveling_to_station';
+        h.stateTimer = 0;
+      }
+      break;
 
-        class Particle {
-            constructor(x, y, color, speed, life) {
-                this.pos = new Vector(x, y);
-                const angle = Math.random() * Math.PI * 2;
-                this.vel = new Vector(Math.cos(angle) * speed, Math.sin(angle) * speed);
-                this.color = color;
-                this.life = life;
-                this.maxLife = life;
-                this.size = Math.random() * 3 + 1;
-            }
-            update() {
-                this.pos = this.pos.add(this.vel);
-                this.life--;
-                this.vel = this.vel.mult(0.95);
-            }
-            draw(ctx) {
-                ctx.globalAlpha = this.life / this.maxLife;
-                ctx.fillStyle = this.color;
-                ctx.beginPath();
-                ctx.arc(this.pos.x, this.pos.y, this.size, 0, Math.PI * 2);
-                ctx.fill();
-                ctx.globalAlpha = 1;
-            }
+    case 'mining':
+      if (!h.targetAsteroid || h.targetAsteroid.depleted) {
+        h.targetAsteroid = findNearestAsteroid(h);
+        if (!h.targetAsteroid) { h.state = 'traveling_to_station'; break; }
+      }
+      const ma = angleTo(h, h.targetAsteroid);
+      h.angle = lerp(h.angle, ma, 0.03);
+      // Orbit the asteroid
+      const orbitDist = h.targetAsteroid.r + 25;
+      const orbitAngle = ma + Math.PI / 2 * (h.stateTimer * 0.01 % 2 > 1 ? -1 : 1);
+      const targetX = h.targetAsteroid.x + Math.cos(orbitAngle) * orbitDist;
+      const targetY = h.targetAsteroid.y + Math.sin(orbitAngle) * orbitDist;
+      const toTarget = angleTo(h, { x: targetX, y: targetY });
+      h.angle = lerp(h.angle, toTarget, 0.05);
+      h.vx += Math.cos(h.angle) * h.speed * 0.08;
+      h.vy += Math.sin(h.angle) * h.speed * 0.08;
+
+      // Mining beam
+      h.beamActive = true;
+      h.beamTarget = h.targetAsteroid;
+      h.miningProgress += dt * 0.5;
+      h.targetAsteroid.health -= dt * 0.3;
+      if (h.targetAsteroid.health <= 0) {
+        splitAsteroid(h.targetAsteroid);
+        h.targetAsteroid = null;
+        h.state = 'traveling_to_belt';
+        h.stateTimer = 0;
+        h.miningProgress = 0;
+      }
+      // Chip ore chunks
+      if (Math.random() < 0.02) {
+        const ca = rand(0, TAU);
+        const cr = rand(h.targetAsteroid.r * 0.3, h.targetAsteroid.r * 0.8);
+        oreChunks.push({
+          x: h.targetAsteroid.x + Math.cos(ca) * cr,
+          y: h.targetAsteroid.y + Math.sin(ca) * cr,
+          vx: rand(-0.5, 0.5), vy: rand(-0.5, 0.5),
+          r: rand(3, 5), ore: h.targetAsteroid.ore, grabbed: false, trail: []
+        });
+      }
+      break;
+
+    case 'traveling_to_station':
+      const sa = angleTo(h, station);
+      h.angle = lerp(h.angle, sa, 0.05);
+      h.vx += Math.cos(h.angle) * h.speed * 0.1;
+      h.vy += Math.sin(h.angle) * h.speed * 0.1;
+      if (dist(h, station) < station.radius + 30) {
+        h.state = 'docking';
+        h.stateTimer = 0;
+      }
+      break;
+
+    case 'docking':
+      h.vx *= 0.95;
+      h.vy *= 0.95;
+      if (h.stateTimer > 60) {
+        h.state = 'unloading';
+        h.stateTimer = 0;
+        h.unloadingProgress = 0;
+      }
+      break;
+
+    case 'unloading':
+      h.unloadingProgress += dt * 0.05;
+      const unloadAmt = Math.min(h.currentOre, 0.3 * dt);
+      station.currentOre += unloadAmt;
+      h.currentOre -= unloadAmt;
+      if (h.currentOre <= 0.5) {
+        h.currentOre = 0;
+        h.state = 'traveling_to_belt';
+        h.stateTimer = 0;
+        h.targetAsteroid = findNearestAsteroid(h);
+      }
+      break;
+  }
+
+  // Physics
+  h.vx *= 0.96;
+  h.vy *= 0.96;
+  h.x += h.vx * dt;
+  h.y += h.vy * dt;
+
+  // Clamp to world
+  h.x = clamp(h.x, -2000, 3000);
+  h.y = clamp(h.y, -1500, 1500);
+
+  // Update beam
+  if (h.beamActive && h.beamTarget) {
+    h.beamTimer += dt;
+    if (h.beamTimer > 120 || !h.targetAsteroid || h.targetAsteroid.depleted) {
+      h.beamActive = false;
+      h.beamTimer = 0;
+    }
+  } else {
+    h.beamActive = false;
+    h.beamTimer = 0;
+  }
+
+  // Tractor ore chunks
+  if (h.currentOre < h.maxOre) {
+    const nearestOre = findNearestOre(h);
+    if (nearestOre && dist(h, nearestOre) < h.tractorRange) {
+      nearestOre.grabbed = true;
+      const oa = angleTo(nearestOre, h);
+      nearestOre.vx = lerp(nearestOre.vx, Math.cos(oa) * 3, 0.1);
+      nearestOre.vy = lerp(nearestOre.vy, Math.sin(oa) * 3, 0.1);
+      if (dist(nearestOre, h) < h.r + 5) {
+        nearestOre.grabbed = false;
+        h.currentOre += 1;
+        // Remove ore chunk
+        const idx = oreChunks.indexOf(nearestOre);
+        if (idx >= 0) oreChunks.splice(idx, 1);
+      }
+    }
+  }
+}
+
+function drawHauler(h, ctx) {
+  if (!h.alive) return;
+  ctx.save();
+  ctx.translate(h.x, h.y);
+  ctx.rotate(h.angle);
+
+  // Ship body
+  ctx.fillStyle = h.color;
+  ctx.beginPath();
+  ctx.moveTo(h.r, 0);
+  ctx.lineTo(-h.r * 0.7, -h.r * 0.6);
+  ctx.lineTo(-h.r * 0.4, 0);
+  ctx.lineTo(-h.r * 0.7, h.r * 0.6);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Cockpit
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(h.r * 0.3, 0, 3, 0, TAU);
+  ctx.fill();
+
+  // Engine glow
+  ctx.fillStyle = '#ff8800';
+  ctx.globalAlpha = 0.5 + Math.sin(Date.now() * 0.01) * 0.3;
+  ctx.beginPath();
+  ctx.arc(-h.r * 0.5, 0, 4, 0, TAU);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  ctx.restore();
+
+  // Name
+  ctx.fillStyle = h.color;
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(h.name, h.x, h.y - h.r - 8);
+
+  // Ore bar
+  if (h.currentOre > 0) {
+    ctx.fillStyle = '#333';
+    ctx.fillRect(h.x - 15, h.y - h.r - 5, 30, 4);
+    ctx.fillStyle = h.ore?.color || '#ffaa00';
+    ctx.fillRect(h.x - 15, h.y - h.r - 5, 30 * (h.currentOre / h.maxOre), 4);
+  }
+}
+
+// --- Mining Beams ---
+function drawBeams(ctx) {
+  for (const h of haulers) {
+    if (!h.beamActive || !h.beamTarget) continue;
+    const a = angleTo(h, h.beamTarget);
+    const beamLen = dist(h, h.beamTarget);
+    const grad = ctx.createLinearGradient(h.x, h.y, h.x + Math.cos(a) * beamLen, h.y + Math.sin(a) * beamLen);
+    grad.addColorStop(0, 'rgba(255,100,50,0.9)');
+    grad.addColorStop(0.5, 'rgba(255,200,50,0.6)');
+    grad.addColorStop(1, 'rgba(255,255,100,0.1)');
+    ctx.strokeStyle = grad;
+    ctx.lineWidth = 3 + Math.sin(Date.now() * 0.02) * 2;
+    ctx.beginPath();
+    ctx.moveTo(h.x, h.y);
+    ctx.lineTo(h.x + Math.cos(a) * beamLen, h.y + Math.sin(a) * beamLen);
+    ctx.stroke();
+    // Glow
+    ctx.strokeStyle = 'rgba(255,150,50,0.3)';
+    ctx.lineWidth = 10;
+    ctx.beginPath();
+    ctx.moveTo(h.x, h.y);
+    ctx.lineTo(h.x + Math.cos(a) * beamLen, h.y + Math.sin(a) * beamLen);
+    ctx.stroke();
+  }
+}
+
+// --- Ore Chunks ---
+function updateOreChunks(dt) {
+  for (let i = oreChunks.length - 1; i >= 0; i--) {
+    const o = oreChunks[i];
+    if (!o.grabbed) {
+      o.x += o.vx * dt;
+      o.y += o.vy * dt;
+      o.vx *= 0.99;
+      o.vy *= 0.99;
+    }
+    o.trail.push({ x: o.x, y: o.y, life: 20 });
+    o.trail = o.trail.filter(t => { t.life -= dt; return t.life > 0; });
+    // Remove if too far
+    if (dist(o, station) > 3000 && dist(o, beltCenter) > 2000) {
+      oreChunks.splice(i, 1);
+    }
+  }
+}
+
+function drawOreChunks(ctx) {
+  for (const o of oreChunks) {
+    // Trail
+    for (const t of o.trail) {
+      ctx.globalAlpha = t.life / 20 * 0.3;
+      ctx.fillStyle = o.ore.color;
+      ctx.beginPath();
+      ctx.arc(t.x, t.y, o.r * 0.5, 0, TAU);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    // Glow
+    ctx.fillStyle = o.ore.glow;
+    ctx.globalAlpha = 0.3;
+    ctx.beginPath();
+    ctx.arc(o.x, o.y, o.r * 2.5, 0, TAU);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    // Chunk
+    ctx.fillStyle = o.ore.color;
+    ctx.beginPath();
+    ctx.arc(o.x, o.y, o.r, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.globalAlpha = 0.4;
+    ctx.beginPath();
+    ctx.arc(o.x - o.r * 0.2, o.y - o.r * 0.2, o.r * 0.4, 0, TAU);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+}
+
+// --- Drones ---
+const drones = [];
+function createDrone(x, y) {
+  return {
+    x, y, vx: 0, vy: 0,
+    angle: 0,
+    r: 10,
+    speed: 4,
+    target: null,
+    fireRate: 0,
+    fireCooldown: 30,
+    alive: true,
+    patrolAngle: rand(0, TAU),
+    state: 'patrol' // patrol, combat
+  };
+}
+drones.push(createDrone(-80, -80));
+drones.push(createDrone(80, 80));
+
+function updateDrone(d, dt) {
+  if (!d.alive) return;
+
+  // Find nearest pirate
+  let nearestPirate = null, nearestDist = Infinity;
+  for (const p of pirates) {
+    if (!p.alive) continue;
+    const dd = dist(d, p);
+    if (dd < nearestDist) { nearestDist = dd; nearestPirate = p; }
+  }
+
+  if (nearestPirate && nearestDist < 500) {
+    d.state = 'combat';
+    d.target = nearestPirate;
+  } else {
+    d.state = 'patrol';
+    d.target = null;
+  }
+
+  if (d.state === 'combat' && d.target) {
+    const a = angleTo(d, d.target);
+    d.angle = lerp(d.angle, a, 0.08);
+    // Move to position
+    const desiredDist = 150;
+    const desiredX = d.target.x + Math.cos(a + Math.PI) * desiredDist;
+    const desiredY = d.target.y + Math.sin(a + Math.PI) * desiredDist;
+    const toDesired = angleTo(d, { x: desiredX, y: desiredY });
+    d.angle = lerp(d.angle, toDesired, 0.03);
+    d.vx += Math.cos(d.angle) * d.speed * 0.1;
+    d.vy += Math.sin(d.angle) * d.speed * 0.1;
+
+    // Fire
+    d.fireCooldown -= dt;
+    if (d.fireCooldown <= 0 && nearestDist < 350) {
+      d.fireCooldown = 15;
+      lasers.push({
+        x: d.x, y: d.y,
+        vx: Math.cos(d.angle) * 8,
+        vy: Math.sin(d.angle) * 8,
+        life: 40,
+        damage: 15,
+        color: '#00ffaa',
+        fromPirate: false
+      });
+    }
+  } else {
+    // Patrol around station
+    d.patrolAngle += 0.005 * dt;
+    const px = station.x + Math.cos(d.patrolAngle) * 200;
+    const py = station.y + Math.sin(d.patrolAngle) * 200;
+    const pa = angleTo(d, { x: px, y: py });
+    d.angle = lerp(d.angle, pa, 0.03);
+    d.vx += Math.cos(d.angle) * d.speed * 0.05;
+    d.vy += Math.sin(d.angle) * d.speed * 0.05;
+  }
+
+  d.vx *= 0.95;
+  d.vy *= 0.95;
+  d.x += d.vx * dt;
+  d.y += d.vy * dt;
+}
+
+function drawDrone(d, ctx) {
+  if (!d.alive) return;
+  ctx.save();
+  ctx.translate(d.x, d.y);
+  ctx.rotate(d.angle);
+
+  // Body
+  ctx.fillStyle = '#00cc88';
+  ctx.beginPath();
+  ctx.moveTo(d.r, 0);
+  ctx.lineTo(-d.r * 0.6, -d.r * 0.5);
+  ctx.lineTo(-d.r * 0.3, 0);
+  ctx.lineTo(-d.r * 0.6, d.r * 0.5);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = '#00ffaa';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Eye
+  ctx.fillStyle = '#00ffaa';
+  ctx.beginPath();
+  ctx.arc(d.r * 0.3, 0, 2, 0, TAU);
+  ctx.fill();
+
+  ctx.restore();
+
+  // Status
+  if (d.state === 'combat') {
+    ctx.fillStyle = '#ff0000';
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('FIRE!', d.x, d.y - d.r - 5);
+  }
+}
+
+// --- Pirates ---
+const pirates = [];
+let pirateTimer = 0;
+let pirateSpawnInterval = 600;
+
+function spawnPirate() {
+  const side = Math.floor(Math.random() * 4);
+  let x, y;
+  switch (side) {
+    case 0: x = station.x - 600; y = rand(-400, 400); break;
+    case 1: x = station.x + 600; y = rand(-400, 400); break;
+    case 2: x = rand(-400, 400); y = station.y - 500; break;
+    case 3: x = rand(-400, 400); y = station.y + 500; break;
+  }
+  pirates.push({
+    x, y, vx: 0, vy: 0,
+    angle: 0,
+    r: 16,
+    speed: 2,
+    health: 40,
+    maxHealth: 40,
+    alive: true,
+    state: 'approach', // approach, raid, flee
+    stateTimer: 0,
+    fireCooldown: 0,
+    targetShip: null,
+    color: '#ff3333'
+  });
+}
+
+function updatePirate(p, dt) {
+  if (!p.alive) return;
+  p.stateTimer += dt;
+  p.fireCooldown -= dt;
+
+  // Find nearest hauler to raid
+  if (!p.targetShip || !p.targetShip.alive) {
+    let best = null, bestDist = Infinity;
+    for (const h of haulers) {
+      if (!h.alive) continue;
+      const d = dist(p, h);
+      if (d < bestDist) { bestDist = d; best = h; }
+    }
+    p.targetShip = best;
+  }
+
+  if (p.targetShip && p.targetShip.alive) {
+    const d = dist(p, p.targetShip);
+    if (d < 100) {
+      p.state = 'raid';
+    } else if (d > 400) {
+      p.state = 'approach';
+    } else {
+      p.state = 'raid';
+    }
+
+    if (p.state === 'approach') {
+      const a = angleTo(p, p.targetShip);
+      p.angle = lerp(p.angle, a, 0.05);
+      p.vx += Math.cos(p.angle) * p.speed * 0.08;
+      p.vy += Math.sin(p.angle) * p.speed * 0.08;
+    } else if (p.state === 'raid') {
+      // Circle target
+      const a = angleTo(p, p.targetShip);
+      p.angle = lerp(p.angle, a, 0.05);
+      p.vx += Math.cos(p.angle) * p.speed * 0.06;
+      p.vy += Math.sin(p.angle) * p.speed * 0.06;
+      // Fire at ship
+      if (p.fireCooldown <= 0 && d < 250) {
+        p.fireCooldown = 40;
+        lasers.push({
+          x: p.x, y: p.y,
+          vx: Math.cos(p.angle) * 5,
+          vy: Math.sin(p.angle) * 5,
+          life: 30,
+          damage: 5,
+          color: '#ff4444',
+          fromPirate: true
+        });
+      }
+    }
+  } else {
+    // No targets, flee
+    p.state = 'flee';
+    const a = angleTo(p, station);
+    p.angle = lerp(p.angle, a, 0.03);
+    p.vx += Math.cos(p.angle) * p.speed * 0.1;
+    p.vy += Math.sin(p.angle) * p.speed * 0.1;
+  }
+
+  // Check if drones are shooting at us
+  for (const l of lasers) {
+    if (!l.fromPirate && dist(p, l) < p.r + 5) {
+      p.health -= l.damage;
+      l.life = 0;
+      if (p.health <= 0) {
+        p.alive = false;
+        // Explosion
+        for (let i = 0; i < 20; i++) {
+          const pa = rand(0, TAU);
+          const ps = rand(1, 5);
+          particles.push({
+            x: p.x, y: p.y,
+            vx: Math.cos(pa) * ps, vy: Math.sin(pa) * ps,
+            life: rand(30, 60), maxLife: 60,
+            color: '#ff4400', size: rand(2, 6)
+          });
         }
+      }
+    }
+  }
 
-        class Asteroid {
-            constructor(pos, radius, health) {
-                this.pos = pos || new Vector(
-                    BELT_CENTER.x + (Math.random() - 0.5) * BELT_RADIUS * 2,
-                    BELT_CENTER.y + (Math.random() - 0.5) * BELT_RADIUS * 1.5
-                );
-                this.vel = new Vector((Math.random() - 0.5) * 1.5, (Math.random() - 0.5) * 1.5);
-                this.radius = radius || Math.random() * 40 + 30;
-                this.health = health || 100;
-                this.maxHealth = this.health;
-                this.rotation = Math.random() * Math.PI * 2;
-                this.rotSpeed = (Math.random() - 0.5) * 0.02;
-                this.vertices = [];
-                this.color = `hsl(${Math.random() * 40 + 10}, 20%, 30%)`;
-                
-                // Generate jagged shape
-                const numVerts = 10 + Math.floor(Math.random() * 6);
-                for(let i=0; i<numVerts; i++) {
-                    const angle = (i / numVerts) * Math.PI * 2;
-                    const r = this.radius * (0.8 + Math.random() * 0.4);
-                    this.vertices.push({x: Math.cos(angle) * r, y: Math.sin(angle) * r});
-                }
-            }
+  p.vx *= 0.96;
+  p.vy *= 0.96;
+  p.x += p.vx * dt;
+  p.y += p.vy * dt;
+}
 
-            update() {
-                this.pos = this.pos.add(this.vel);
-                this.rotation += this.rotSpeed;
+function drawPirate(p, ctx) {
+  if (!p.alive) return;
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  ctx.rotate(p.angle);
 
-                // Wrap around world
-                if (this.pos.x > WORLD_WIDTH + 100) this.pos.x = -100;
-                if (this.pos.x < -100) this.pos.x = WORLD_WIDTH + 100;
-                if (this.pos.y > WORLD_HEIGHT + 100) this.pos.y = -100;
-                if (this.pos.y < -100) this.pos.y = WORLD_HEIGHT + 100;
-            }
+  // Pirate ship
+  ctx.fillStyle = '#cc2222';
+  ctx.beginPath();
+  ctx.moveTo(p.r, 0);
+  ctx.lineTo(-p.r * 0.5, -p.r * 0.7);
+  ctx.lineTo(-p.r * 0.8, 0);
+  ctx.lineTo(-p.r * 0.5, p.r * 0.7);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = '#ff4444';
+  ctx.lineWidth = 1;
+  ctx.stroke();
 
-            draw(ctx) {
-                ctx.save();
-                ctx.translate(this.pos.x, this.pos.y);
-                ctx.rotate(this.rotation);
-                
-                ctx.fillStyle = this.color;
-                ctx.strokeStyle = '#555';
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                this.vertices.forEach((v, i) => {
-                    if(i===0) ctx.moveTo(v.x, v.y);
-                    else ctx.lineTo(v.x, v.y);
-                });
-                ctx.closePath();
-                ctx.fill();
-                ctx.stroke();
+  // Skull icon
+  ctx.fillStyle = '#ff6666';
+  ctx.beginPath();
+  ctx.arc(0, 0, 4, 0, TAU);
+  ctx.fill();
 
-                // Health indicator (cracks)
-                if (this.health < this.maxHealth * 0.5) {
-                    ctx.strokeStyle = '#333';
-                    ctx.beginPath();
-                    ctx.moveTo(0,0);
-                    ctx.lineTo(this.radius, this.radius);
-                    ctx.stroke();
-                }
-                
-                ctx.restore();
-            }
+  ctx.restore();
 
-            hit(damage) {
-                this.health -= damage;
-                // Spawn particles
-                for(let i=0; i<3; i++) {
-                    particles.push(new Particle(this.pos.x, this.pos.y, '#888', 2, 20));
-                }
-                if (this.health <= 0) {
-                    this.split();
-                    return true; // Dead
-                }
-                return false;
-            }
+  // Health bar
+  const hpPct = p.health / p.maxHealth;
+  ctx.fillStyle = '#333';
+  ctx.fillRect(p.x - 12, p.y - p.r - 8, 24, 3);
+  ctx.fillStyle = hpPct > 0.5 ? '#44ff44' : hpPct > 0.25 ? '#ffaa00' : '#ff0000';
+  ctx.fillRect(p.x - 12, p.y - p.r - 8, 24 * hpPct, 3);
 
-            split() {
-                // Create 2 smaller asteroids
-                const newRadius = this.radius * 0.6;
-                const angle1 = Math.random() * Math.PI * 2;
-                const angle2 = angle1 + Math.PI;
-                
-                asteroids.push(new Asteroid(this.pos.add(new Vector(Math.cos(angle1), Math.sin(angle1)).mult(20)), newRadius, this.maxHealth/2));
-                asteroids.push(new Asteroid(this.pos.add(new Vector(Math.cos(angle2), Math.sin(angle2)).mult(20)), newRadius, this.maxHealth/2));
-            }
-        }
+  // State label
+  ctx.fillStyle = '#ff4444';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('PIRATE', p.x, p.y - p.r - 12);
+}
 
-        class Entity {
-            constructor(x, y, speed, color) {
-                this.pos = new Vector(x, y);
-                this.vel = new Vector(0, 0);
-                this.target = null;
-                this.angle = 0;
-                this.speed = speed;
-                this.color = color;
-                this.radius = 10;
-                this.state = 'IDLE'; // IDLE, MOVING, MINING, RETURNING, DOCKING
-                this.cargo = 0;
-                this.maxCargo = 100;
-                this.cooldown = 0;
-            }
+// --- Lasers ---
+const lasers = [];
 
-            moveTowards(targetPos) {
-                const dir = targetPos.sub(this.pos).norm();
-                this.vel = dir.mult(this.speed);
-                this.pos = this.pos.add(this.vel);
-                this.angle = Math.atan2(this.vel.y, this.vel.x);
-            }
-        }
-
-        class Hauler extends Entity {
-            constructor() {
-                super(STATION_POS.x, STATION_POS.y, 3, '#f1c40f');
-                this.state = 'GOING_TO_BELT';
-                this.miningTarget = null;
-                this.tractionTarget = null;
-            }
-
-            update() {
-                if (this.cooldown > 0) this.cooldown--;
-
-                // State Machine
-                switch (this.state) {
-                    case 'GOING_TO_BELT':
-                        // Find closest asteroid
-                        let closest = null;
-                        let minDist = Infinity;
-                        asteroids.forEach(a => {
-                            const d = this.pos.dist(a.pos);
-                            if (d < minDist) { minDist = d; closest = a; }
-                        });
-                        
-                        if (closest) {
-                            this.target = closest.pos;
-                            this.miningTarget = closest;
-                            this.moveTowards(this.target);
-                            if (minDist < closest.radius + 20) {
-                                this.state = 'MINING';
-                            }
-                        } else {
-                            // Go to center of belt if no asteroids
-                            this.moveTowards(BELT_CENTER);
-                        }
-                        break;
-
-                    case 'MINING':
-                        if (!this.miningTarget || this.miningTarget.health <= 0) {
-                            this.state = 'GOING_TO_BELT';
-                            this.miningTarget = null;
-                            break;
-                        }
-                        
-                        // Orbit asteroid
-                        const distToAst = this.pos.dist(this.miningTarget.pos);
-                        const orbitRadius = this.miningTarget.radius + 25;
-                        
-                        // Move slightly towards asteroid to maintain distance
-                        const dir = this.miningTarget.pos.sub(this.pos).norm();
-                        // Add some tangential movement for orbiting feel
-                        const tangent = new Vector(-dir.y, dir.x);
-                        const moveDir = dir.mult(0.5).add(tangent.mult(0.5)).norm();
-                        
-                        this.vel = moveDir.mult(this.speed);
-                        this.pos = this.pos.add(this.vel);
-                        this.angle = Math.atan2(this.vel.y, this.vel.x);
-
-                        // Beam visual
-                        if (this.cooldown <= 0) {
-                            ctx.beginPath();
-                            ctx.moveTo(this.pos.x, this.pos.y);
-                            ctx.lineTo(this.miningTarget.pos.x + Math.cos(this.angle)*this.miningTarget.radius, 
-                                        this.miningTarget.pos.y + Math.sin(this.angle)*this.miningTarget.radius);
-                            ctx.strokeStyle = 'rgba(0, 255, 0, 0.5)';
-                            ctx.lineWidth = 3;
-                            ctx.stroke();
-
-                            // Mine
-                            this.miningTarget.hit(2);
-                            this.cargo += 0.5;
-                            this.cooldown = 5;
-                            
-                            // Spawn ore chunk particles
-                            if(Math.random() > 0.7) {
-                                particles.push(new Particle(this.miningTarget.pos.x, this.miningTarget.pos.y, '#0f0', 1, 30));
-                            }
-                        }
-
-                        if (this.cargo >= this.maxCargo) {
-                            this.state = 'RETURNING';
-                        }
-                        break;
-
-                    case 'RETURNING':
-                        this.moveTowards(STATION_POS);
-                        if (this.pos.dist(STATION_POS) < 40) {
-                            this.state = 'DOCKING';
-                        }
-                        break;
-                    
-                    case 'DOCKING':
-                        this.vel = new Vector(0,0);
-                        this.cargo = 0;
-                        this.state = 'GOING_TO_BELT';
-                        break;
-                }
-            }
-
-            draw(ctx) {
-                ctx.save();
-                ctx.translate(this.pos.x, this.pos.y);
-                ctx.rotate(this.angle);
-                
-                // Ship body
-                ctx.fillStyle = this.color;
-                ctx.beginPath();
-                ctx.moveTo(10, 0);
-                ctx.lineTo(-8, 7);
-                ctx.lineTo(-8, -7);
-                ctx.closePath();
-                ctx.fill();
-
-                // Cockpit
-                ctx.fillStyle = '#fff';
-                ctx.beginPath();
-                ctx.arc(2, 0, 3, 0, Math.PI*2);
-                ctx.fill();
-
-                ctx.restore();
-
-                // Cargo indicator
-                if (this.cargo > 0) {
-                    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
-                    ctx.fillRect(this.pos.x - 10, this.pos.y - 15, 20 * (this.cargo/this.maxCargo), 3);
-                }
-            }
-        }
-
-        class Pirate extends Entity {
-            constructor() {
-                super(WORLD_WIDTH, Math.random() * WORLD_HEIGHT, 2.5, '#e74c3c');
-                this.targetShip = null;
-                this.cooldown = 0;
-                this.hp = 50;
-            }
-
-            update() {
-                if (this.cooldown > 0) this.cooldown--;
-
-                // Find target (Hauler or Drone)
-                let potentialTargets = [...haulers, ...drones];
-                let closest = null;
-                let minDist = 600; // Detection range
-
-                potentialTargets.forEach(t => {
-                    const d = this.pos.dist(t.pos);
-                    if (d < minDist) {
-                        minDist = d;
-                        closest = t;
-                    }
-                });
-
-                if (closest) {
-                    this.targetShip = closest;
-                    this.moveTowards(closest.pos);
-                    
-                    // Shoot
-                    if (this.cooldown <= 0 && minDist < 300) {
-                        // Laser beam
-                        ctx.beginPath();
-                        ctx.moveTo(this.pos.x, this.pos.y);
-                        ctx.lineTo(closest.pos.x, closest.pos.y);
-                        ctx.strokeStyle = '#f00';
-                        ctx.lineWidth = 2;
-                        ctx.stroke();
-                        
-                        // Damage
-                        if (Math.random() < 0.1) {
-                            closest.hp = (closest.hp || 100) - 10;
-                            if(closest.hp <= 0) {
-                                // Explode
-                                for(let i=0; i<20; i++) particles.push(new Particle(closest.pos.x, closest.pos.y, '#e74c3c', 5, 40));
-                                // Respawn logic could go here, but for sim let's just remove
-                                // If hauler dies, remove it (simple logic)
-                                if(closest instanceof Hauler) {
-                                    closest.dead = true;
-                                }
-                            }
-                        }
-                        this.cooldown = 30;
-                    }
-                } else {
-                    // Wander
-                    this.vel = this.vel.mult(0.95);
-                    if (Math.random() < 0.02) {
-                        this.vel = new Vector((Math.random()-0.5)*this.speed, (Math.random()-0.5)*this.speed);
-                    }
-                    this.pos = this.pos.add(this.vel);
-                }
-            }
-
-            draw(ctx) {
-                ctx.save();
-                ctx.translate(this.pos.x, this.pos.y);
-                ctx.rotate(Math.atan2(this.vel.y, this.vel.x));
-                
-                ctx.fillStyle = this.color;
-                ctx.beginPath();
-                ctx.moveTo(12, 0);
-                ctx.lineTo(-10, 8);
-                ctx.lineTo(-5, 0);
-                ctx.lineTo(-10, -8);
-                ctx.closePath();
-                ctx.fill();
-                
-                ctx.restore();
-            }
-        }
-
-        class Drone extends Entity {
-            constructor() {
-                super(STATION_POS.x, STATION_POS.y, 4, '#3498db');
-                this.target = null;
-                this.cooldown = 0;
-                this.hp = 30;
-            }
-
-            update() {
-                if (this.cooldown > 0) this.cooldown--;
-
-                // Patrol or Hunt
-                let closestPirate = null;
-                let minDist = 400;
-
-                pirates.forEach(p => {
-                    const d = this.pos.dist(p.pos);
-                    if (d < minDist) {
-                        minDist = d;
-                        closestPirate = p;
-                    }
-                });
-
-                if (closestPirate) {
-                    this.moveTowards(closestPirate.pos);
-                    if (this.cooldown <= 0 && minDist < 250) {
-                        // Fire laser
-                        ctx.beginPath();
-                        ctx.moveTo(this.pos.x, this.pos.y);
-                        ctx.lineTo(closestPirate.pos.x, closestPirate.pos.y);
-                        ctx.strokeStyle = '#0ff';
-                        ctx.lineWidth = 1;
-                        ctx.stroke();
-
-                        if (Math.random() < 0.2) {
-                            closestPirate.hp -= 10;
-                            particles.push(new Particle(closestPirate.pos.x, closestPirate.pos.y, '#fff', 2, 10));
-                        }
-                        this.cooldown = 10;
-                    }
-                } else {
-                    // Return to station if no threat
-                    if (this.pos.dist(STATION_POS) > 100) {
-                        this.moveTowards(STATION_POS);
-                    } else {
-                        // Idle hover
-                        this.vel = this.vel.mult(0.9);
-                    }
-                }
-            }
-
-            draw(ctx) {
-                ctx.save();
-                ctx.translate(this.pos.x, this.pos.y);
-                ctx.rotate(Math.atan2(this.vel.y, this.vel.x));
-                
-                ctx.fillStyle = this.color;
-                ctx.beginPath();
-                ctx.moveTo(8, 0);
-                ctx.lineTo(-6, 6);
-                ctx.lineTo(-6, -6);
-                ctx.closePath();
-                ctx.fill();
-                
-                // Engine glow
-                ctx.fillStyle = 'rgba(52, 152, 219, 0.5)';
-                ctx.beginPath();
-                ctx.arc(-6, 0, 4, 0, Math.PI*2);
-                ctx.fill();
-
-                ctx.restore();
-            }
-        }
-
-        // --- Initialization ---
-
-        function init() {
-            // Stars
-            for(let i=0; i<200; i++) {
-                stars.push({
-                    x: Math.random() * WORLD_WIDTH,
-                    y: Math.random() * WORLD_HEIGHT,
-                    size: Math.random() * 2,
-                    alpha: Math.random()
-                });
-            }
-
-            // Asteroids
-            for(let i=0; i<NUM_ASTEROIDS; i++) {
-                asteroids.push(new Asteroid());
-            }
-
-            // Ships
-            for(let i=0; i<NUM_HAULERS; i++) {
-                haulers.push(new Hauler());
-            }
-
-            // Pirates & Drones
-            for(let i=0; i<NUM_PIRATES; i++) {
-                pirates.push(new Pirate());
-            }
-            for(let i=0; i<NUM_DRONES; i++) {
-                drones.push(new Drone());
-            }
-        }
-
-        // --- Game Loop ---
-
-        function update() {
-            time++;
-
-            // Respawn asteroids occasionally
-            if (asteroids.length < NUM_ASTEROIDS && Math.random() < 0.01) {
-                asteroids.push(new Asteroid());
-            }
-
-            // Respawn pirates occasionally
-            if (pirates.length < NUM_PIRATES && Math.random() < 0.005) {
-                pirates.push(new Pirate());
-            }
-
-            // Update Entities
-            asteroids.forEach(a => a.update());
-            haulers.forEach(h => { h.update(); if(h.dead) h.dead = false; }); // Handle dead haulers
-            pirates.forEach(p => p.update());
-            drones.forEach(d => d.update());
-            particles.forEach((p, i) => {
-                p.update();
-                if (p.life <= 0) particles.splice(i, 1);
+function updateLasers(dt) {
+  for (let i = lasers.length - 1; i >= 0; i--) {
+    const l = lasers[i];
+    l.x += l.vx * dt;
+    l.y += l.vy * dt;
+    l.life -= dt;
+    if (l.life <= 0) {
+      lasers.splice(i, 1);
+      continue;
+    }
+    // Check hits
+    if (!l.fromPirate) {
+      for (const p of pirates) {
+        if (!p.alive) continue;
+        if (dist(l, p) < p.r + 3) {
+          p.health -= l.damage;
+          l.life = 0;
+          for (let j = 0; j < 5; j++) {
+            const pa = rand(0, TAU);
+            particles.push({
+              x: l.x, y: l.y,
+              vx: Math.cos(pa) * rand(1, 3), vy: Math.sin(pa) * rand(1, 3),
+              life: rand(10, 30), maxLife: 30, color: '#00ffaa', size: rand(1, 3)
             });
-
-            // Camera Pan
-            const targetCamX = BELT_CENTER.x - width / 2;
-            const targetCamY = BELT_CENTER.y - height / 2;
-            camera.x += (targetCamX - camera.x) * 0.005;
-            camera.y += (targetCamY - camera.y) * 0.005;
-
-            // Cleanup dead entities
-            haulers = haulers.filter(h => !h.dead);
-            pirates = pirates.filter(p => p.hp > 0);
-            asteroids = asteroids.filter(a => a.health > 0);
+          }
+          if (p.health <= 0) {
+            p.alive = false;
+            for (let j = 0; j < 20; j++) {
+              const pa = rand(0, TAU);
+              particles.push({
+                x: p.x, y: p.y,
+                vx: Math.cos(pa) * rand(1, 5), vy: Math.sin(pa) * rand(1, 5),
+                life: rand(30, 60), maxLife: 60,
+                color: '#ff4400', size: rand(2, 6)
+              });
+            }
+          }
         }
-
-        function draw() {
-            // Clear background
-            ctx.fillStyle = '#050505';
-            ctx.fillRect(0, 0, width, height);
-
-            ctx.save();
-            ctx.translate(-camera.x, -camera.y);
-
-            // Draw Stars (Parallax could be added here, keeping simple for performance)
-            ctx.fillStyle = '#fff';
-            stars.forEach(s => {
-                ctx.globalAlpha = s.alpha;
-                ctx.beginPath();
-                ctx.arc(s.x, s.y, s.size, 0, Math.PI*2);
-                ctx.fill();
+      }
+    } else {
+      for (const h of haulers) {
+        if (!h.alive) continue;
+        if (dist(l, h) < h.r + 3) {
+          l.life = 0;
+          for (let j = 0; j < 5; j++) {
+            const pa = rand(0, TAU);
+            particles.push({
+              x: l.x, y: l.y,
+              vx: Math.cos(pa) * rand(1, 3), vy: Math.sin(pa) * rand(1, 3),
+              life: rand(10, 30), maxLife: 30, color: '#ff4444', size: rand(1, 3)
             });
-            ctx.globalAlpha = 1;
-
-            // Draw Station
-            ctx.save();
-            ctx.translate(STATION_POS.x, STATION_POS.y);
-            ctx.rotate(time * 0.005);
-            ctx.strokeStyle = '#555';
-            ctx.lineWidth = 4;
-            ctx.beginPath();
-            ctx.arc(0, 0, 30, 0, Math.PI*2);
-            ctx.stroke();
-            ctx.fillStyle = '#333';
-            ctx.fillRect(-5, -30, 10, 60);
-            ctx.fillRect(-30, -5, 60, 10);
-            ctx.restore();
-
-            // Draw Belt Background hint
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
-            ctx.lineWidth = 100;
-            ctx.beginPath();
-            ctx.arc(BELT_CENTER.x, BELT_CENTER.y, BELT_RADIUS, 0, Math.PI*2);
-            ctx.stroke();
-
-            // Draw Entities
-            asteroids.forEach(a => a.draw(ctx));
-            haulers.forEach(h => h.draw(ctx));
-            pirates.forEach(p => p.draw(ctx));
-            drones.forEach(d => d.draw(ctx));
-            particles.forEach(p => p.draw(ctx));
-
-            ctx.restore();
-
-            // UI Overlay
-            ctx.fillStyle = '#fff';
-            ctx.font = '16px monospace';
-            ctx.fillText(`Ships: ${haulers.length} | Pirates: ${pirates.length} | Asteroids: ${asteroids.length}`, 20, 30);
+          }
         }
+      }
+    }
+  }
+}
 
-        function loop() {
-            update();
-            draw();
-            requestAnimationFrame(loop);
+function drawLasers(ctx) {
+  for (const l of lasers) {
+    ctx.strokeStyle = l.color;
+    ctx.lineWidth = 2;
+    ctx.shadowColor = l.color;
+    ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.moveTo(l.x, l.y);
+    ctx.lineTo(l.x - l.vx * 2, l.y - l.vy * 2);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+  }
+}
+
+// --- Particles ---
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vx *= 0.98;
+    p.vy *= 0.98;
+    p.life -= dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+function drawParticles(ctx) {
+  for (const p of particles) {
+    ctx.globalAlpha = p.life / p.maxLife;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * (p.life / p.maxLife), 0, TAU);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+// --- Asteroids ---
+function updateAsteroids(dt) {
+  for (const a of asteroids) {
+    if (a.depleted) {
+      a.depletionTimer -= dt;
+      if (a.depletionTimer <= 0) {
+        // Respawn elsewhere
+        const na = rand(0, TAU);
+        const nr = rand(beltRadius * 0.3, beltRadius * 1.2);
+        a.x = beltCenter.x + Math.cos(na) * nr;
+        a.y = Math.sin(na) * nr;
+        a.depleted = false;
+        a.health = a.maxHealth;
+        a.r = rand(20, 60);
+        a.vx = rand(-0.3, 0.3);
+        a.vy = rand(-0.3, 0.3);
+        const verts = [];
+        const n = Math.floor(rand(8, 14));
+        for (let i = 0; i < n; i++) {
+          const av = (TAU / n) * i;
+          const rr = a.r * rand(0.7, 1.0);
+          verts.push({ x: Math.cos(av) * rr, y: Math.sin(av) * rr });
         }
+        a.verts = verts;
+        const oreTypes = [
+          { color: '#ff6644', name: 'Iron', glow: '#ff3311' },
+          { color: '#44aaff', name: 'Cobalt', glow: '#1188ff' },
+          { color: '#aaff44', name: 'Uranium', glow: '#88ff11' },
+          { color: '#ffaa00', name: 'Gold', glow: '#ff8800' },
+          { color: '#ff44ff', name: 'Platinum', glow: '#ff11ff' },
+        ];
+        a.ore = oreTypes[Math.floor(Math.random() * oreTypes.length)];
+      }
+      continue;
+    }
+    a.x += a.vx * dt;
+    a.y += a.vy * dt;
+    a.angle += a.rotSpeed * dt;
+    // Gentle drift toward belt center
+    const toCenter = angleTo(a, beltCenter);
+    const dToCenter = dist(a, beltCenter);
+    if (dToCenter > beltRadius * 1.5) {
+      a.vx += Math.cos(toCenter) * 0.01;
+      a.vy += Math.sin(toCenter) * 0.01;
+    }
+  }
+  // Remove very far asteroids
+  for (let i = asteroids.length - 1; i >= 0; i--) {
+    if (dist(asteroids[i], beltCenter) > 2000) {
+      asteroids.splice(i, 1);
+    }
+  }
+}
 
-        init();
-        loop();
+function drawAsteroid(a, ctx) {
+  if (a.depleted) return;
+  ctx.save();
+  ctx.translate(a.x, a.y);
+  ctx.rotate(a.angle);
 
-    </script>
+  // Glow
+  ctx.fillStyle = a.ore.glow;
+  ctx.globalAlpha = 0.15;
+  ctx.beginPath();
+  ctx.arc(0, 0, a.r * 1.5, 0, TAU);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // Body
+  ctx.fillStyle = '#665544';
+  ctx.beginPath();
+  ctx.moveTo(a.verts[0].x, a.verts[0].y);
+  for (let i = 1; i < a.verts.length; i++) {
+    ctx.lineTo(a.verts[i].x, a.verts[i].y);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = '#887766';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Ore veins
+  ctx.strokeStyle = a.ore.color;
+  ctx.lineWidth = 2;
+  ctx.globalAlpha = 0.6;
+  for (let i = 0; i < 3; i++) {
+    const vx = rand(-a.r * 0.5, a.r * 0.5);
+    const vy = rand(-a.r * 0.5, a.r * 0.5);
+    ctx.beginPath();
+    ctx.moveTo(vx, vy);
+    ctx.lineTo(vx + rand(-10, 10), vy + rand(-10, 10));
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  // Health indicator
+  if (a.health < a.maxHealth) {
+    ctx.fillStyle = '#333';
+    ctx.fillRect(-a.r, -a.r - 8, a.r * 2, 3);
+    ctx.fillStyle = a.health > a.maxHealth * 0.5 ? '#44ff44' : '#ff4444';
+    ctx.fillRect(-a.r, -a.r - 8, a.r * 2 * (a.health / a.maxHealth), 3);
+  }
+
+  ctx.restore();
+}
+
+// --- Camera ---
+function updateCamera(dt) {
+  // Slowly pan across the belt
+  const time = Date.now() * 0.0001;
+  cam.targetX = lerp(cam.targetX, beltCenter.x + Math.sin(time) * 200, 0.005);
+  cam.targetY = lerp(cam.targetY, Math.cos(time * 0.7) * 100, 0.005);
+  cam.x = lerp(cam.x, cam.targetX, 0.02);
+  cam.y = lerp(cam.y, cam.targetY, 0.02);
+}
+
+// --- Main Loop ---
+let lastTime = 0;
+let frameCount = 0;
+
+function gameLoop(timestamp) {
+  const dt = Math.min((timestamp - lastTime) / 16.67, 3);
+  lastTime = timestamp;
+  frameCount++;
+
+  // Update
+  station.update(dt);
+  updateAsteroids(dt);
+  respawnAsteroids();
+  updateOreChunks(dt);
+  for (const h of haulers) updateHauler(h, dt);
+  for (const d of drones) updateDrone(d, dt);
+  updateLasers(dt);
+  updateParticles(dt);
+  updateCamera(dt);
+
+  // Pirate spawning
+  pirateTimer += dt;
+  if (pirateTimer > pirateSpawnInterval) {
+    pirateTimer = 0;
+    pirateSpawnInterval = rand(400, 900);
+    if (pirates.filter(p => p.alive).length < 4) {
+      spawnPirate();
+    }
+  }
+
+  // Update pirates
+  for (const p of pirates) updatePirate(p, dt);
+
+  // Remove dead pirates after delay
+  for (let i = pirates.length - 1; i >= 0; i--) {
+    if (!pirates[i].alive && pirates[i].stateTimer > 300) {
+      pirates.splice(i, 1);
+    }
+  }
+
+  // --- Render ---
+  ctx.fillStyle = '#050510';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  ctx.translate(W / 2 - cam.x, H / 2 - cam.y);
+
+  // Stars
+  for (const s of stars) {
+    ctx.globalAlpha = s.b * (0.5 + Math.sin(Date.now() * 0.001 + s.x) * 0.3);
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.s, 0, TAU);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Belt zone indicator
+  ctx.strokeStyle = 'rgba(100,80,60,0.15)';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([10, 10]);
+  ctx.beginPath();
+  ctx.arc(beltCenter.x, beltCenter.y, beltRadius, 0, TAU);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Belt label
+  ctx.fillStyle = 'rgba(100,80,60,0.3)';
+  ctx.font = '12px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('ASTEROID BELT', beltCenter.x, beltCenter.y - beltRadius - 15);
+
+  // Asteroids
+  for (const a of asteroids) drawAsteroid(a, ctx);
+
+  // Ore chunks
+  drawOreChunks(ctx);
+
+  // Station
+  station.draw(ctx);
+
+  // Mining beams
+  drawBeams(ctx);
+
+  // Haulers
+  for (const h of haulers) drawHauler(h, ctx);
+
+  // Drones
+  for (const d of drones) drawDrone(d, ctx);
+
+  // Pirates
+  for (const p of pirates) drawPirate(p, ctx);
+
+  // Lasers
+  drawLasers(ctx);
+
+  // Particles
+  drawParticles(ctx);
+
+  ctx.restore();
+
+  // HUD
+  ctx.fillStyle = '#88ccff';
+  ctx.font = '14px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(`Station Ore: ${Math.floor(station.currentOre)}/${station.oreCapacity}`, 15, 25);
+  ctx.fillText(`Active Haulers: ${haulers.filter(h => h.alive).length}/5`, 15, 45);
+  ctx.fillText(`Pirates: ${pirates.filter(p => p.alive).length}`, 15, 65);
+  ctx.fillText(`Asteroids: ${asteroids.filter(a => !a.depleted).length}`, 15, 85);
+
+  // State labels for haulers
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'right';
+  for (const h of haulers) {
+    if (!h.alive) continue;
+    let label = h.state.replace('_', ' ');
+    ctx.fillStyle = h.color;
+    ctx.fillText(`${h.name}: ${label}`, W - 15, 25 + haulers.indexOf(h) * 15);
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+
+requestAnimationFrame(gameLoop);
+</script>
 </body>
 </html>

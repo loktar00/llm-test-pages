@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Living Weather Map</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #0a1628; }
+canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// --- Continent definition ---
+function generateContinent() {
+  const cx = W * 0.45, cy = H * 0.48;
+  const rx = W * 0.32, ry = H * 0.38;
+  const points = [];
+  const n = 120;
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    const noise1 = Math.sin(a * 3 + 1.2) * 0.15;
+    const noise2 = Math.cos(a * 5 + 0.7) * 0.08;
+    const noise3 = Math.sin(a * 7 + 2.1) * 0.05;
+    const noise4 = Math.cos(a * 2 + 3.3) * 0.12;
+    const r = 1 + noise1 + noise2 + noise3 + noise4;
+    // Make it more interesting - flatten one side for coast
+    const coastBias = Math.max(0, Math.cos(a - 2.5) * 0.3);
+    const rx2 = rx * r * (1 - coastBias * 0.5);
+    const ry2 = ry * r * (1 - coastBias * 0.3);
+    points.push({
+      x: cx + Math.cos(a) * rx2,
+      y: cy + Math.sin(a) * ry2
+    });
+  }
+  return points;
+}
+
+// Smoothen continent points
+function smoothPoints(pts, iterations) {
+  let smoothed = pts.map(p => ({...p}));
+  for (let iter = 0; iter < iterations; iter++) {
+    const next = [];
+    for (let i = 0; i < smoothed.length; i++) {
+      const prev = smoothed[(i - 1 + smoothed.length) % smoothed.length];
+      const curr = smoothed[i];
+      const nextP = smoothed[(i + 1) % smoothed.length];
+      next.push({
+        x: curr.x * 0.5 + (prev.x + nextP.x) * 0.25,
+        y: curr.y * 0.5 + (prev.y + nextP.y) * 0.25
+      });
+    }
+    smoothed = next;
+  }
+  return smoothed;
+}
+
+let continent = smoothPoints(generateContinent(), 3);
+
+// Islands
+function generateIslands() {
+  const islands = [];
+  for (let i = 0; i < 5; i++) {
+    const ix = W * 0.15 + Math.random() * W * 0.7;
+    const iy = H * 0.15 + Math.random() * H * 0.7;
+    const ir = 15 + Math.random() * 35;
+    const pts = [];
+    const n = 20;
+    for (let j = 0; j < n; j++) {
+      const a = (j / n) * Math.PI * 2;
+      const r = ir * (0.7 + Math.random() * 0.6);
+      pts.push({ x: ix + Math.cos(a) * r, y: iy + Math.sin(a) * r });
+    }
+    islands.push(smoothPoints(pts, 2));
+  }
+  return islands;
+}
+let islands = generateIslands();
+
+// --- Pressure Systems ---
+class PressureSystem {
+  constructor(type) {
+    this.type = type; // 'H' or 'L'
+    this.x = W * 0.2 + Math.random() * W * 0.6;
+    this.y = H * 0.2 + Math.random() * H * 0.6;
+    this.strength = 50 + Math.random() * 80;
+    this.radius = 120 + Math.random() * 180;
+    this.vx = (Math.random() - 0.5) * 0.4;
+    this.vy = (Math.random() - 0.5) * 0.3;
+    this.phase = Math.random() * Math.PI * 2;
+    this.spinRate = (Math.random() - 0.5) * 0.003;
+    this.wobblePhase = Math.random() * Math.PI * 2;
+    this.life = 0;
+    this.maxLife = 800 + Math.random() * 1200;
+  }
+
+  update(t) {
+    this.life++;
+    this.phase += this.spinRate;
+    this.wobblePhase += 0.005;
+    this.vx += Math.sin(this.wobblePhase) * 0.002;
+    this.vy += Math.cos(this.wobblePhase * 0.7) * 0.0015;
+    this.vx *= 0.998;
+    this.vy *= 0.998;
+    this.x += this.vx;
+    this.y += this.vy;
+    this.strength += (Math.random() - 0.5) * 0.5;
+    this.strength = Math.max(30, Math.min(140, this.strength));
+
+    // Wrap around
+    if (this.x < -100) this.x = W + 100;
+    if (this.x > W + 100) this.x = -100;
+    if (this.y < -100) this.y = H + 100;
+    if (this.y > H + 100) this.y = -100;
+
+    const fadeIn = Math.min(1, this.life / 100);
+    const fadeOut = Math.min(1, (this.maxLife - this.life) / 100);
+    this.alpha = Math.min(fadeIn, fadeOut);
+    return this.life < this.maxLife;
+  }
+
+  getWind(x, y) {
+    const dx = x - this.x;
+    const dy = y - this.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > this.radius * 2) return { vx: 0, vy: 0 };
+
+    const normalizedDist = dist / this.radius;
+    const falloff = Math.exp(-normalizedDist * normalizedDist * 0.5);
+    const strength = this.strength * falloff * this.alpha;
+
+    // Tangential (rotational) component
+    let tvx = -dy / (dist || 1);
+    let tvy = dx / (dist || 1);
+
+    // Radial component (inward for L, outward for H)
+    let rvx = dx / (dist || 1);
+    let rvy = dy / (dist || 1);
+    const radialStrength = this.type === 'L' ? 0.3 : -0.2;
+
+    // Apply rotation based on phase
+    const cosP = Math.cos(this.phase);
+    const sinP = Math.sin(this.phase);
+    const rtx = tvx * cosP - tvy * sinP;
+    const rty = tvx * sinP + tvy * cosP;
+
+    return {
+      vx: (rtx + rvx * radialStrength) * strength * 0.02,
+      vy: (rty + rvy * radialStrength) * strength * 0.02
+    };
+  }
+}
+
+// --- Fronts ---
+class Front {
+  constructor(type, parentSystem) {
+    this.type = type; // 'cold' or 'warm'
+    this.parent = parentSystem;
+    this.points = [];
+    this.length = 80 + Math.random() * 120;
+    this.angle = Math.random() * Math.PI * 2;
+    this.speed = 0.3 + Math.random() * 0.5;
+    this.waveAmp = 10 + Math.random() * 20;
+    this.waveFreq = 0.02 + Math.random() * 0.02;
+    this.phase = Math.random() * Math.PI * 2;
+    this.alpha = 1;
+  }
+
+  update(t) {
+    this.phase += 0.01;
+    this.angle += Math.sin(this.phase * 0.3) * 0.002;
+    this.alpha = this.parent.alpha;
+    return this.parent.life < this.parent.maxLife;
+  }
+
+  draw(ctx, t) {
+    if (this.alpha < 0.1) return;
+    const px = this.parent.x;
+    const py = this.parent.y;
+
+    ctx.save();
+    ctx.globalAlpha = this.alpha * 0.9;
+    ctx.translate(px, py);
+    ctx.rotate(this.angle);
+
+    const n = 40;
+    ctx.beginPath();
+    for (let i = 0; i <= n; i++) {
+      const frac = i / n;
+      const dist = frac * this.length;
+      const wave = Math.sin(dist * this.waveFreq + this.phase) * this.waveAmp;
+      const x = dist;
+      const y = wave;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+
+    if (this.type === 'cold') {
+      ctx.strokeStyle = '#2255cc';
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+
+      // Draw triangles
+      ctx.fillStyle = '#2255cc';
+      for (let i = 0; i < n; i += 4) {
+        const frac = i / n;
+        const dist = frac * this.length;
+        const wave = Math.sin(dist * this.waveFreq + this.phase) * this.waveAmp;
+        const x = dist;
+        const y = wave;
+        const size = 7;
+        ctx.beginPath();
+        ctx.moveTo(x + size, y);
+        ctx.lineTo(x - size * 0.5, y - size * 0.7);
+        ctx.lineTo(x - size * 0.5, y + size * 0.7);
+        ctx.closePath();
+        ctx.fill();
+      }
+    } else {
+      ctx.strokeStyle = '#cc3333';
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+
+      // Draw semicircles
+      ctx.fillStyle = '#cc3333';
+      for (let i = 0; i < n; i += 4) {
+        const frac = i / n;
+        const dist = frac * this.length;
+        const wave = Math.sin(dist * this.waveFreq + this.phase) * this.waveAmp;
+        const x = dist;
+        const y = wave;
+        const size = 7;
+        ctx.beginPath();
+        ctx.arc(x, y, size, -Math.PI * 0.8, Math.PI * 0.8);
+        ctx.fill();
+      }
+    }
+
+    ctx.restore();
+  }
+}
+
+// --- Rain Band ---
+class RainBand {
+  constructor(system) {
+    this.parent = system;
+    this.angle = Math.random() * Math.PI * 2;
+    this.width = 40 + Math.random() * 60;
+    this.length = 150 + Math.random() * 200;
+    this.particles = [];
+    for (let i = 0; i < 60; i++) {
+      this.particles.push({
+        offset: (Math.random() - 0.5) * this.width,
+        dist: Math.random() * this.length,
+        speed: 0.5 + Math.random() * 1.5,
+        size: 1 + Math.random() * 2,
+        alpha: 0.1 + Math.random() * 0.3
+      });
+    }
+    this.alpha = 1;
+  }
+
+  update(t) {
+    this.angle += 0.001;
+    this.alpha = this.parent.alpha;
+    for (const p of this.particles) {
+      p.dist += p.speed;
+      if (p.dist > this.length) p.dist = 0;
+    }
+    return this.parent.life < this.parent.maxLife;
+  }
+
+  draw(ctx) {
+    if (this.alpha < 0.1) return;
+    const px = this.parent.x;
+    const py = this.parent.y;
+
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(this.angle);
+
+    for (const p of this.particles) {
+      const frac = p.dist / this.length;
+      const bandAlpha = Math.sin(frac * Math.PI) * this.alpha * p.alpha;
+      ctx.fillStyle = `rgba(180, 200, 255, ${bandAlpha})`;
+      ctx.beginPath();
+      ctx.ellipse(p.dist, p.offset, p.size * 2, p.size, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Sweep line
+    ctx.globalAlpha = this.alpha * 0.08;
+    const grad = ctx.createLinearGradient(0, -this.width / 2, 0, this.width / 2);
+    grad.addColorStop(0, 'rgba(150, 180, 255, 0)');
+    grad.addColorStop(0.5, 'rgba(150, 180, 255, 1)');
+    grad.addColorStop(1, 'rgba(150, 180, 255, 0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, -this.width / 2, this.length, this.width);
+
+    ctx.restore();
+  }
+}
+
+// --- Wind Particles ---
+class WindParticle {
+  constructor() {
+    this.reset();
+  }
+
+  reset() {
+    this.x = Math.random() * W;
+    this.y = Math.random() * H;
+    this.life = 0;
+    this.maxLife = 100 + Math.random() * 200;
+    this.speed = 0.5 + Math.random() * 1.5;
+    this.size = 0.5 + Math.random() * 1.5;
+    this.trail = [];
+    this.maxTrail = 15 + Math.floor(Math.random() * 20);
+  }
+
+  update(windField) {
+    const wind = windField(this.x, this.y);
+    this.x += wind.vx * this.speed;
+    this.y += wind.vy * this.speed;
+    this.life++;
+
+    this.trail.push({ x: this.x, y: this.y });
+    if (this.trail.length > this.maxTrail) this.trail.shift();
+
+    if (this.life > this.maxLife || this.x < -20 || this.x > W + 20 || this.y < -20 || this.y > H + 20) {
+      this.reset();
+    }
+  }
+
+  draw(ctx) {
+    if (this.trail.length < 2) return;
+    const progress = this.life / this.maxLife;
+    const alpha = Math.sin(progress * Math.PI) * 0.6;
+
+    ctx.strokeStyle = `rgba(200, 220, 255, ${alpha})`;
+    ctx.lineWidth = this.size;
+    ctx.beginPath();
+    ctx.moveTo(this.trail[0].x, this.trail[0].y);
+    for (let i = 1; i < this.trail.length; i++) {
+      ctx.lineTo(this.trail[i].x, this.trail[i].y);
+    }
+    ctx.stroke();
+  }
+}
+
+// --- Initialize systems ---
+const pressureSystems = [];
+for (let i = 0; i < 4; i++) pressureSystems.push(new PressureSystem('L'));
+for (let i = 0; i < 3; i++) pressureSystems.push(new PressureSystem('H'));
+
+const fronts = [];
+const rainBands = [];
+
+function initFrontsAndRain() {
+  fronts.length = 0;
+  rainBands.length = 0;
+  for (const sys of pressureSystems) {
+    if (sys.type === 'L') {
+      fronts.push(new Front('cold', sys));
+      fronts.push(new Front('warm', sys));
+      rainBands.push(new RainBand(sys));
+      if (Math.random() > 0.5) rainBands.push(new RainBand(sys));
+    }
+  }
+}
+initFrontsAndRain();
+
+// Wind particles
+const NUM_PARTICLES = 2500;
+const windParticles = [];
+for (let i = 0; i < NUM_PARTICLES; i++) {
+  windParticles.push(new WindParticle());
+}
+
+// --- Temperature field ---
+function getTemperature(x, y, t) {
+  // Base: warmer at bottom, cooler at top
+  const latTemp = 25 - (y / H) * 40; // -15 to 25
+
+  // Seasonal variation
+  const seasonal = Math.sin(t * 0.0003) * 5;
+
+  // Pressure system influence
+  let pressureEffect = 0;
+  for (const sys of pressureSystems) {
+    const dx = x - sys.x;
+    const dy = y - sys.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    const falloff = Math.exp(-dist * dist / (sys.radius * sys.radius * 2));
+    if (sys.type === 'H') {
+      pressureEffect += falloff * 8 * sys.alpha;
+    } else {
+      pressureEffect -= falloff * 6 * sys.alpha;
+    }
+  }
+
+  // Ocean vs land effect
+  const onLand = isOnContinent(x, y);
+  const landEffect = onLand ? (Math.sin(t * 0.0005) * 3) : -2;
+
+  return latTemp + seasonal + pressureEffect + landEffect;
+}
+
+function tempToColor(temp) {
+  // Map temp to color: cold=blue, warm=red/orange
+  const t = (temp + 15) / 45; // normalize roughly 0-1
+  const clamped = Math.max(0, Math.min(1, t));
+
+  let r, g, b;
+  if (clamped < 0.33) {
+    // Deep blue to light blue
+    const f = clamped / 0.33;
+    r = 20 + f * 30;
+    g = 40 + f * 80;
+    b = 120 + f * 80;
+  } else if (clamped < 0.66) {
+    // Light blue to green to yellow
+    const f = (clamped - 0.33) / 0.33;
+    r = 50 + f * 180;
+    g = 120 + f * 80;
+    b = 200 - f * 100;
+  } else {
+    // Yellow to orange to red
+    const f = (clamped - 0.66) / 0.34;
+    r = 230 + f * 25;
+    g = 200 - f * 120;
+    b = 100 - f * 60;
+  }
+
+  return `rgb(${Math.floor(r)},${Math.floor(g)},${Math.floor(b)})`;
+}
+
+// --- Continent hit test ---
+function isOnContinent(x, y) {
+  // Simple point-in-polygon test
+  let inside = false;
+  const pts = continent;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const xi = pts[i].x, yi = pts[i].y;
+    const xj = pts[j].x, yj = pts[j].y;
+    if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+// --- Wind field function ---
+function getWindField(x, y) {
+  let vx = 0, vy = 0;
+  for (const sys of pressureSystems) {
+    const wind = sys.getWind(x, y);
+    vx += wind.vx;
+    vy += wind.vy;
+  }
+  // Add large-scale flow
+  vx += 0.15;
+  vy += Math.sin(x * 0.005 + y * 0.003) * 0.05;
+  return { vx, vy };
+}
+
+// --- Draw continent ---
+function drawContinent(ctx) {
+  // Land fill
+  ctx.beginPath();
+  ctx.moveTo(continent[0].x, continent[0].y);
+  for (let i = 1; i < continent.length; i++) {
+    ctx.lineTo(continent[i].x, continent[i].y);
+  }
+  ctx.closePath();
+
+  const landGrad = ctx.createRadialGradient(W * 0.4, H * 0.45, 0, W * 0.4, H * 0.45, W * 0.4);
+  landGrad.addColorStop(0, '#2a5a3a');
+  landGrad.addColorStop(0.5, '#1e4a2e');
+  landGrad.addColorStop(1, '#163a22');
+  ctx.fillStyle = landGrad;
+  ctx.fill();
+
+  // Coastline glow
+  ctx.strokeStyle = 'rgba(100, 180, 255, 0.3)';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  ctx.strokeStyle = 'rgba(150, 210, 255, 0.5)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Islands
+  for (const island of islands) {
+    ctx.beginPath();
+    ctx.moveTo(island[0].x, island[0].y);
+    for (let i = 1; i < island.length; i++) {
+      ctx.lineTo(island[i].x, island[i].y);
+    }
+    ctx.closePath();
+    ctx.fillStyle = '#1e4a2e';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(100, 180, 255, 0.25)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+}
+
+// --- Draw pressure labels ---
+function drawPressureLabels(ctx) {
+  for (const sys of pressureSystems) {
+    if (sys.alpha < 0.2) continue;
+    ctx.save();
+    ctx.globalAlpha = sys.alpha;
+
+    // Pressure rings
+    const rings = 3;
+    for (let r = 0; r < rings; r++) {
+      const radius = sys.radius * (0.3 + r * 0.35);
+      ctx.beginPath();
+      ctx.arc(sys.x, sys.y, radius, 0, Math.PI * 2);
+      ctx.strokeStyle = sys.type === 'L'
+        ? `rgba(100, 150, 255, ${0.15 - r * 0.04})`
+        : `rgba(255, 200, 100, ${0.12 - r * 0.03})`;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+
+    // Label
+    const label = sys.type === 'L' ? 'L' : 'H';
+    const labelColor = sys.type === 'L' ? '#6699ff' : '#ffcc66';
+    ctx.font = `bold ${16 + sys.strength * 0.1}px 'Courier New', monospace`;
+    ctx.fillStyle = labelColor;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, sys.x, sys.y);
+
+    // Pressure value
+    const pressureVal = sys.type === 'L'
+      ? Math.floor(980 + sys.strength * 0.15)
+      : Math.floor(1020 + sys.strength * 0.1);
+    ctx.font = `10px 'Courier New', monospace`;
+    ctx.fillStyle = `rgba(200, 220, 255, ${sys.alpha * 0.7})`;
+    ctx.fillText(pressureVal, sys.x, sys.y + 18);
+
+    ctx.restore();
+  }
+}
+
+// --- Draw temperature overlay ---
+function drawTemperature(ctx, t) {
+  // Draw temperature as a coarse grid of colored rectangles
+  const cellSize = 20;
+  const cols = Math.ceil(W / cellSize);
+  const rows = Math.ceil(H / cellSize);
+
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const x = col * cellSize + cellSize / 2;
+      const y = row * cellSize + cellSize / 2;
+      const temp = getTemperature(x, y, t);
+      const color = tempToColor(temp);
+
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.35;
+      ctx.fillRect(col * cellSize, row * cellSize, cellSize + 1, cellSize + 1);
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+// --- Draw grid lines ---
+function drawGrid(ctx) {
+  ctx.strokeStyle = 'rgba(100, 140, 180, 0.08)';
+  ctx.lineWidth = 0.5;
+
+  const spacing = 80;
+  for (let x = 0; x < W; x += spacing) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, H);
+    ctx.stroke();
+  }
+  for (let y = 0; y < H; y += spacing) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(W, y);
+    ctx.stroke();
+  }
+}
+
+// --- Draw compass rose ---
+function drawCompass(ctx) {
+  const cx = W - 60, cy = 60;
+  ctx.save();
+  ctx.globalAlpha = 0.5;
+
+  ctx.strokeStyle = 'rgba(200, 220, 255, 0.6)';
+  ctx.lineWidth = 1;
+
+  // Circle
+  ctx.beginPath();
+  ctx.arc(cx, cy, 20, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // N
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - 25);
+  ctx.lineTo(cx - 5, cy - 10);
+  ctx.lineTo(cx + 5, cy - 10);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(255, 100, 100, 0.7)';
+  ctx.fill();
+
+  // S
+  ctx.beginPath();
+  ctx.moveTo(cx, cy + 25);
+  ctx.lineTo(cx - 4, cy + 12);
+  ctx.lineTo(cx + 4, cy + 12);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(200, 220, 255, 0.5)';
+  ctx.fill();
+
+  // E, W
+  ctx.beginPath();
+  ctx.moveTo(cx + 25, cy);
+  ctx.lineTo(cx + 12, cy - 4);
+  ctx.lineTo(cx + 12, cy + 4);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(200, 220, 255, 0.4)';
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.moveTo(cx - 25, cy);
+  ctx.lineTo(cx - 12, cy - 4);
+  ctx.lineTo(cx - 12, cy + 4);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(200, 220, 255, 0.4)';
+  ctx.fill();
+
+  // Label
+  ctx.font = 'bold 10px Courier New';
+  ctx.fillStyle = 'rgba(255, 100, 100, 0.8)';
+  ctx.textAlign = 'center';
+  ctx.fillText('N', cx, cy - 30);
+
+  ctx.restore();
+}
+
+// --- Draw title ---
+function drawTitle(ctx) {
+  ctx.save();
+  ctx.globalAlpha = 0.4;
+  ctx.font = 'bold 14px Courier New';
+  ctx.fillStyle = '#aaccff';
+  ctx.textAlign = 'left';
+  ctx.fillText('LIVING WEATHER MAP', 15, 25);
+  ctx.font = '10px Courier New';
+  ctx.fillStyle = '#8899bb';
+  const now = new Date();
+  ctx.fillText(`SYNOPSIS ${now.toISOString().slice(0, 16).replace('T', ' ')}`, 15, 42);
+  ctx.restore();
+}
+
+// --- Main loop ---
+let lastTime = 0;
+let frameCount = 0;
+
+function animate(timestamp) {
+  const dt = timestamp - lastTime;
+  lastTime = timestamp;
+  frameCount++;
+
+  // Clear
+  ctx.fillStyle = '#0a1628';
+  ctx.fillRect(0, 0, W, H);
+
+  // Ocean gradient
+  const oceanGrad = ctx.createRadialGradient(W * 0.5, H * 0.5, 0, W * 0.5, H * 0.5, W * 0.7);
+  oceanGrad.addColorStop(0, '#0d1f3c');
+  oceanGrad.addColorStop(1, '#060e1a');
+  ctx.fillStyle = oceanGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Grid
+  drawGrid(ctx);
+
+  // Temperature overlay
+  drawTemperature(ctx, timestamp);
+
+  // Continent
+  drawContinent(ctx);
+
+  // Update pressure systems
+  for (let i = pressureSystems.length - 1; i >= 0; i--) {
+    if (!pressureSystems[i].update(timestamp)) {
+      // Replace dead system
+      const newType = Math.random() > 0.5 ? 'L' : 'H';
+      pressureSystems[i] = new PressureSystem(newType);
+    }
+  }
+
+  // Re-init fronts and rain bands periodically
+  if (frameCount % 600 === 0) {
+    initFrontsAndRain();
+  }
+
+  // Update fronts
+  for (let i = fronts.length - 1; i >= 0; i--) {
+    if (!fronts[i].update(timestamp)) {
+      fronts.splice(i, 1);
+    }
+  }
+
+  // Update rain bands
+  for (let i = rainBands.length - 1; i >= 0; i--) {
+    if (!rainBands[i].update(timestamp)) {
+      rainBands.splice(i, 1);
+    }
+  }
+
+  // Draw rain bands
+  for (const band of rainBands) {
+    band.draw(ctx);
+  }
+
+  // Draw fronts
+  for (const front of fronts) {
+    front.draw(ctx, timestamp);
+  }
+
+  // Update and draw wind particles
+  for (const p of windParticles) {
+    p.update(getWindField);
+    p.draw(ctx);
+  }
+
+  // Pressure labels
+  drawPressureLabels(ctx);
+
+  // Compass
+  drawCompass(ctx);
+
+  // Title
+  drawTitle(ctx);
+
+  // Vignette
+  const vigGrad = ctx.createRadialGradient(W / 2, H / 2, W * 0.25, W / 2, H / 2, W * 0.75);
+  vigGrad.addColorStop(0, 'rgba(0,0,0,0)');
+  vigGrad.addColorStop(1, 'rgba(0,0,0,0.4)');
+  ctx.fillStyle = vigGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  requestAnimationFrame(animate);
+}
+
+// Handle resize - regenerate continent
+window.addEventListener('resize', () => {
+  resize();
+  continent = smoothPoints(generateContinent(), 3);
+  islands = generateIslands();
+});
+
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>

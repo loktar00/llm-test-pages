@@ -1,368 +1,418 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Generative Weaving Art</title>
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            background-color: #1a1a1a;
-            overflow: hidden;
-            font-family: sans-serif;
-        }
-        canvas {
-            display: block;
-        }
-        #ui {
-            position: absolute;
-            bottom: 20px;
-            left: 20px;
-            color: rgba(255, 255, 255, 0.5);
-            pointer-events: none;
-            font-size: 12px;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Generative Weaving</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { overflow: hidden; background: #0d0d0d; }
+canvas { display: block; }
+</style>
 </head>
 <body>
-    <canvas id="loom"></canvas>
-    <div id="ui">Procedural Tapestry Generator</div>
-    <script>
-        /**
-         * CONFIGURATION
-         */
-        const CONFIG = {
-            threadWidth: 3,
-            threadHeight: 1,
-            warpCount: 60,
-            weftSpeed: 3, // pixels per frame
-            scrollDuration: 120, // frames for tapestry to scroll up
-            patternPause: 100, // frames to wait between weaving bands
-        };
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
 
-        const canvas = document.getElementById('loom');
-        const ctx = canvas.getContext('2d', { alpha: false });
+let W, H;
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
 
-        let width, height;
-        let tapestries = [];
-        let frameCount = 0;
+// --- Palette Generator ---
+function generatePalette() {
+    const hueBase = Math.random() * 360;
+    const scheme = Math.floor(Math.random() * 4);
+    const hues = [];
+    const satBase = 40 + Math.random() * 35;
+    const litBase = 30 + Math.random() * 30;
 
-        // Resize handling
-        function resize() {
-            width = canvas.width = window.innerWidth;
-            height = canvas.height = window.innerHeight;
+    if (scheme === 0) { // Analogous
+        for (let i = 0; i < 5; i++) {
+            hues.push((hueBase + i * 25 - 50) % 360);
         }
-        window.addEventListener('resize', resize);
-        resize();
+    } else if (scheme === 1) { // Split complementary
+        hues.push(hueBase, (hueBase + 150) % 360, (hueBase + 210) % 360, hueBase, (hueBase + 30) % 360);
+    } else if (scheme === 2) { // Triadic
+        hues.push(hueBase, (hueBase + 120) % 360, (hueBase + 240) % 360, hueBase, (hueBase + 60) % 360);
+    } else { // Monochromatic
+        for (let i = 0; i < 5; i++) {
+            hues.push(hueBase);
+        }
+    }
 
-        /**
-         * UTILITIES & MATH
-         */
-        const random = (min, max) => Math.random() * (max - min) + min;
-        const lerp = (start, end, t) => start * (1 - t) + end * t;
+    const colors = hues.map((h, i) => {
+        const s = satBase + (i % 2 === 0 ? 10 : -5);
+        const l = litBase + (i % 3) * 8;
+        return { h: h, s: s, l: l };
+    });
 
-        // HSL to RGB conversion for palette generation
-        function hslToRgb(h, s, l) {
-            let r, g, b;
-            if (s === 0) {
-                r = g = b = l;
+    const warpLight = litBase + 35 + Math.random() * 10;
+    const warp = { h: (hueBase + 20) % 360, s: 8 + Math.random() * 10, l: warpLight };
+
+    return { colors, warp, hueBase };
+}
+
+function hsl(c, alpha) {
+    if (alpha !== undefined) return `hsla(${c.h},${c.s}%,${c.l}%,${alpha})`;
+    return `hsl(${c.h},${c.s}%,${c.l}%)`;
+}
+
+// --- Pattern Generators ---
+function generatePattern(type, rows, cols) {
+    const weave = [];
+    const colors = [];
+
+    for (let r = 0; r < rows; r++) {
+        weave[r] = [];
+        colors[r] = r;
+        for (let c = 0; c < cols; c++) {
+            if (type === 'stripes') {
+                weave[r][c] = ((r + Math.floor(c / 4)) % 2 === 0) ? 1 : 0;
+            } else if (type === 'diamonds') {
+                const cx = cols / 2, cy = rows / 2;
+                const d = Math.abs(r - cy) + Math.abs(c - cx);
+                weave[r][c] = (d % 4 < 2) ? 1 : 0;
+            } else if (type === 'chevrons') {
+                const cx = cols / 2;
+                const dist = Math.abs(c - cx - (r % 2 === 0 ? 0 : cols * 0.25));
+                weave[r][c] = (dist % 6 < 3) ? 1 : 0;
             } else {
-                const hue2rgb = (p, q, t) => {
-                    if (t < 0) t += 1;
-                    if (t > 1) t -= 1;
-                    if (t < 1 / 6) return p + (q - p) * 6 * t;
-                    if (t < 1 / 2) return q;
-                    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
-                    return p;
-                };
-                const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-                const p = 2 * l - q;
-                r = hue2rgb(p, q, h + 1 / 3);
-                g = hue2rgb(p, q, h);
-                b = hue2rgb(p, q, h - 1 / 3);
-            }
-            return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
-        }
-
-        /**
-         * PALETTE GENERATOR
-         * Generates a harmonious palette based on a base hue and a scheme.
-         */
-        function generatePalette() {
-            const baseHue = Math.random() * 360;
-            const scheme = Math.floor(Math.random() * 3); // 0: Analogous, 1: Complementary, 2: Triadic
-            
-            let colors = [];
-            
-            if (scheme === 0) { // Analogous
-                for (let i = 0; i < 4; i++) {
-                    const h = (baseHue + (i * 30) - 30) % 360;
-                    colors.push(`hsl(${h}, 60%, 40%)`);
-                }
-            } else if (scheme === 1) { // Complementary
-                colors.push(`hsl(${baseHue}, 70%, 30%)`);
-                colors.push(`hsl(${baseHue}, 60%, 50%)`);
-                colors.push(`hsl(${(baseHue + 180) % 360}, 70%, 30%)`);
-                colors.push(`hsl(${(baseHue + 180) % 360}, 60%, 50%)`);
-            } else { // Triadic
-                for (let i = 0; i < 3; i++) {
-                    const h = (baseHue + (i * 120)) % 360;
-                    colors.push(`hsl(${h}, 70%, 35%)`);
-                    colors.push(`hsl(${h}, 60%, 55%)`);
-                }
-            }
-            return colors;
-        }
-
-        /**
-         * PATTERN GENERATOR
-         * Determines the weave pattern for a band.
-         */
-        function generatePattern(width, height, type) {
-            const grid = new Uint8Array(width * height);
-            
-            const getColor = (x, y) => {
-                // Simple checkerboard base
-                return (Math.floor(x / CONFIG.threadWidth) + Math.floor(y / CONFIG.threadHeight)) % 2 === 0 ? 1 : 0;
-            };
-
-            for (let y = 0; y < height; y++) {
-                for (let x = 0; x < width; x++) {
-                    let val = 0;
-                    
-                    if (type === 'stripes') {
-                        // Vertical stripes
-                        const bandWidth = random(10, 40);
-                        val = (Math.floor(x / CONFIG.threadWidth) % Math.floor(bandWidth / CONFIG.threadWidth)) === 0 ? 1 : 0;
-                    } else if (type === 'diamonds') {
-                        // Diamonds
-                        const cx = width / 2;
-                        const cy = height / 2;
-                        const dist = Math.abs(x - cx) + Math.abs(y - cy);
-                        val = (dist % 20 < 5) ? 1 : 0;
-                    } else if (type === 'chevrons') {
-                        // Chevrons
-                        const yMod = (y % 40);
-                        val = (yMod < 10 || yMod > 30) ? 1 : 0;
-                    }
-                    
-                    grid[y * width + x] = val;
-                }
-            }
-            return grid;
-        }
-
-        /**
-         * THREAD CLASS
-         * Represents a single warp strand.
-         */
-        class Thread {
-            constructor(x, color) {
-                this.x = x;
-                this.color = color;
-                this.y = 0; // Current scroll position relative to top
-                this.height = 0; // How much of this thread is woven
-                this.isWeaving = false;
-            }
-
-            draw(ctx, scrollOffset) {
-                // Calculate visible height
-                const visibleTop = this.y - scrollOffset;
-                
-                if (visibleTop > height + CONFIG.threadHeight) return; // Off screen bottom
-                if (visibleTop + this.height < -CONFIG.threadHeight) return; // Off screen top
-
-                const drawY = Math.max(0, visibleTop);
-                const drawH = Math.min(height, this.height + visibleTop) - drawY;
-
-                if (drawH <= 0) return;
-
-                // Base color
-                ctx.fillStyle = this.color;
-                ctx.fillRect(this.x, drawY, CONFIG.threadWidth - 1, drawH);
-
-                // Texture: Add noise/variation to simulate thread twist
-                // We draw tiny darker lines on the right side to simulate 3D cylinder
-                ctx.fillStyle = 'rgba(0,0,0,0.2)';
-                for (let ty = drawY; ty < drawY + drawH; ty += 4) {
-                    // Only draw noise if this thread is actually on screen
-                    if (ty > 0 && ty < height) {
-                        ctx.fillRect(this.x + 1, ty, 1, 1);
-                    }
-                }
-                
-                // Highlight
-                ctx.fillStyle = 'rgba(255,255,255,0.1)';
-                ctx.fillRect(this.x, drawY, 1, drawH);
+                weave[r][c] = ((r + c) % 2 === 0) ? 1 : 0;
             }
         }
+    }
+    return { weave, colors };
+}
 
-        /**
-         * TAPESTRY CLASS
-         * Manages a single weaving session.
-         */
-        class Tapestry {
-            constructor() {
-                this.width = width;
-                this.height = height * 1.5; // Taller than screen
-                this.scrollOffset = 0;
-                this.state = 'warping'; // warping, weaving, finishing
-                this.colors = generatePalette();
-                
-                // Initialize Warp Threads
-                this.threads = [];
-                for (let x = 0; x < width; x += CONFIG.threadWidth) {
-                    // Pick a random color from palette for the warp
-                    const color = this.colors[Math.floor(Math.random() * this.colors.length)];
-                    this.threads.push(new Thread(x, color));
-                }
+// --- Tapestry ---
+const THREAD_W = 7;
+const GAP = 1;
+const GAP_W = THREAD_W + GAP;
+const ROW_H = 3;
+const ROW_GAP = 1;
+const ROW_GAP_H = ROW_H + ROW_GAP;
 
-                // Determine Pattern Type
-                const patterns = ['stripes', 'diamonds', 'chevrons'];
-                this.patternType = patterns[Math.floor(Math.random() * patterns.length)];
-                
-                // Generate the full weave grid
-                this.patternGrid = generatePattern(this.width, this.height, this.patternType);
-                
-                this.weftY = 0;
-                this.weftDirection = 1; // 1 = right to left, -1 = left to right (visual direction)
-                this.frameCounter = 0;
+const PATTERN_TYPES = ['stripes', 'diamonds', 'chevrons'];
+
+let tapestryOffset = 0;
+let currentTapestry = null;
+let nextTapestry = null;
+let shuttleX = 0;
+let shuttleDir = 1;
+let currentRow = 0;
+let weavingSpeed = 1;
+let tapestryComplete = false;
+let scrollSpeed = 0.8;
+let animTime = 0;
+
+function createTapestry() {
+    const palette = generatePalette();
+    const type = PATTERN_TYPES[Math.floor(Math.random() * PATTERN_TYPES.length)];
+    const cols = Math.ceil(W / GAP_W);
+    const rows = Math.ceil((H * 1.5) / ROW_GAP_H);
+    const pattern = generatePattern(type, rows, cols);
+
+    return {
+        palette,
+        type,
+        cols,
+        rows,
+        pattern,
+        yarns: palette.colors.map(c => {
+            const variations = [];
+            for (let v = 0; v < 3; v++) {
+                variations.push({
+                    h: (c.h + (Math.random() - 0.5) * 15 + 360) % 360,
+                    s: Math.max(10, c.s + (Math.random() - 0.5) * 15),
+                    l: Math.max(10, c.l + (Math.random() - 0.5) * 12)
+                });
             }
+            return variations;
+        }),
+        warpYarn: {
+            h: (palette.warp.h + (Math.random() - 0.5) * 10 + 360) % 360,
+            s: Math.max(5, palette.warp.s + (Math.random() - 0.5) * 5),
+            l: Math.max(20, palette.warp.l + (Math.random() - 0.5) * 8)
+        }
+    };
+}
 
-            update() {
-                this.frameCounter++;
+function init() {
+    currentTapestry = createTapestry();
+    nextTapestry = null;
+    currentRow = 0;
+    shuttleX = 0;
+    shuttleDir = 1;
+    tapestryComplete = false;
+    tapestryOffset = H * 0.1;
+}
 
-                if (this.state === 'warping') {
-                    // Drop threads down one by one
-                    let allDropped = true;
-                    for (let t of this.threads) {
-                        if (t.y < height) {
-                            t.y += 2; // Drop speed
-                            allDropped = false;
-                        }
-                    }
-                    if (allDropped) {
-                        this.state = 'weaving';
-                    }
-                } 
-                else if (this.state === 'weaving') {
-                    // Move shuttle back and forth
-                    const shuttleSpeed = CONFIG.weftSpeed;
-                    
-                    // Advance the weft line
-                    this.weftY += shuttleSpeed;
+function drawThread(x, y, w, h, color, isWarp, highlightSide) {
+    const grad = ctx.createLinearGradient(x, y, x + w, y + h);
+    if (isWarp) {
+        const lOff = highlightSide === 'right' ? 8 : -8;
+        grad.addColorStop(0, hsl({ h: color.h, s: color.s, l: color.l - 5 }));
+        grad.addColorStop(0.35, hsl({ h: color.h, s: color.s, l: color.l + lOff }));
+        grad.addColorStop(0.65, hsl({ h: color.h, s: color.s, l: color.l }));
+        grad.addColorStop(1, hsl({ h: color.h, s: color.s, l: color.l - 4 }));
+    } else {
+        const lOff = highlightSide === 'bottom' ? 8 : -8;
+        grad.addColorStop(0, hsl({ h: color.h, s: color.s, l: color.l - 3 }));
+        grad.addColorStop(0.3, hsl({ h: color.h, s: color.s, l: color.l + lOff }));
+        grad.addColorStop(0.7, hsl({ h: color.h, s: color.s, l: color.l }));
+        grad.addColorStop(1, hsl({ h: color.h, s: color.s, l: color.l - 4 }));
+    }
+    ctx.fillStyle = grad;
+    ctx.fillRect(x, y, w, h);
+}
 
-                    // Draw weft threads visually (conceptually)
-                    // We don't draw a moving line, we color the threads directly as we pass them
-                    // But to make it "watchable", we can draw a "shuttle" visual or just let the threads change color
-                    
-                    // Update threads based on pattern
-                    for (let t of this.threads) {
-                        const threadX = t.x;
-                        
-                        // We only update the part of the thread that is being covered by the weft
-                        // The weft covers from 0 to weftY
-                        // We update pixels around the weftY line
-                        
-                        const pixelY = Math.floor(this.weftY);
-                        
-                        if (pixelY > 0 && pixelY < this.height) {
-                            // Get pattern value for this column and current row
-                            // Pattern is 0 or 1. 1 means warp is ON TOP (visible). 0 means weft is ON TOP.
-                            
-                            const patternVal = this.patternGrid[pixelY * this.width + threadX];
-                            
-                            if (patternVal === 1) {
-                                // Warp is visible
-                                t.color = t.originalColor; // Reset to warp color
-                            } else {
-                                // Weft is visible
-                                // Pick a weft color (alternating or random from palette)
-                                // To make it look like a shuttle, maybe alternate weft colors?
-                                // Or just pick from palette
-                                const weftColorIdx = Math.floor((pixelY / 20)) % this.colors.length;
-                                t.color = this.colors[weftColorIdx];
-                            }
-                            
-                            // Update height
-                            t.height = Math.max(t.height, pixelY);
-                        }
-                    }
+function drawWeftShadow(x, y, w, h, warpColor) {
+    ctx.fillStyle = hsl({ h: warpColor.h, s: warpColor.s * 0.5, l: warpColor.l - 15 }, 0.6);
+    ctx.fillRect(x, y, w, h);
+}
 
-                    if (this.weftY >= this.height) {
-                        this.state = 'finishing';
-                    }
-                } 
-                else if (this.state === 'finishing') {
-                    this.scrollOffset += 1.5;
-                }
-            }
+function renderTapestry(tapestry, offsetY, drawUpToRow, progress) {
+    if (!tapestry) return;
 
-            draw() {
-                // Draw background (loom frame)
-                ctx.fillStyle = '#2a2a2a';
-                ctx.fillRect(0, 0, width, height);
+    const { cols, rows, pattern, yarns, warpYarn } = tapestry;
+    const startX = (W - cols * GAP_W) / 2;
+    const startY = offsetY;
 
-                // Draw Threads
-                // We draw from back to front (though they are side-by-side)
-                // We need to account for scroll offset
-                const drawY = -this.scrollOffset;
+    // Draw warp threads first
+    for (let c = 0; c < cols; c++) {
+        const x = startX + c * GAP_W;
+        const warpColor = warpYarn;
+        const highlight = (c % 2 === 0) ? 'right' : 'left';
+        drawThread(x, startY, THREAD_W, rows * ROW_GAP_H, warpColor, true, highlight);
+    }
 
-                for (let t of this.threads) {
-                    t.draw(ctx, this.scrollOffset);
-                }
+    // Draw weft threads up to current row
+    const maxDrawRow = Math.min(drawUpToRow, rows);
 
-                // Draw Shuttle Visual (only if weaving)
-                if (this.state === 'weaving') {
-                    const shuttleY = this.weftY - this.scrollOffset;
-                    if (shuttleY > 0 && shuttleY < height) {
-                        // Draw a "shuttle" line
-                        ctx.fillStyle = '#d4af37'; // Gold
-                        ctx.fillRect(0, shuttleY - 2, width, 4);
-                        
-                        // Highlight the specific point of interaction
-                        ctx.fillStyle = '#fff';
-                        ctx.beginPath();
-                        ctx.arc(width/2, shuttleY, 5, 0, Math.PI*2);
-                        ctx.fill();
-                    }
-                }
+    for (let r = 0; r < maxDrawRow; r++) {
+        const y = startY + r * ROW_GAP_H;
+        const colorIdx = r % yarns.length;
+        const yarnVar = yarns[colorIdx][r % yarns[colorIdx].length];
+
+        for (let c = 0; c < cols; c++) {
+            const x = startX + c * GAP_W;
+            const isOver = pattern.weave[r][c] === 1;
+
+            if (isOver) {
+                drawThread(x, y, THREAD_W, ROW_H, yarnVar, false, 'bottom');
+            } else {
+                // Weft goes under - draw shadow on warp
+                drawWeftShadow(x, y, THREAD_W, ROW_H, warpYarn);
             }
         }
+    }
 
-        /**
-         * MAIN LOOP
-         */
-        function init() {
-            tapestries.push(new Tapestry());
-            loop();
-        }
+    // Draw partial weft row if weaving is in progress
+    if (drawUpToRow < rows && !tapestryComplete) {
+        const r = drawUpToRow;
+        if (r >= 0 && r < rows) {
+            const y = startY + r * ROW_GAP_H;
+            const colorIdx = r % yarns.length;
+            const yarnVar = yarns[colorIdx][r % yarns[colorIdx].length];
+            const x = startX + Math.floor(shuttleX) * GAP_W;
+            const isOver = pattern.weave[r][Math.floor(shuttleX)] === 1;
 
-        function loop() {
-            // Update all active tapestries
-            for (let i = tapestries.length - 1; i >= 0; i--) {
-                const t = tapestries[i];
-                t.update();
-                t.draw();
-
-                // If finished and scrolled off screen, remove
-                if (t.state === 'finishing' && t.scrollOffset > t.height) {
-                    tapestries.splice(i, 1);
-                }
+            if (isOver) {
+                drawThread(x, y, THREAD_W, ROW_H, yarnVar, false, 'bottom');
+            } else {
+                drawWeftShadow(x, y, THREAD_W, ROW_H, warpYarn);
             }
-
-            // Spawn new tapestry if needed
-            if (tapestries.length === 0) {
-                tapestries.push(new Tapestry());
-            }
-
-            requestAnimationFrame(loop);
         }
+    }
+}
 
-        // Start
-        init();
+function drawShuttle(x, y, dir) {
+    const sw = 30;
+    const sh = 16;
+    const cx = x * GAP_W + (W - (currentTapestry.cols * GAP_W)) / 2 + THREAD_W / 2;
+    const cy = y * ROW_GAP_H + tapestryOffset + ROW_H / 2;
 
-    </script>
+    ctx.save();
+    ctx.translate(cx, cy);
+    if (dir < 0) ctx.scale(-1, 1);
+
+    // Shuttle body
+    const grad = ctx.createLinearGradient(-sw/2, -sh/2, -sw/2, sh/2);
+    grad.addColorStop(0, '#5a4a3a');
+    grad.addColorStop(0.3, '#8a7a6a');
+    grad.addColorStop(0.5, '#9a8a7a');
+    grad.addColorStop(0.7, '#7a6a5a');
+    grad.addColorStop(1, '#4a3a2a');
+
+    ctx.beginPath();
+    ctx.moveTo(-sw/2, 0);
+    ctx.quadraticCurveTo(-sw/2, -sh/2, -sw/4, -sh/2);
+    ctx.lineTo(sw/4, -sh/2);
+    ctx.quadraticCurveTo(sw/2, -sh/2, sw/2, 0);
+    ctx.quadraticCurveTo(sw/2, sh/2, sw/4, sh/2);
+    ctx.lineTo(-sw/4, sh/2);
+    ctx.quadraticCurveTo(-sw/2, sh/2, -sw/2, 0);
+    ctx.closePath();
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.strokeStyle = '#3a2a1a';
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+
+    // Yarn trail
+    const trailGrad = ctx.createLinearGradient(-sw/2, 0, -sw/2 - 20, 0);
+    const yarnColor = currentTapestry.yarns[currentRow % currentTapestry.yarns.length][0];
+    trailGrad.addColorStop(0, hsl(yarnColor));
+    trailGrad.addColorStop(1, 'transparent');
+    ctx.fillStyle = trailGrad;
+    ctx.fillRect(-sw/2 - 20, -2, 20, 4);
+
+    ctx.restore();
+}
+
+function update(dt) {
+    animTime += dt;
+
+    if (tapestryComplete) {
+        tapestryOffset += scrollSpeed * dt * 60;
+        const tapestryHeight = currentTapestry.rows * ROW_GAP_H;
+        if (tapestryOffset >= tapestryHeight - H) {
+            currentTapestry = nextTapestry || createTapestry();
+            nextTapestry = null;
+            currentRow = 0;
+            shuttleX = 0;
+            shuttleDir = 1;
+            tapestryComplete = false;
+            tapestryOffset = H * 0.1;
+        }
+        return;
+    }
+
+    // Move shuttle
+    const shuttleSpeed = 3.5 + Math.sin(animTime * 0.5) * 0.5;
+    const startX = 0;
+    const endX = currentTapestry.cols - 1;
+
+    if (shuttleDir > 0) {
+        shuttleX += shuttleSpeed * dt * 60;
+        if (shuttleX >= endX) {
+            shuttleX = endX;
+            shuttleDir = -1;
+            currentRow++;
+
+            if (currentRow >= currentTapestry.rows) {
+                tapestryComplete = true;
+                nextTapestry = createTapestry();
+                return;
+            }
+        }
+    } else {
+        shuttleX -= shuttleSpeed * dt * 60;
+        if (shuttleX <= startX) {
+            shuttleX = startX;
+            shuttleDir = 1;
+            currentRow++;
+
+            if (currentRow >= currentTapestry.rows) {
+                tapestryComplete = true;
+                nextTapestry = createTapestry();
+                return;
+            }
+        }
+    }
+
+    // Slow scroll while weaving
+    tapestryOffset += 0.15 * dt * 60;
+}
+
+function render() {
+    ctx.fillStyle = '#0d0d0d';
+    ctx.fillRect(0, 0, W, H);
+
+    // Draw background texture (loom frame)
+    const frameW = 12;
+    const frameGrad = ctx.createLinearGradient(0, 0, frameW, 0);
+    frameGrad.addColorStop(0, '#2a1f15');
+    frameGrad.addColorStop(0.5, '#4a3525');
+    frameGrad.addColorStop(1, '#2a1f15');
+    ctx.fillStyle = frameGrad;
+    ctx.fillRect(0, 0, frameW, H);
+    ctx.fillRect(W - frameW, 0, frameW, H);
+
+    // Frame top/bottom
+    const hFrameGrad = ctx.createLinearGradient(0, 0, 0, frameW);
+    hFrameGrad.addColorStop(0, '#4a3525');
+    hFrameGrad.addColorStop(0.5, '#5a4535');
+    hFrameGrad.addColorStop(1, '#2a1f15');
+    ctx.fillStyle = hFrameGrad;
+    ctx.fillRect(0, 0, W, frameW);
+    ctx.fillRect(0, H - frameW, W, frameW);
+
+    // Frame decorative nails
+    for (let i = 0; i < H; i += 40) {
+        ctx.beginPath();
+        ctx.arc(6, i + 20, 2.5, 0, Math.PI * 2);
+        ctx.fillStyle = '#6a5a4a';
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(W - 6, i + 20, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // Draw current tapestry
+    const drawRow = Math.floor(currentRow);
+    renderTapestry(currentTapestry, tapestryOffset, drawRow, 0);
+
+    // Draw shuttle
+    if (!tapestryComplete && currentRow < currentTapestry.rows) {
+        drawShuttle(currentRow, shuttleDir);
+    }
+
+    // Draw next tapestry preview at bottom
+    if (nextTapestry && tapestryComplete) {
+        const previewY = H - H * 0.3;
+        ctx.globalAlpha = 0.3;
+        renderTapestry(nextTapestry, previewY, 0, 0);
+        ctx.globalAlpha = 1.0;
+    }
+
+    // Subtle vignette
+    const vigGrad = ctx.createRadialGradient(W/2, H/2, H*0.3, W/2, H/2, H*0.8);
+    vigGrad.addColorStop(0, 'transparent');
+    vigGrad.addColorStop(1, 'rgba(0,0,0,0.4)');
+    ctx.fillStyle = vigGrad;
+    ctx.fillRect(0, 0, W, H);
+
+    // Pattern type label
+    if (currentTapestry) {
+        ctx.save();
+        ctx.font = '11px monospace';
+        ctx.fillStyle = 'rgba(255,255,255,0.15)';
+        ctx.textAlign = 'right';
+        ctx.fillText(`pattern: ${currentTapestry.type.toUpperCase()}`, W - 20, 24);
+        ctx.textAlign = 'left';
+        ctx.fillText(`row: ${currentRow}/${currentTapestry.rows}`, 20, 24);
+        ctx.restore();
+    }
+}
+
+let lastTime = performance.now();
+function loop(time) {
+    const dt = Math.min((time - lastTime) / 1000, 0.05);
+    lastTime = time;
+    update(dt);
+    render();
+    requestAnimationFrame(loop);
+}
+
+init();
+requestAnimationFrame(loop);
+</script>
 </body>
 </html>

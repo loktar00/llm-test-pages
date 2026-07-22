@@ -1,568 +1,668 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Autoplay Match-3</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            background-color: #1a1a2e;
-            overflow: hidden;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            color: #fff;
-        }
-        canvas {
-            display: block;
-        }
-        #ui {
-            position: absolute;
-            top: 20px;
-            left: 0;
-            width: 100%;
-            text-align: center;
-            pointer-events: none;
-            text-shadow: 0 2px 4px rgba(0,0,0,0.5);
-        }
-        #score-label {
-            font-size: 1.2rem;
-            opacity: 0.7;
-            text-transform: uppercase;
-            letter-spacing: 2px;
-        }
-        #score {
-            font-size: 3rem;
-            font-weight: bold;
-        }
-        #combo {
-            font-size: 1.5rem;
-            color: #ffd700;
-            opacity: 0;
-            transition: opacity 0.3s;
-            margin-top: 5px;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Self-Playing Match-3</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a1a; overflow: hidden; display: flex; justify-content: center; align-items: center; height: 100vh; }
+  canvas { display: block; }
+</style>
 </head>
 <body>
-
-    <div id="ui">
-        <div id="score-label">Score</div>
-        <div id="score">0</div>
-        <div id="combo">COMBO x1</div>
-    </div>
-
-    <canvas id="gameCanvas"></canvas>
-
+<canvas id="c"></canvas>
 <script>
-/**
- * Configuration & Constants
- */
-const COLS = 8;
-const ROWS = 8;
-const GEM_TYPES = 6;
-const ANIM_SPEED = 0.15; // Speed of movement (0-1)
-const POP_DURATION = 200; // ms
-const STATE_TICK = 1000; // ms between AI moves
-const GRAVITY = 0.8;
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
 
+let W, H, COLS, ROWS, CELL, PAD, BOARD_X, BOARD_Y;
+const GEM_TYPES = 7;
 const COLORS = [
-    '#FF4D4D', // Red
-    '#4DFF4D', // Green
-    '#4D4DFF', // Blue
-    '#FFFF4D', // Yellow
-    '#FF4DFF', // Magenta
-    '#4DFFFF'  // Cyan
+  '#ff4466', '#44bbff', '#44ff88', '#ffaa22', '#cc44ff', '#ff66aa', '#66ddff'
+];
+const GLOW_COLORS = [
+  '#ff7799', '#77ddff', '#77ffaa', '#ffcc55', '#dd77ff', '#ff99cc', '#99eeff'
 ];
 
-// Game States
-const STATE_IDLE = 0;
-const STATE_SWAPPING = 1;
-const STATE_POPPING = 2;
-const STATE_FALLING = 3;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  COLS = 8;
+  ROWS = 10;
+  CELL = Math.min(Math.floor((W - 40) / COLS), Math.floor((H - 100) / ROWS), 70);
+  PAD = 2;
+  BOARD_X = Math.floor((W - COLS * CELL) / 2);
+  BOARD_Y = Math.floor((H - ROWS * CELL) / 2) + 20;
+}
+resize();
+window.addEventListener('resize', resize);
 
-/**
- * Game Classes
- */
+let board = [];
+let animQueue = [];
+let state = 'IDLE';
+let score = 0;
+let combo = 0;
+let comboTimer = 0;
+let particles = [];
+let sparkleParticles = [];
+let scorePopups = [];
+let lastMoveTime = 0;
+let swapAnim = null;
+let popAnims = [];
+let fallAnims = [];
+let refillAnims = [];
+let idleTimer = 0;
+let boardShake = 0;
 
-class Gem {
-    constructor(col, row, type) {
-        this.col = col;
-        this.row = row;
-        this.type = type;
-        this.x = col; // Normalized coordinates
-        this.y = row;
-        this.targetX = col;
-        this.targetY = row;
-        this.scale = 1;
-        this.alpha = 1;
-        this.isMatch = false;
-        this.isNew = false;
-        this.spawnY = -2; // Start above screen
-    }
-
-    update() {
-        // Smooth movement
-        const dx = this.targetX - this.x;
-        const dy = this.targetY - this.y;
-        
-        if (Math.abs(dx) > 0.001) this.x += dx * ANIM_SPEED;
-        else this.x = this.targetX;
-
-        if (Math.abs(dy) > 0.001) {
-            // Add slight bounce/easing for falling
-            this.y += dy * ANIM_SPEED;
-        } else {
-            this.y = this.targetY;
-        }
-
-        // Scale animation for popping
-        if (this.isMatch) {
-            this.scale -= 0.15;
-            this.alpha -= 0.1;
-        } else {
-            this.scale += (1 - this.scale) * 0.2;
-            this.alpha += (1 - this.alpha) * 0.2;
-        }
-    }
+function randomGem() {
+  return Math.floor(Math.random() * GEM_TYPES);
 }
 
-class Particle {
-    constructor(x, y, color) {
-        this.x = x;
-        this.y = y;
-        this.color = color;
-        const angle = Math.random() * Math.PI * 2;
-        const speed = Math.random() * 0.1 + 0.05;
-        this.vx = Math.cos(angle) * speed;
-        this.vy = Math.sin(angle) * speed;
-        this.life = 1.0;
-        this.decay = Math.random() * 0.03 + 0.02;
-        this.size = Math.random() * 0.3 + 0.1;
+function initBoard() {
+  board = [];
+  for (let r = 0; r < ROWS; r++) {
+    board[r] = [];
+    for (let c = 0; c < COLS; c++) {
+      let t;
+      do {
+        t = randomGem();
+      } while (
+        (c >= 2 && board[r][c-1] === t && board[r][c-2] === t) ||
+        (r >= 2 && board[r-1][c] === t && board[r-2][c] === t)
+      );
+      board[r][c] = t;
     }
-
-    update() {
-        this.x += this.vx;
-        this.y += this.vy;
-        this.vy += 0.002; // Gravity
-        this.life -= this.decay;
-    }
+  }
 }
 
-class Match3Game {
-    constructor() {
-        this.canvas = document.getElementById('gameCanvas');
-        this.ctx = this.canvas.getContext('2d');
-        this.scoreEl = document.getElementById('score');
-        this.comboEl = document.getElementById('combo');
-        
-        this.grid = [];
-        this.particles = [];
-        this.score = 0;
-        this.combo = 0;
-        
-        this.state = STATE_IDLE;
-        this.lastTick = 0;
-        this.swapPair = null; // {g1, g2}
-        
-        this.resize();
-        window.addEventListener('resize', () => this.resize());
-        
-        this.initGrid();
-        this.loop = this.loop.bind(this);
-        requestAnimationFrame(this.loop);
+function findValidMove() {
+  let moves = [];
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      // Try swap right
+      if (c + 1 < COLS) {
+        if (wouldMatch(r, c, r, c+1)) moves.push({r1:r,c1:c,r2:r,c2:c+1});
+      }
+      // Try swap down
+      if (r + 1 < ROWS) {
+        if (wouldMatch(r, c, r+1, c)) moves.push({r1:r,c1:c,r2:r+1,c2:c});
+      }
     }
+  }
+  if (moves.length === 0) {
+    // Board is stuck, reshuffle
+    initBoard();
+    return null;
+  }
+  return moves[Math.floor(Math.random() * moves.length)];
+}
 
-    resize() {
-        this.canvas.width = window.innerWidth;
-        this.canvas.height = window.innerHeight;
-        
-        // Calculate cell size based on screen dimensions
-        const w = this.canvas.width;
-        const h = this.canvas.height;
-        this.cellSize = Math.min(w / (COLS + 2), h / (ROWS + 2));
-        this.offsetX = (w - (this.cellSize * COLS)) / 2;
-        this.offsetY = (h - (this.cellSize * ROWS)) / 2;
+function wouldMatch(r1, c1, r2, c2) {
+  // Temporarily swap
+  let temp = board[r1][c1];
+  board[r1][c1] = board[r2][c2];
+  board[r2][c2] = temp;
+  let matches = findAllMatches();
+  // Swap back
+  temp = board[r1][c1];
+  board[r1][c1] = board[r2][c2];
+  board[r2][c2] = temp;
+  return matches.length > 0;
+}
+
+function findAllMatches() {
+  let matched = new Set();
+  // Horizontal
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS - 2; c++) {
+      let t = board[r][c];
+      if (t < 0) continue;
+      if (board[r][c+1] === t && board[r][c+2] === t) {
+        let end = c + 2;
+        while (end + 1 < COLS && board[r][end+1] === t) end++;
+        for (let i = c; i <= end; i++) matched.add(r * COLS + i);
+      }
     }
-
-    initGrid() {
-        this.grid = [];
-        for (let c = 0; c < COLS; c++) {
-            this.grid[c] = [];
-            for (let r = 0; r < ROWS; r++) {
-                this.grid[c][r] = this.createGem(c, r);
-            }
-        }
-        // Ensure no initial matches
-        while (this.findMatches().length > 0) {
-            this.resolveInstantMatches();
-        }
+  }
+  // Vertical
+  for (let c = 0; c < COLS; c++) {
+    for (let r = 0; r < ROWS - 2; r++) {
+      let t = board[r][c];
+      if (t < 0) continue;
+      if (board[r+1][c] === t && board[r+2][c] === t) {
+        let end = r + 2;
+        while (end + 1 < ROWS && board[end+1][c] === t) end++;
+        for (let i = r; i <= end; i++) matched.add(i * COLS + c);
+      }
     }
+  }
+  return [...matched].map(v => ({r: Math.floor(v / COLS), c: v % COLS}));
+}
 
-    createGem(c, r) {
-        let type;
-        // Smart generation to prevent instant 3-matches
-        do {
-            type = Math.floor(Math.random() * GEM_TYPES);
-        } while (
-            (c >= 2 && this.grid[c-1][r] && this.grid[c-1][r].type === type && this.grid[c-2][r] && this.grid[c-2][r].type === type) ||
-            (r >= 2 && this.grid[c][r-1] && this.grid[c][r-1].type === type && this.grid[c][r-2] && this.grid[c][r-2].type === type)
-        );
-        
-        const gem = new Gem(c, r, type);
-        gem.spawnY = r; // No fall-in animation on init
-        gem.y = r;
-        return gem;
+function startSwap(move) {
+  state = 'SWAPPING';
+  swapAnim = {
+    r1: move.r1, c1: move.c1,
+    r2: move.r2, c2: move.c2,
+    t: 0,
+    duration: 0.25
+  };
+  // Actually swap in board
+  let temp = board[move.r1][move.c1];
+  board[move.r1][move.c1] = board[move.r2][move.c2];
+  board[move.r2][move.c2] = temp;
+}
+
+function startPop(matches) {
+  state = 'POPPING';
+  combo++;
+  let points = matches.length * 10 * combo;
+  score += points;
+
+  // Score popup
+  let cx = 0, cy = 0;
+  for (let m of matches) { cx += m.c; cy += m.r; }
+  cx /= matches.length; cy /= matches.length;
+  scorePopups.push({
+    x: BOARD_X + cx * CELL + CELL/2,
+    y: BOARD_Y + cy * CELL + CELL/2,
+    text: '+' + points,
+    combo: combo,
+    t: 0,
+    duration: 1.2
+  });
+
+  // Sparkle burst for combos
+  if (combo > 1) {
+    for (let i = 0; i < combo * 8; i++) {
+      sparkleParticles.push({
+        x: BOARD_X + cx * CELL + CELL/2,
+        y: BOARD_Y + cy * CELL + CELL/2,
+        vx: (Math.random() - 0.5) * 6,
+        vy: (Math.random() - 0.5) * 6,
+        life: 1,
+        decay: 0.015 + Math.random() * 0.02,
+        size: 2 + Math.random() * 4,
+        color: GLOW_COLORS[Math.floor(Math.random() * GLOW_COLORS.length)]
+      });
     }
+  }
 
-    // --- Logic: Match Finding & Resolution ---
-
-    findMatches() {
-        let matches = new Set();
-        
-        // Horizontal
-        for (let r = 0; r < ROWS; r++) {
-            for (let c = 0; c < COLS - 2; c++) {
-                let t = this.grid[c][r].type;
-                if (this.grid[c+1][r].type === t && this.grid[c+2][r].type === t) {
-                    matches.add(this.grid[c][r]);
-                    matches.add(this.grid[c+1][r]);
-                    matches.add(this.grid[c+2][r]);
-                    // Check for >3
-                    let k = c + 3;
-                    while (k < COLS && this.grid[k][r].type === t) {
-                        matches.add(this.grid[k][r]);
-                        k++;
-                    }
-                }
-            }
-        }
-
-        // Vertical
-        for (let c = 0; c < COLS; c++) {
-            for (let r = 0; r < ROWS - 2; r++) {
-                let t = this.grid[c][r].type;
-                if (this.grid[c][r+1].type === t && this.grid[c][r+2].type === t) {
-                    matches.add(this.grid[c][r]);
-                    matches.add(this.grid[c][r+1]);
-                    matches.add(this.grid[c][r+2]);
-                    let k = r + 3;
-                    while (k < ROWS && this.grid[c][k].type === t) {
-                        matches.add(this.grid[c][k]);
-                        k++;
-                    }
-                }
-            }
-        }
-        return Array.from(matches);
+  popAnims = [];
+  for (let m of matches) {
+    popAnims.push({
+      r: m.r, c: m.c,
+      t: 0,
+      duration: 0.3,
+      type: board[m.r][m.c]
+    });
+    // Particles
+    let px = BOARD_X + m.c * CELL + CELL/2;
+    let py = BOARD_Y + m.r * CELL + CELL/2;
+    for (let i = 0; i < 12; i++) {
+      let angle = (Math.PI * 2 / 12) * i + Math.random() * 0.3;
+      let speed = 2 + Math.random() * 4;
+      particles.push({
+        x: px, y: py,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        life: 1,
+        decay: 0.02 + Math.random() * 0.02,
+        size: 3 + Math.random() * 4,
+        color: COLORS[board[m.r][m.c]]
+      });
     }
+    board[m.r][m.c] = -1;
+  }
+  boardShake = combo > 1 ? Math.min(combo * 2, 10) : 0;
+}
 
-    resolveInstantMatches() {
-        const matches = this.findMatches();
-        matches.forEach(g => {
-            g.type = Math.floor(Math.random() * GEM_TYPES);
-        });
+function applyGravity() {
+  state = 'FALLING';
+  fallAnims = [];
+  refillAnims = [];
+
+  for (let c = 0; c < COLS; c++) {
+    let writeRow = ROWS - 1;
+    for (let r = ROWS - 1; r >= 0; r--) {
+      if (board[r][c] >= 0) {
+        if (r !== writeRow) {
+          board[writeRow][c] = board[r][c];
+          board[r][c] = -1;
+          fallAnims.push({
+            r: writeRow, c: c,
+            startY: BOARD_Y + r * CELL,
+            endY: BOARD_Y + writeRow * CELL,
+            t: 0,
+            duration: 0.3 + (writeRow - r) * 0.04
+          });
+        }
+        writeRow--;
+      }
     }
-
-    // --- Logic: AI Controller ---
-
-    aiTick() {
-        if (this.state !== STATE_IDLE) return;
-
-        // 1. Find a valid move
-        let moveFound = false;
-        let attempts = 0;
-        
-        while (!moveFound && attempts < 100) {
-            const c = Math.floor(Math.random() * COLS);
-            const r = Math.floor(Math.random() * ROWS);
-            
-            // Try swapping right or down
-            const dir = Math.random() > 0.5 ? 1 : 0; // 1 = right, 0 = down
-            const c2 = c + (dir === 1 ? 1 : 0);
-            const r2 = r + (dir === 0 ? 1 : 0);
-
-            if (c2 < COLS && r2 < ROWS) {
-                // Simulate swap
-                const g1 = this.grid[c][r];
-                const g2 = this.grid[c2][r2];
-                
-                // Temp swap
-                this.grid[c][r] = g2;
-                this.grid[c2][r2] = g1;
-                
-                if (this.findMatches().length > 0) {
-                    // Valid move found!
-                    moveFound = true;
-                    this.swapPair = { g1, g2, c1: c, r1: r, c2, r2 };
-                    
-                    // Restore grid logic for the animation phase to handle it
-                    this.grid[c][r] = g1;
-                    this.grid[c2][r2] = g2;
-                    
-                    // Actually perform swap logic for coordinates
-                    g1.col = c2; g1.row = r2;
-                    g2.col = c; g2.row = r;
-                    
-                    this.state = STATE_SWAPPING;
-                } else {
-                    // Undo
-                    this.grid[c][r] = g1;
-                    this.grid[c2][r2] = g2;
-                }
-            }
-            attempts++;
-        }
-
-        // If no moves found, shuffle board
-        if (!moveFound) {
-            this.shuffleBoard();
-        }
+    // Refill
+    while (writeRow >= 0) {
+      let t = randomGem();
+      board[writeRow][c] = t;
+      refillAnims.push({
+        r: writeRow, c: c,
+        startY: BOARD_Y - CELL * (writeRow + 1),
+        endY: BOARD_Y + writeRow * CELL,
+        t: 0,
+        duration: 0.3 + (ROWS - writeRow) * 0.04,
+        delay: (ROWS - writeRow) * 0.03
+      });
+      writeRow--;
     }
+  }
+}
 
-    shuffleBoard() {
-        // Flatten, shuffle, refill
-        let gems = [];
-        for(let c=0; c<COLS; c++) 
-            for(let r=0; r<ROWS; r++) 
-                gems.push(this.grid[c][r]);
-        
-        for (let i = gems.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [gems[i], gems[j]] = [gems[j], gems[i]];
-        }
+function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+function easeOutBack(t) { let s = 1.7; return 1 + (s + 1) * Math.pow(t - 1, 3) + s * Math.pow(t - 1, 2); }
+function easeOutElastic(t) {
+  if (t === 0 || t === 1) return t;
+  return Math.pow(2, -10 * t) * Math.sin((t * 10 - 0.75) * (2 * Math.PI / 3)) + 1;
+}
+function easeInQuad(t) { return t * t; }
 
-        let idx = 0;
-        for(let c=0; c<COLS; c++) {
-            for(let r=0; r<ROWS; r++) {
-                const g = gems[idx++];
-                g.col = c;
-                g.row = r;
-                g.targetX = c;
-                g.targetY = r;
-                this.grid[c][r] = g;
-            }
-        }
-        // Remove any existing matches immediately without points
-        this.resolveInstantMatches();
+function drawGem(x, y, type, size, alpha, scale) {
+  if (type < 0 || alpha <= 0) return;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  let cx = x + size / 2;
+  let cy = y + size / 2;
+  let s = (size / 2 - PAD) * (scale || 1);
+
+  // Glow
+  ctx.shadowColor = GLOW_COLORS[type];
+  ctx.shadowBlur = 12;
+
+  // Gem body - rounded diamond
+  ctx.beginPath();
+  let r = s * 0.15;
+  ctx.moveTo(cx, cy - s);
+  ctx.lineTo(cx + s, cy);
+  ctx.lineTo(cx, cy + s);
+  ctx.lineTo(cx - s, cy);
+  ctx.closePath();
+
+  let grad = ctx.createRadialGradient(cx - s*0.2, cy - s*0.2, 0, cx, cy, s);
+  grad.addColorStop(0, lighten(COLORS[type], 60));
+  grad.addColorStop(0.5, COLORS[type]);
+  grad.addColorStop(1, darken(COLORS[type], 40));
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Highlight
+  ctx.shadowBlur = 0;
+  ctx.beginPath();
+  ctx.ellipse(cx - s*0.2, cy - s*0.3, s*0.25, s*0.15, -0.5, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.45)';
+  ctx.fill();
+
+  // Inner shine
+  ctx.beginPath();
+  ctx.ellipse(cx + s*0.1, cy + s*0.2, s*0.12, s*0.08, 0.3, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.2)';
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function lighten(hex, amt) {
+  let r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+  r = Math.min(255, r + amt); g = Math.min(255, g + amt); b = Math.min(255, b + amt);
+  return `rgb(${r},${g},${b})`;
+}
+
+function darken(hex, amt) {
+  let r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+  r = Math.max(0, r - amt); g = Math.max(0, g - amt); b = Math.max(0, b - amt);
+  return `rgb(${r},${g},${b})`;
+}
+
+function drawBoard() {
+  // Background
+  ctx.fillStyle = '#0d0d24';
+  ctx.fillRect(0, 0, W, H);
+
+  // Board background
+  let bx = BOARD_X - 4, by = BOARD_Y - 4;
+  let bw = COLS * CELL + 8, bh = ROWS * CELL + 8;
+  ctx.fillStyle = '#12122a';
+  ctx.strokeStyle = '#2a2a5a';
+  ctx.lineWidth = 2;
+  roundRect(ctx, bx, by, bw, bh, 12);
+  ctx.fill();
+  ctx.stroke();
+
+  // Grid cells
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      let x = BOARD_X + c * CELL;
+      let y = BOARD_Y + r * CELL;
+      ctx.fillStyle = (r + c) % 2 === 0 ? '#16163a' : '#1a1a42';
+      ctx.fillRect(x + 1, y + 1, CELL - 2, CELL - 2);
     }
+  }
+}
 
-    // --- Logic: Game Loop ---
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
 
-    updateLogic() {
-        switch (this.state) {
-            case STATE_IDLE:
-                // Wait for timer
-                break;
-            
-            case STATE_SWAPPING:
-                // Check if gems reached destination
-                const g1 = this.swapPair.g1;
-                const g2 = this.swapPair.g2;
-                
-                if (Math.abs(g1.x - g1.targetX) < 0.1 && Math.abs(g1.y - g1.targetY) < 0.1 &&
-                    Math.abs(g2.x - g2.targetX) < 0.1 && Math.abs(g2.y - g2.targetY) < 0.1) {
-                    
-                    // Snap to grid
-                    g1.x = g1.targetX; g1.y = g1.targetY;
-                    g2.x = g2.targetX; g2.y = g2.targetY;
-                    
-                    // Check matches
-                    const matches = this.findMatches();
-                    if (matches.length > 0) {
-                        this.state = STATE_POPPING;
-                        this.combo = 1;
-                        matches.forEach(g => g.isMatch = true);
-                    } else {
-                        // Invalid swap, swap back
-                        this.grid[this.swapPair.c1][this.swapPair.r1] = g1;
-                        this.grid[this.swapPair.c2][this.swapPair.r2] = g2;
-                        g1.col = this.swapPair.c1; g1.row = this.swapPair.r1;
-                        g2.col = this.swapPair.c2; g2.row = this.swapPair.r2;
-                        g1.targetX = g1.col; g1.targetY = g1.row;
-                        g2.targetX = g2.col; g2.targetY = g2.row;
-                        this.state = STATE_IDLE;
-                    }
-                    this.swapPair = null;
-                }
-                break;
+function drawUI() {
+  // Score
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
 
-            case STATE_POPPING:
-                // Wait for animation to finish
-                let allGone = true;
-                for (let c = 0; c < COLS; c++) {
-                    for (let r = 0; r < ROWS; r++) {
-                        if (this.grid[c][r] && this.grid[c][r].isMatch && this.grid[c][r].alpha > 0) {
-                            allGone = false;
-                        }
-                    }
-                }
-                
-                if (allGone) {
-                    // Remove gems and spawn particles
-                    for (let c = 0; c < COLS; c++) {
-                        for (let r = 0; r < ROWS; r++) {
-                            if (this.grid[c][r] && this.grid[c][r].isMatch) {
-                                this.spawnParticles(c, r, this.grid[c][r].type);
-                                this.grid[c][r] = null;
-                            }
-                        }
-                    }
-                    this.state = STATE_FALLING;
-                }
-                break;
+  // Score label
+  ctx.font = 'bold 16px "Segoe UI", Arial, sans-serif';
+  ctx.fillStyle = '#6666aa';
+  ctx.fillText('SCORE', W / 2, 28);
 
-            case STATE_FALLING:
-                // Apply Gravity
-                let moved = false;
-                for (let c = 0; c < COLS; c++) {
-                    let writeRow = ROWS - 1;
-                    for (let r = ROWS - 1; r >= 0; r--) {
-                        if (this.grid[c][r] !== null) {
-                            if (r !== writeRow) {
-                                this.grid[c][writeRow] = this.grid[c][r];
-                                this.grid[c][writeRow].row = writeRow;
-                                this.grid[c][writeRow].targetY = writeRow;
-                                this.grid[c][r] = null;
-                                moved = true;
-                            }
-                            writeRow--;
-                        }
-                    }
-                    // Refill top
-                    while (writeRow >= 0) {
-                        const type = Math.floor(Math.random() * GEM_TYPES);
-                        const gem = new Gem(c, writeRow, type);
-                        gem.spawnY = writeRow - (ROWS - writeRow); // Start from above
-                        gem.y = gem.spawnY;
-                        this.grid[c][writeRow] = gem;
-                        writeRow--;
-                        moved = true;
-                    }
-                }
+  // Score value
+  ctx.font = 'bold 36px "Segoe UI", Arial, sans-serif';
+  let grad = ctx.createLinearGradient(W/2 - 80, 0, W/2 + 80, 0);
+  grad.addColorStop(0, '#ffaa44');
+  grad.addColorStop(0.5, '#ffdd66');
+  grad.addColorStop(1, '#ffaa44');
+  ctx.fillStyle = grad;
+  ctx.shadowColor = '#ffaa44';
+  ctx.shadowBlur = 15;
+  ctx.fillText(score.toLocaleString(), W / 2, 62);
+  ctx.shadowBlur = 0;
 
-                // Check if everything settled
-                let settled = true;
-                for (let c = 0; c < COLS; c++) {
-                    for (let r = 0; r < ROWS; r++) {
-                        const g = this.grid[c][r];
-                        if (g && Math.abs(g.y - g.targetY) > 0.05) settled = false;
-                    }
-                }
+  // Combo
+  if (combo > 1 && comboTimer > 0) {
+    let comboAlpha = Math.min(1, comboTimer);
+    let comboScale = 1 + Math.sin(Date.now() * 0.01) * 0.05;
+    ctx.globalAlpha = comboAlpha;
+    ctx.font = `bold ${24 * comboScale}px "Segoe UI", Arial, sans-serif`;
+    ctx.fillStyle = GLOW_COLORS[combo % GLOW_COLORS.length];
+    ctx.shadowColor = GLOW_COLORS[combo % GLOW_COLORS.length];
+    ctx.shadowBlur = 20;
+    ctx.fillText(`${combo}x COMBO!`, W / 2, 95);
+    ctx.shadowBlur = 0;
+  }
 
-                if (settled) {
-                    this.state = STATE_IDLE;
-                    // Check for chain reactions
-                    const matches = this.findMatches();
-                    if (matches.length > 0) {
-                        this.combo++;
-                        this.state = STATE_POPPING;
-                        matches.forEach(g => g.isMatch = true);
-                    }
-                }
-                break;
-        }
+  ctx.restore();
+}
+
+function drawParticles() {
+  for (let p of particles) {
+    ctx.save();
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.shadowColor = p.color;
+    ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+  for (let p of sparkleParticles) {
+    ctx.save();
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.shadowColor = p.color;
+    ctx.shadowBlur = 12;
+    // Star shape
+    let s = p.size * p.life;
+    ctx.beginPath();
+    for (let i = 0; i < 4; i++) {
+      let a = (Math.PI / 2) * i;
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(p.x + Math.cos(a) * s, p.y + Math.sin(a) * s);
     }
+    ctx.strokeStyle = p.color;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, s * 0.4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
 
-    spawnParticles(c, r, type) {
-        const x = c * this.cellSize + this.cellSize/2 + this.offsetX;
-        const y = r * this.cellSize + this.cellSize/2 + this.offsetY;
-        const color = COLORS[type];
-        for (let i = 0; i < 8; i++) {
-            this.particles.push(new Particle(x, y, color));
-        }
+function drawScorePopups() {
+  for (let sp of scorePopups) {
+    ctx.save();
+    let progress = sp.t / sp.duration;
+    let alpha = progress < 0.3 ? progress / 0.3 : 1 - ((progress - 0.3) / 0.7);
+    alpha = Math.max(0, alpha);
+    ctx.globalAlpha = alpha;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    let yOff = -progress * 60;
+    let scale = progress < 0.1 ? progress / 0.1 : 1;
+
+    ctx.font = `bold ${20 * scale}px "Segoe UI", Arial, sans-serif`;
+    ctx.fillStyle = sp.combo > 1 ? GLOW_COLORS[sp.combo % GLOW_COLORS.length] : '#ffffff';
+    ctx.shadowColor = ctx.fillStyle;
+    ctx.shadowBlur = 10;
+    ctx.fillText(sp.text, sp.x, sp.y + yOff);
+
+    if (sp.combo > 1) {
+      ctx.font = `bold ${14 * scale}px "Segoe UI", Arial, sans-serif`;
+      ctx.fillText(`${sp.combo}x`, sp.x, sp.y + yOff + 20);
     }
+    ctx.restore();
+  }
+}
 
-    updateUI() {
-        if (this.state === STATE_POPPING) {
-            this.scoreEl.innerText = this.score;
+function update(dt) {
+  // Update particles
+  for (let i = particles.length - 1; i >= 0; i--) {
+    let p = particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.1;
+    p.life -= p.decay;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+  for (let i = sparkleParticles.length - 1; i >= 0; i--) {
+    let p = sparkleParticles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vx *= 0.97;
+    p.vy *= 0.97;
+    p.life -= p.decay;
+    if (p.life <= 0) sparkleParticles.splice(i, 1);
+  }
+
+  // Update score popups
+  for (let i = scorePopups.length - 1; i >= 0; i--) {
+    scorePopups[i].t += dt;
+    if (scorePopups[i].t >= scorePopups[i].duration) scorePopups.splice(i, 1);
+  }
+
+  // Board shake
+  if (boardShake > 0) boardShake *= 0.9;
+  if (boardShake < 0.1) boardShake = 0;
+
+  // Combo timer
+  if (comboTimer > 0) comboTimer -= dt * 0.5;
+
+  switch (state) {
+    case 'IDLE':
+      idleTimer += dt;
+      if (idleTimer >= 0.8) {
+        idleTimer = 0;
+        let move = findValidMove();
+        if (move) {
+          startSwap(move);
         }
-        
-        if (this.combo > 1) {
-            this.comboEl.innerText = `COMBO x${this.combo}!`;
-            this.comboEl.style.opacity = 1;
-            this.comboEl.style.transform = `scale(${1 + this.combo * 0.1})`;
+      }
+      break;
+
+    case 'SWAPPING':
+      if (swapAnim) {
+        swapAnim.t += dt;
+        if (swapAnim.t >= swapAnim.duration) {
+          swapAnim = null;
+          let matches = findAllMatches();
+          if (matches.length > 0) {
+            startPop(matches);
+          } else {
+            // Invalid move (shouldn't happen), try again
+            state = 'IDLE';
+            idleTimer = 0;
+          }
+        }
+      }
+      break;
+
+    case 'POPPING':
+      let allDone = true;
+      for (let pa of popAnims) {
+        pa.t += dt;
+        if (pa.t < pa.duration) allDone = false;
+      }
+      if (allDone) {
+        popAnims = [];
+        applyGravity();
+      }
+      break;
+
+    case 'FALLING':
+      let fallDone = true;
+      for (let fa of fallAnims) {
+        if (fa.delay > 0) { fa.delay -= dt; fallDone = false; continue; }
+        fa.t += dt;
+        if (fa.t < fa.duration) fallDone = false;
+      }
+      for (let ra of refillAnims) {
+        if (ra.delay > 0) { ra.delay -= dt; fallDone = false; continue; }
+        ra.t += dt;
+        if (ra.t < ra.duration) fallDone = false;
+      }
+      if (fallDone) {
+        fallAnims = [];
+        refillAnims = [];
+        let matches = findAllMatches();
+        if (matches.length > 0) {
+          comboTimer = 2;
+          startPop(matches);
         } else {
-            this.comboEl.style.opacity = 0;
+          combo = 0;
+          state = 'IDLE';
+          idleTimer = 0;
         }
-    }
-
-    loop(timestamp) {
-        // AI Tick
-        if (this.state === STATE_IDLE && timestamp - this.lastTick > STATE_TICK) {
-            this.aiTick();
-            this.lastTick = timestamp;
-        }
-
-        this.updateLogic();
-
-        // Render
-        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-
-        // Draw Gems
-        for (let c = 0; c < COLS; c++) {
-            for (let r = 0; r < ROWS; r++) {
-                const g = this.grid[c][r];
-                if (g) {
-                    g.update();
-                    this.drawGem(g);
-                }
-            }
-        }
-
-        // Draw Particles
-        for (let i = this.particles.length - 1; i >= 0; i--) {
-            const p = this.particles[i];
-            p.update();
-            this.ctx.globalAlpha = p.life;
-            this.ctx.fillStyle = p.color;
-            this.ctx.beginPath();
-            this.ctx.arc(
-                p.x, 
-                p.y, 
-                p.size * this.cellSize, 
-                0, Math.PI * 2
-            );
-            this.ctx.fill();
-            this.ctx.globalAlpha = 1;
-            if (p.life <= 0) this.particles.splice(i, 1);
-        }
-
-        this.updateUI();
-        requestAnimationFrame(this.loop);
-    }
-
-    drawGem(g) {
-        const x = g.x * this.cellSize + this.offsetX;
-        const y = g.y * this.cellSize + this.offsetY;
-        const size = this.cellSize * 0.8 * g.scale;
-        const color = COLORS[g.type];
-
-        this.ctx.globalAlpha = g.alpha;
-        this.ctx.fillStyle = color;
-        
-        // Draw rounded rect / circle
-        this.ctx.beginPath();
-        this.ctx.roundRect(x + (this.cellSize - size)/2, y + (this.cellSize - size)/2, size, size, size/4);
-        this.ctx.fill();
-
-        // Shine effect
-        this.ctx.fillStyle = 'rgba(255,255,255,0.3)';
-        this.ctx.beginPath();
-        this.ctx.arc(x + size*0.3, y + size*0.3, size*0.15, 0, Math.PI*2);
-        this.ctx.fill();
-
-        this.ctx.globalAlpha = 1;
-    }
+      }
+      break;
+  }
 }
 
-// Start Game
-window.onload = () => {
-    const game = new Match3Game();
-};
+function render() {
+  drawBoard();
 
+  let shakeX = boardShake ? (Math.random() - 0.5) * boardShake : 0;
+  let shakeY = boardShake ? (Math.random() - 0.5) * boardShake : 0;
+
+  ctx.save();
+  ctx.translate(shakeX, shakeY);
+
+  // Draw gems
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      let type = board[r][c];
+      if (type < 0) continue;
+
+      let x = BOARD_X + c * CELL;
+      let y = BOARD_Y + r * CELL;
+      let alpha = 1, scale = 1;
+
+      // Check if this gem is being swapped
+      if (swapAnim) {
+        let swapProgress = easeOutCubic(Math.min(1, swapAnim.t / swapAnim.duration));
+        if (r === swapAnim.r1 && c === swapAnim.c1) {
+          let dx = (swapAnim.c2 - swapAnim.c1) * CELL * swapProgress;
+          let dy = (swapAnim.r2 - swapAnim.r1) * CELL * swapProgress;
+          x += dx;
+          y += dy;
+          continue;
+        }
+        if (r === swapAnim.r2 && c === swapAnim.c2) {
+          let dx = (swapAnim.c1 - swapAnim.c2) * CELL * swapProgress;
+          let dy = (swapAnim.r1 - swapAnim.r2) * CELL * swapProgress;
+          x += dx;
+          y += dy;
+          continue;
+        }
+      }
+
+      // Check if falling
+      for (let fa of fallAnims) {
+        if (fa.r === r && fa.c === c) {
+          if (fa.delay > 0) continue;
+          let p = easeOutCubic(Math.min(1, fa.t / fa.duration));
+          y = fa.startY + (fa.endY - fa.startY) * p;
+        }
+      }
+
+      // Check if refilling
+      for (let ra of refillAnims) {
+        if (ra.r === r && ra.c === c) {
+          if (ra.delay > 0) continue;
+          let p = easeOutBack(Math.min(1, ra.t / ra.duration));
+          y = ra.startY + (ra.endY - ra.startY) * p;
+        }
+      }
+
+      // Check if popping
+      for (let pa of popAnims) {
+        if (pa.r === r && pa.c === c) {
+          let p = pa.t / pa.duration;
+          if (p < 0.3) {
+            scale = 1 + p / 0.3 * 0.3;
+            alpha = 1;
+          } else {
+            scale = 1.3 - (p - 0.3) / 0.7 * 1.3;
+            alpha = 1 - (p - 0.3) / 0.7;
+          }
+          if (scale <= 0) scale = 0;
+          if (alpha <= 0) { alpha = 0; continue; }
+        }
+      }
+
+      drawGem(x, y, type, CELL, alpha, scale);
+    }
+  }
+
+  ctx.restore();
+
+  drawParticles();
+  drawScorePopups();
+  drawUI();
+}
+
+let lastTime = performance.now();
+function gameLoop(time) {
+  let dt = Math.min((time - lastTime) / 1000, 0.05);
+  lastTime = time;
+
+  update(dt);
+  render();
+
+  requestAnimationFrame(gameLoop);
+}
+
+initBoard();
+requestAnimationFrame(gameLoop);
 </script>
 </body>
 </html>

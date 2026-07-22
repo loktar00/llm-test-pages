@@ -1,342 +1,166 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Metaball Lava Lamp</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background-color: #050005;
-        }
-        canvas {
-            display: block;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lava Lamp</title>
+<style>
+*{margin:0;padding:0}
+html,body{width:100%;height:100%;overflow:hidden;background:#000}
+canvas{display:block;width:100%;height:100%}
+</style>
 </head>
 <body>
-    <canvas id="lampCanvas"></canvas>
-    <script>
-        const canvas = document.getElementById('lampCanvas');
-        const ctx = canvas.getContext('2d', { alpha: false });
-        
-        // Offscreen buffer for the field calculation (lower resolution for performance)
-        const offCanvas = document.createElement('canvas');
-        const offCtx = offCanvas.getContext('2d');
+<canvas id="c"></canvas>
+<script>
+const canvas=document.getElementById('c');
+const ctx=canvas.getContext('2d');
+const offscreen=document.createElement('canvas');
+const ictx=offscreen.getContext('2d');
+const SCALE=4;
+const NUM_BLOBS=10;
+const THRESHOLD=1.0;
 
-        // Configuration
-        const config = {
-            blobCount: 10,
-            baseRadius: 40,
-            fieldResolution: 6, // Pixel size of offscreen grid (higher = faster, blockier)
-            threshold: 1.0,     // Field density required to render
-            viscosity: 0.96,    // Velocity damping
-            heatBase: 0.02,     // Upward force at bottom
-            coolTop: -0.02,     // Downward force at top
-            wobbleSpeed: 0.002, // Random horizontal drift
-            colors: {
-                bgTop: '#2a0000',
-                bgBot: '#000000',
-                blobCore: '#ffcc00',
-                blobEdge: '#ff0000',
-                blobDark: '#550000'
-            }
-        };
+let W,H,iW,iH;
 
-        let width, height;
-        let blobs = [];
+function resize(){
+  W=canvas.width=window.innerWidth;
+  H=canvas.height=window.innerHeight;
+  iW=Math.ceil(W/SCALE);
+  iH=Math.ceil(H/SCALE);
+  offscreen.width=iW;
+  offscreen.height=iH;
+}
+window.addEventListener('resize',resize);
+resize();
 
-        class Blob {
-            constructor() {
-                this.reset(true);
-            }
+class Blob{
+  constructor(){
+    this.x=Math.random()*W;
+    this.y=Math.random()*H;
+    this.vx=(Math.random()-0.5)*0.5;
+    this.vy=(Math.random()-0.5)*0.5;
+    this.r=35+Math.random()*35;
+    this.temp=0.3+Math.random()*0.4;
+    this.phase=Math.random()*Math.PI*2;
+    this.freq=0.3+Math.random()*0.5;
+  }
+  update(dt){
+    const ny=this.y/H;
+    if(ny>0.85){
+      this.temp=Math.min(1,this.temp+dt*0.15);
+    }else if(ny<0.15){
+      this.temp=Math.max(0,this.temp-dt*0.12);
+    }else{
+      this.temp+=(0.5-this.temp)*dt*0.05;
+    }
+    const buoyancy=-this.temp*180+90;
+    this.vy+=buoyancy*dt;
+    this.vx+=Math.sin(this.phase+performance.now()*0.001*this.freq)*8*dt;
+    const drag=0.97;
+    this.vx*=drag;
+    this.vy*=drag;
+    this.x+=this.vx*dt;
+    this.y+=this.vy*dt;
+    if(this.x<this.r){this.x=this.r;this.vx*=-0.5;}
+    if(this.x>W-this.r){this.x=W-this.r;this.vx*=-0.5;}
+    if(this.y<this.r){this.y=this.r;this.vy*=-0.3;}
+    if(this.y>H-this.r){this.y=H-this.r;this.vy*=-0.3;}
+  }
+}
 
-            reset(initial = false) {
-                this.x = Math.random() * width;
-                // If initial, random height. If resetting, force to bottom.
-                this.y = initial ? Math.random() * height : height + 50;
-                this.vx = (Math.random() - 0.5) * 0.5;
-                this.vy = (Math.random() - 0.5) * 0.5;
-                this.radius = config.baseRadius + (Math.random() * 20 - 10);
-                // Random phase for wobble
-                this.wobbleOffset = Math.random() * 1000;
-            }
+const blobs=[];
+for(let i=0;i<NUM_BLOBS;i++) blobs.push(new Blob());
 
-            update() {
-                // Heat/Cool Dynamics
-                const normalizedY = this.y / height;
-                
-                // Base heats up (pushes up), Top cools down (pulls down)
-                // Using a sine wave for smooth transition zone in the middle
-                let forceY = 0;
-                
-                if (normalizedY > 0.8) {
-                    // At bottom: strong push up
-                    forceY = config.heatBase;
-                } else if (normalizedY < 0.2) {
-                    // At top: strong pull down
-                    forceY = config.coolTop;
-                } else {
-                    // Middle: slight turbulence/drift
-                    forceY = Math.sin(this.wobbleOffset + performance.now() * 0.001) * 0.002;
-                }
+const imgData=ictx.createImageData(iW,iH);
+const data=imgData.data;
+const r2=new Float32Array(NUM_BLOBS);
+const bx=new Float32Array(NUM_BLOBS);
+const by=new Float32Array(NUM_BLOBS);
 
-                this.vy += forceY;
-                
-                // Horizontal Wobble
-                this.vx += (Math.random() - 0.5) * 0.05;
-                
-                // Apply Viscosity (Air resistance / Liquid density)
-                this.vx *= config.viscosity;
-                this.vy *= config.viscosity;
-
-                // Update Position
-                this.x += this.vx;
-                this.y += this.vy;
-
-                // Wall Constraints
-                const margin = this.radius;
-                if (this.x < margin) { this.x = margin; this.vx *= -0.5; }
-                if (this.x > width - margin) { this.x = width - margin; this.vx *= -0.5; }
-                
-                // Floor/Ceiling soft bounce
-                if (this.y > height + 100) this.reset();
-                if (this.y < -100) this.reset();
-            }
+function renderField(){
+  for(let i=0;i<NUM_BLOBS;i++){
+    bx[i]=blobs[i].x/SCALE;
+    by[i]=blobs[i].y/SCALE;
+    r2[i]=blobs[i].r/SCALE;
+    r2[i]=r2[i]*r2[i];
+  }
+  const iw=1/iW, ih=1/iH;
+  const invScale=1/SCALE;
+  for(let y=0;y<iH;y++){
+    const py=y*SCALE;
+    for(let x=0;x<iW;x++){
+      const px=x*SCALE;
+      let field=0;
+      for(let i=0;i<NUM_BLOBS;i++){
+        const dx=px-bx[i];
+        const dy=py-by[i];
+        const dist2=dx*dx+dy*dy;
+        if(dist2<r2[i]*16){
+          field+=r2[i]/(dist2+1);
         }
+      }
+      const idx=(y*iW+x)*4;
+      if(field>THRESHOLD){
+        const t=Math.min(1,(field-THRESHOLD)/2.5);
+        const t2=t*t;
+        const t3=t2*t;
+        const edge=1-t;
+        const r=Math.floor(15+140*t+80*t2+60*t3);
+        const g=Math.floor(5+20*t+80*t2+100*t3);
+        const b=Math.floor(5+10*t+30*t2+40*t3);
+        const glow=Math.pow(edge,0.5)*0.3;
+        data[idx]=Math.min(255,r+Math.floor(glow*40));
+        data[idx+1]=Math.min(255,g+Math.floor(glow*15));
+        data[idx+2]=Math.min(255,b+Math.floor(glow*5));
+        data[idx+3]=255;
+      }else{
+        const bg=0.02*field;
+        data[idx]=Math.floor(8+bg*30);
+        data[idx+1]=Math.floor(3+bg*10);
+        data[idx+2]=Math.floor(5+bg*15);
+        data[idx+3]=255;
+      }
+    }
+  }
+  ictx.putImageData(imgData,0,0);
+}
 
-        function init() {
-            resize();
-            blobs = [];
-            for (let i = 0; i < config.blobCount; i++) {
-                blobs.push(new Blob());
-            }
-        }
+function drawLampGlass(){
+  const grad=ctx.createLinearGradient(0,0,W,H);
+  grad.addColorStop(0,'rgba(15,5,20,0.15)');
+  grad.addColorStop(0.5,'rgba(0,0,0,0)');
+  grad.addColorStop(1,'rgba(15,5,20,0.15)');
+  ctx.fillStyle=grad;
+  ctx.fillRect(0,0,W,H);
+  const edgeGrad=ctx.createRadialGradient(W/2,H/2,Math.min(W,H)*0.3,W/2,H/2,Math.min(W,H)*0.7);
+  edgeGrad.addColorStop(0,'rgba(0,0,0,0)');
+  edgeGrad.addColorStop(1,'rgba(0,0,0,0.4)');
+  ctx.fillStyle=edgeGrad;
+  ctx.fillRect(0,0,W,H);
+}
 
-        function resize() {
-            width = window.innerWidth;
-            height = window.innerHeight;
-            canvas.width = width;
-            canvas.height = height;
-            
-            // Offscreen buffer scaled down for performance
-            offCanvas.width = Math.ceil(width / config.fieldResolution);
-            offCanvas.height = Math.ceil(height / config.fieldResolution);
-        }
+let lastTime=performance.now();
 
-        function drawField() {
-            // Clear offscreen
-            offCtx.clearRect(0, 0, offCanvas.width, offCanvas.height);
-            offCtx.globalCompositeOperation = 'lighter'; // Additive blending
-            offCtx.fillStyle = 'white';
+function frame(now){
+  const dt=Math.min(0.05,(now-lastTime)/1000);
+  lastTime=now;
+  for(const b of blobs) b.update(dt);
+  renderField();
+  ctx.imageSmoothingEnabled=true;
+  ctx.imageSmoothingQuality='high';
+  ctx.drawImage(offscreen,0,0,W,H);
+  drawLampGlass();
+  const highlightGrad=ctx.createLinearGradient(W*0.3,0,W*0.5,0);
+  highlightGrad.addColorStop(0,'rgba(255,200,150,0)');
+  highlightGrad.addColorStop(0.5,'rgba(255,200,150,0.03)');
+  highlightGrad.addColorStop(1,'rgba(255,200,150,0)');
+  ctx.fillStyle=highlightGrad;
+  ctx.fillRect(0,0,W,H);
+  requestAnimationFrame(frame);
+}
 
-            // Draw blobs onto the low-res buffer
-            // We draw them larger because the canvas is smaller
-            blobs.forEach(blob => {
-                const r = blob.radius / config.fieldResolution;
-                const x = blob.x / config.fieldResolution;
-                const y = blob.y / config.fieldResolution;
-
-                // Create gradient for the blob field (Inverse Square Law approximation)
-                // Radial gradient creates a smooth falloff for the metaball math
-                const grad = offCtx.createRadialGradient(x, y, 0, x, y, r);
-                grad.addColorStop(0, 'rgba(255, 255, 255, 1)');
-                grad.addColorStop(0.5, 'rgba(255, 255, 255, 0.5)');
-                grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
-                
-                offCtx.fillStyle = grad;
-                offCtx.beginPath();
-                offCtx.arc(x, y, r, 0, Math.PI * 2);
-                offCtx.fill();
-            });
-
-            // Thresholding:
-            // We use globalCompositeOperation 'source-in' to keep only pixels 
-            // that exist in the field and have sufficient alpha (density).
-            // However, standard canvas doesn't support mathematical thresholding directly on alpha.
-            // Trick: Draw the field, then use a solid rect with 'source-in' to clip, 
-            // but we need to discard weak pixels.
-            
-            // Better Trick for Canvas:
-            // 1. Fill screen with semi-transparent white (The Threshold value).
-            // 2. Draw the blobs (Additive).
-            // 3. Use a composite operation to keep only what is "brighter" than background?
-            // Actually, simpler: Draw blobs. Then use getImageData to threshold alpha, 
-            // but that's slow.
-            
-            // Fastest Canvas Trick:
-            // Draw blobs (Additive).
-            // Create a "Threshold" layer.
-            // Use 'destination-in' with a mask? No.
-            
-            // Let's use the standard "Threshold via GlobalCompositeOperation" hack:
-            // 1. Fill background with 'white' (represents the threshold value 1.0).
-            // 2. Draw blobs with 'lighter' (additive).
-            // 3. Now pixels > 1.0 are saturated (255,255,255). Pixels < 1.0 are dimmer.
-            // 4. This doesn't strictly threshold.
-            
-            // Reliable Threshold:
-            // We will draw the blobs. Then we will draw a solid color over the whole screen
-            // with composite operation 'source-atop' or similar? No.
-            
-            // Let's go with the pixel manipulation on the small buffer. 
-            // It's small enough (width/6) that it won't kill 60fps.
-            
-            const w = offCanvas.width;
-            const h = offCanvas.height;
-            const imgData = offCtx.getImageData(0, 0, w, h);
-            const data = imgData.data;
-            
-            // Threshold value (0-255). 
-            // Since we used alpha in gradient, we look at Alpha channel.
-            // If we used additive blending of white, we look at Red/Green/Blue.
-            // We used white gradients.
-            
-            const thresholdVal = 100; // Adjust for thickness
-
-            for (let i = 0; i < data.length; i += 4) {
-                // The field value is in the Alpha or RGB channels (since we drew white)
-                // Because of 'lighter', RGB values add up.
-                const val = data[i]; // Red channel
-                
-                if (val > thresholdVal) {
-                    // Inside the blob
-                    // Make it opaque white
-                    data[i] = 255;
-                    data[i+1] = 255;
-                    data[i+2] = 255;
-                    data[i+3] = 255;
-                } else {
-                    // Outside
-                    data[i+3] = 0;
-                }
-            }
-            offCtx.putImageData(imgData, 0, 0);
-        }
-
-        function render() {
-            // 1. Background Gradient (The Glass Lamp)
-            const bgGrad = ctx.createLinearGradient(0, 0, 0, height);
-            bgGrad.addColorStop(0, config.colors.bgTop);
-            bgGrad.addColorStop(1, config.colors.bgBot);
-            ctx.fillStyle = bgGrad;
-            ctx.fillRect(0, 0, width, height);
-
-            // 2. Calculate Field
-            drawField();
-
-            // 3. Draw the Lava
-            // We draw the offscreen buffer scaled up. 
-            // To get smooth edges, we use 'imageSmoothingEnabled'.
-            ctx.imageSmoothingEnabled = true;
-            ctx.imageSmoothingQuality = 'high'; // 'high' helps smooth the blocky low-res mask
-            
-            // To get the "Glow" and "Core" look, we draw the mask multiple times or use gradients.
-            // But we only have a binary mask in offCanvas now.
-            
-            // Let's create the coloring on the main canvas using the mask as a clipping path.
-            
-            // A. Draw the "Dark/Edge" color
-            ctx.save();
-            // Draw the mask
-            ctx.drawImage(offCanvas, 0, 0, width, height);
-            // Use the mask to clip
-            ctx.globalCompositeOperation = 'source-in';
-            ctx.fillStyle = config.colors.blobEdge;
-            ctx.fillRect(0, 0, width, height);
-            ctx.restore();
-
-            // B. Draw the "Core/Glow" color (Inner Glow)
-            // We want the center to be lighter. 
-            // We can draw the blobs again on the main canvas, but that defeats the merge purpose.
-            // Instead, we can draw the mask again, but scaled down slightly (inset), 
-            // and composite that over the dark layer.
-            
-            ctx.save();
-            // Draw the mask again to use as alpha source for the core
-            // But we want it smaller. 
-            // Draw the offscreen canvas scaled down slightly into the center
-            const scale = 0.85;
-            const w = width;
-            const h = height;
-            const sw = w * scale;
-            const sh = h * scale;
-            
-            // We need to draw the mask, then apply a gradient to it.
-            // This is tricky with just one mask.
-            
-            // Alternative: Draw the mask. Then draw the blobs individually on top with 'screen' or 'lighter'
-            // to add the core glow, while keeping the hard edge defined by the mask.
-            
-            // Reset composite
-            ctx.globalCompositeOperation = 'source-over';
-            
-            // Draw the main body (Dark Red)
-            // We already did this in step A, but let's refine.
-            // Step A left us with a sharp red shape.
-            
-            // Now add the hot core.
-            ctx.save();
-            ctx.drawImage(offCanvas, 0, 0, width, height);
-            ctx.globalCompositeOperation = 'source-in';
-            
-            // Create a radial gradient that matches the blob centers? No, too complex.
-            // Just a general bright center glow for the whole shape?
-            // Or simply draw the blobs again as soft glowing circles on top.
-            // Since the mask is 'source-in', anything drawn here stays inside the merged shape.
-            
-            // Draw a full screen gradient that is lighter in the "middle" of the screen?
-            // No, the blobs are distinct.
-            
-            // Best visual hack: Draw the blobs again as soft glowing circles.
-            // Because of 'source-in', they will be clipped to the merged shape.
-            blobs.forEach(blob => {
-                const grad = ctx.createRadialGradient(blob.x, blob.y, 0, blob.x, blob.y, blob.radius);
-                grad.addColorStop(0, config.colors.blobCore);
-                grad.addColorStop(0.4, config.colors.blobEdge);
-                grad.addColorStop(1, 'rgba(0,0,0,0)');
-                
-                ctx.fillStyle = grad;
-                ctx.beginPath();
-                ctx.arc(blob.x, blob.y, blob.radius, 0, Math.PI * 2);
-                ctx.fill();
-            });
-            ctx.restore();
-            
-            // C. Add a subtle rim light / glass reflection
-            ctx.save();
-            ctx.drawImage(offCanvas, 0, 0, width, height);
-            ctx.globalCompositeOperation = 'source-in';
-            
-            // Light source from top left
-            const rimGrad = ctx.createLinearGradient(0, 0, width, height);
-            rimGrad.addColorStop(0, 'rgba(255,255,255,0.3)');
-            rimGrad.addColorStop(0.5, 'rgba(0,0,0,0)');
-            rimGrad.addColorStop(1, 'rgba(0,0,0,0)');
-            
-            ctx.fillStyle = rimGrad;
-            ctx.fillRect(0, 0, width, height);
-            ctx.restore();
-        }
-
-        function loop() {
-            // Update physics
-            blobs.forEach(blob => blob.update());
-            
-            // Render
-            render();
-            
-            requestAnimationFrame(loop);
-        }
-
-        window.addEventListener('resize', resize);
-        init();
-        loop();
-
-    </script>
+requestAnimationFrame(frame);
+</script>
 </body>
 </html>

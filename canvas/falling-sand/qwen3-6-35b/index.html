@@ -1,385 +1,539 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Automated Falling Sand</title>
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            background-color: #1a1a1a;
-            overflow: hidden;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            font-family: monospace;
-        }
-        canvas {
-            /* The canvas is small logical size, scaled up via CSS for the chunky look */
-            image-rendering: pixelated; 
-            image-rendering: crisp-edges;
-            box-shadow: 0 0 20px rgba(0,0,0,0.5);
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Falling Sand</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a0f; }
+canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+</style>
 </head>
 <body>
-    <canvas id="simCanvas"></canvas>
-    <script>
-        // --- Configuration ---
-        const SCALE = 4; // Each particle is 4x4 pixels (Chunky look)
-        const WIDTH = 300; // Logical width
-        const HEIGHT = 200; // Logical height
-        const FPS = 60;
-        
-        // Element Types
-        const EMPTY = 0;
-        const SAND = 1;
-        const WATER = 2;
-        const STONE = 3;
-        const WOOD = 4;
-        const FIRE = 5;
-        const SMOKE = 6;
-        const STEAM = 7;
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
 
-        // Colors (R, G, B)
-        const COLORS = {
-            [EMPTY]: [20, 20, 25],
-            [SAND]: [230, 200, 100],
-            [WATER]: [50, 150, 255],
-            [STONE]: [100, 100, 110],
-            [WOOD]: [139, 69, 19],
-            [FIRE]: [255, 69, 0],
-            [SMOKE]: [80, 80, 80],
-            [STEAM]: [200, 200, 220]
-        };
+const CELL = 4;
+let W, H, cols, rows;
 
-        // --- Setup ---
-        const canvas = document.getElementById('simCanvas');
-        const ctx = canvas.getContext('2d');
-        
-        canvas.width = WIDTH;
-        canvas.height = HEIGHT;
-        canvas.style.width = `${WIDTH * SCALE}px`;
-        canvas.style.height = `${HEIGHT * SCALE}px`;
+function resize() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = W;
+  canvas.height = H;
+  cols = Math.floor(W / CELL);
+  rows = Math.floor(H / CELL);
+  grid = new Uint8Array(cols * rows);
+  gridLife = new Int16Array(cols * rows);
+  gridErode = new Uint8Array(cols * rows);
+  gridRegen = new Uint8Array(cols * rows);
+  imageData = ctx.createImageData(W, H);
+  pixels = imageData.data;
+}
 
-        // Data Grids
-        let grid = new Uint8Array(WIDTH * HEIGHT); // Stores Types
-        let lifeGrid = new Int16Array(WIDTH * HEIGHT); // Stores life/health (for fire, wood, stone erosion)
-        let colorVarGrid = new Uint8Array(WIDTH * HEIGHT); // Stores slight color variations
+const EMPTY = 0, SAND = 1, WATER = 2, FIRE = 3, WOOD = 4, STONE = 5, STEAM = 6, SMOKE = 7;
 
-        // --- Helper Functions ---
-        const idx = (x, y) => y * WIDTH + x;
-        const isEmpty = (x, y) => x >= 0 && x < WIDTH && y >= 0 && y < HEIGHT && grid[idx(x, y)] === EMPTY;
-        const getElem = (x, y) => {
-            if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return STONE; // Treat walls as stone
-            return grid[idx(x, y)];
-        };
-        const setElem = (x, y, type, life = 0, colorV = 0) => {
-            if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return;
-            grid[idx(x, y)] = type;
-            if (life) lifeGrid[idx(x, y)] = life;
-            if (colorV !== undefined) colorVarGrid[idx(x, y)] = colorV;
-        };
-        const swap = (x1, y1, x2, y2) => {
-            let tempType = grid[idx(x1, y1)];
-            let tempLife = lifeGrid[idx(x1, y1)];
-            let tempColor = colorVarGrid[idx(x1, y1)];
-            
-            grid[idx(x1, y1)] = grid[idx(x2, y2)];
-            lifeGrid[idx(x1, y1)] = lifeGrid[idx(x2, y2)];
-            colorVarGrid[idx(x1, y1)] = colorVarGrid[idx(x2, y2)];
-            
-            grid[idx(x2, y2)] = tempType;
-            lifeGrid[idx(x2, y2)] = tempLife;
-            colorVarGrid[idx(x2, y2)] = tempColor;
-        };
+let grid, gridLife, gridErode, gridRegen;
+let pixels, imageData;
+let tick = 0;
 
-        // --- Emitter Logic ---
-        let emitterX = 0;
-        let emitterDir = 1;
-        let emitTimer = 0;
-        
-        function runEmitter() {
-            // Move emitter
-            if (Math.random() < 0.05) emitterDir *= -1;
-            emitterX += emitterDir;
-            if (emitterX < 5 || emitterX > WIDTH - 5) emitterDir *= -1;
+function idx(x, y) { return y * cols + x; }
+function inBounds(x, y) { return x >= 0 && x < cols && y >= 0 && y < rows; }
+function get(x, y) { return inBounds(x, y) ? grid[idx(x, y)] : -1; }
+function set(x, y, type) {
+  if (!inBounds(x, y)) return;
+  const i = idx(x, y);
+  grid[i] = type;
+  gridLife[i] = type === FIRE ? (30 + Math.random() * 60 | 0) :
+                type === STEAM ? (60 + Math.random() * 80 | 0) :
+                type === SMOKE ? (40 + Math.random() * 50 | 0) : 0;
+}
+function swap(x1, y1, x2, y2) {
+  const i1 = idx(x1, y1), i2 = idx(x2, y2);
+  const t = grid[i1]; grid[i1] = grid[i2]; grid[i2] = t;
+  const tl = gridLife[i1]; gridLife[i1] = gridLife[i2]; gridLife[i2] = tl;
+  const te = gridErode[i1]; gridErode[i1] = gridErode[i2]; gridErode[i2] = te;
+  const rg = gridRegen[i1]; gridRegen[i1] = gridRegen[i2]; gridRegen[i2] = rg;
+}
 
-            emitTimer++;
-            if (emitTimer > 2) { // Emit rate
-                emitTimer = 0;
-                
-                // Decide what to drop
-                const r = Math.random();
-                let type = SAND;
-                let life = 0;
+// Ledge generation
+let ledges = [];
 
-                if (r > 0.75) type = WATER;
-                else if (r > 0.95) type = FIRE;
-                
-                // Apply to top row
-                setElem(emitterX, 0, type, life, Math.random() * 20);
-            }
+function generateLedges() {
+  ledges = [];
+  const numLedges = 3 + (Math.random() * 3 | 0);
+  for (let l = 0; l < numLedges; l++) {
+    const yBase = Math.floor(rows * 0.35) + (l * rows * 0.15 | 0);
+    const segments = [];
+    let x = 0;
+    while (x < cols) {
+      const segW = 10 + (Math.random() * 30 | 0);
+      const overhang = Math.random() < 0.3 ? (Math.random() * 15 | 0) : 0;
+      const y = yBase + (Math.random() * 10 | 0) - 5 + overhang;
+      segments.push({ xStart: x, xEnd: Math.min(x + segW, cols), y: Math.min(y, rows - 5) });
+      x += segW + (Math.random() * 20 | 0);
+    }
+    ledges.push(segments);
+  }
+  buildLedges();
+}
+
+function buildLedges() {
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      if (grid[idx(x, y)] === STONE) gridErode[idx(x, y)] = 0;
+    }
+  }
+  for (const ledge of ledges) {
+    for (const seg of ledge) {
+      for (let x = seg.xStart; x < seg.xEnd && x < cols; x++) {
+        for (let dy = 0; dy < 3; dy++) {
+          const y = seg.y + dy;
+          if (inBounds(x, y) && get(x, y) === EMPTY) {
+            set(x, y, STONE);
+          }
         }
-
-        // --- Simulation Logic ---
-
-        function updateSand(x, y) {
-            const below = getElem(x, y + 1);
-            
-            // Fall down
-            if (below === EMPTY) {
-                swap(x, y, x, y + 1);
-            } 
-            // Slide down slopes
-            else {
-                const dir = Math.random() < 0.5 ? -1 : 1;
-                const bl = getElem(x + dir, y + 1);
-                const br = getElem(x - dir, y + 1);
-                
-                if (bl === EMPTY) {
-                    swap(x, y, x + dir, y + 1);
-                } else if (br === EMPTY) {
-                    swap(x, y, x - dir, y + 1);
-                }
-                // Sink in water
-                else if (bl === WATER) {
-                    swap(x, y, x + dir, y + 1);
-                } else if (br === WATER) {
-                    swap(x, y, x - dir, y + 1);
-                }
+      }
+    }
+  }
+  // Add some wood platforms
+  for (const ledge of ledges) {
+    for (const seg of ledge) {
+      if (Math.random() < 0.4) {
+        const wx = seg.xStart + (Math.random() * (seg.xEnd - seg.xStart) | 0);
+        const wy = seg.y - 1;
+        if (inBounds(wx, wy) && get(wx, wy) === EMPTY) {
+          for (let dx = -2; dx <= 2; dx++) {
+            if (inBounds(wx + dx, wy) && get(wx + dx, wy) === EMPTY) {
+              set(wx + dx, wy, WOOD);
             }
+          }
         }
+      }
+    }
+  }
+}
 
-        function updateWater(x, y) {
-            const below = getElem(x, y + 1);
-
-            if (below === EMPTY) {
-                swap(x, y, x, y + 1);
-            } else {
-                // Spread sideways
-                const dir = Math.random() < 0.5 ? -1 : 1;
-                const side = getElem(x + dir, y);
-                
-                if (side === EMPTY) {
-                    swap(x, y, x + dir, y);
-                } else if (getElem(x - dir, y) === EMPTY) {
-                    swap(x, y, x - dir, y);
-                }
-            }
+function erodeLedges() {
+  if (tick % 3 !== 0) return;
+  for (let y = 0; y < rows - 1; y++) {
+    for (let x = 0; x < cols; x++) {
+      const i = idx(x, y);
+      if (grid[i] === STONE && gridErode[i] < 128) {
+        // Check if water is below or adjacent
+        const below = get(x, y + 1);
+        const left = get(x - 1, y);
+        const right = get(x + 1, y);
+        if (below === WATER || left === WATER || right === WATER) {
+          gridErode[i]++;
+          if (gridErode[i] >= 128 && Math.random() < 0.02) {
+            set(x, y, WATER);
+            gridErode[i] = 0;
+          }
         }
+      }
+    }
+  }
+}
 
-        function updateFire(x, y) {
-            // Decay
-            lifeGrid[idx(x, y)]--;
-            if (lifeGrid[idx(x, y)] <= 0) {
-                // Chance to turn to smoke
-                if (Math.random() < 0.3) {
-                    setElem(x, y, SMOKE, 60, 0);
-                } else {
-                    setElem(x, y, EMPTY, 0);
-                }
-                return;
-            }
-
-            // Float up slightly
-            if (Math.random() < 0.2 && getElem(x, y-1) === EMPTY) {
-                swap(x, y, x, y-1);
-                return;
-            }
-
-            // Burn neighbors (Wood)
-            const neighbors = [[0,1], [1,0], [-1,0], [0,-1]];
-            for (let [dx, dy] of neighbors) {
-                const nx = x + dx;
-                const ny = y + dy;
-                const target = getElem(nx, ny);
-
-                if (target === WOOD) {
-                    // Chance to burn
-                    if (Math.random() < 0.1) {
-                        setElem(nx, ny, FIRE, 50 + Math.floor(Math.random()*50), Math.random()*20);
-                    }
-                } else if (target === WATER) {
-                    // Water extinguishes fire
-                    setElem(x, y, STEAM, 60, 0);
-                    setElem(nx, ny, EMPTY, 0); // Water evaporates
-                    return;
-                }
-            }
+function regenerateLedges() {
+  if (tick % 120 !== 0) return;
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const i = idx(x, y);
+      if (grid[i] === EMPTY && gridRegen[i] < 64) {
+        gridRegen[i]++;
+        if (gridRegen[i] >= 64 && Math.random() < 0.005) {
+          set(x, y, STONE);
+          gridRegen[i] = 0;
         }
+      }
+    }
+  }
+}
 
-        function updateSmoke(x, y) {
-            lifeGrid[idx(x, y)]--;
-            if (lifeGrid[idx(x, y)] <= 0) {
-                setElem(x, y, EMPTY, 0);
-                return;
-            }
+// Emitter
+let emitterX = cols / 2;
+let emitterDir = 1;
+let emitterType = SAND;
+let emitterTimer = 0;
+let emitterPhase = 0;
 
-            // Move up and drift
-            if (Math.random() < 0.4) {
-                const dir = Math.random() < 0.5 ? -1 : 1;
-                // Prefer moving up
-                if (getElem(x, y - 1) === EMPTY) {
-                    swap(x, y, x, y - 1);
-                } else if (getElem(x + dir, y - 1) === EMPTY) {
-                    swap(x, y, x + dir, y - 1);
-                } else if (getElem(x + dir, y) === EMPTY) {
-                    swap(x, y, x + dir, y);
-                }
-            }
+function updateEmitter() {
+  emitterX += emitterDir * 1.5;
+  if (emitterX > cols - 10) emitterDir = -1;
+  if (emitterX < 10) emitterDir = 1;
+
+  emitterTimer++;
+  if (emitterTimer > 8) {
+    emitterTimer = 0;
+    emitterPhase++;
+
+    if (emitterPhase % 20 < 8) {
+      emitterType = SAND;
+    } else if (emitterPhase % 20 < 14) {
+      emitterType = WATER;
+    } else {
+      emitterType = FIRE;
+    }
+
+    const ex = Math.floor(emitterX);
+    for (let dy = 0; dy < 3; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (get(ex + dx, dy) === EMPTY) {
+          if (emitterType === SAND && Math.random() < 0.6) set(ex + dx, dy, SAND);
+          else if (emitterType === WATER && Math.random() < 0.4) set(ex + dx, dy, WATER);
+          else if (emitterType === FIRE && Math.random() < 0.3) set(ex + dx, dy, FIRE);
         }
+      }
+    }
+  }
+}
 
-        function updateSteam(x, y) {
-            lifeGrid[idx(x, y)]--;
-            if (lifeGrid[idx(x, y)] <= 0) {
-                setElem(x, y, WATER, 0, 0); // Condenses back to water
-                return;
-            }
-            // Rise quickly
-            if (Math.random() < 0.6 && getElem(x, y-1) === EMPTY) {
-                swap(x, y, x, y-1);
-            }
+// Physics
+function updateSand(x, y) {
+  const below = get(x, y + 1);
+  if (below === EMPTY) {
+    swap(x, y, x, y + 1);
+    return true;
+  }
+  if (below === WATER) {
+    swap(x, y, x, y + 1);
+    return true;
+  }
+
+  const dir = Math.random() < 0.5 ? -1 : 1;
+  const diag1 = get(x + dir, y + 1);
+  if (diag1 === EMPTY) {
+    swap(x, y, x + dir, y + 1);
+    return true;
+  }
+  const diag2 = get(x - dir, y + 1);
+  if (diag2 === EMPTY) {
+    swap(x, y, x - dir, y + 1);
+    return true;
+  }
+
+  // Angle of repose: slide along existing pile
+  const side1 = get(x + dir, y);
+  if (side1 === EMPTY && get(x + dir, y + 1) !== EMPTY) {
+    swap(x, y, x + dir, y);
+    return true;
+  }
+  const side2 = get(x - dir, y);
+  if (side2 === EMPTY && get(x - dir, y + 1) !== EMPTY) {
+    swap(x, y, x - dir, y);
+    return true;
+  }
+  return false;
+}
+
+function updateWater(x, y) {
+  const below = get(x, y + 1);
+  if (below === EMPTY) {
+    swap(x, y, x, y + 1);
+    return true;
+  }
+  if (below === FIRE) {
+    set(x, y + 1, STEAM);
+    set(x, y, STEAM);
+    return true;
+  }
+
+  const dir = Math.random() < 0.5 ? -1 : 1;
+  const diag1 = get(x + dir, y + 1);
+  if (diag1 === EMPTY) {
+    swap(x, y, x + dir, y + 1);
+    return true;
+  }
+  const diag2 = get(x - dir, y + 1);
+  if (diag2 === EMPTY) {
+    swap(x, y, x - dir, y + 1);
+    return true;
+  }
+
+  // Flow horizontally
+  const spread = 2 + (Math.random() * 3 | 0);
+  for (let s = 1; s <= spread; s++) {
+    if (get(x + dir * s, y) === EMPTY) {
+      swap(x, y, x + dir * s, y);
+      return true;
+    }
+  }
+  for (let s = 1; s <= spread; s++) {
+    if (get(x - dir * s, y) === EMPTY) {
+      swap(x, y, x - dir * s, y);
+      return true;
+    }
+  }
+  return false;
+}
+
+function updateFire(x, y) {
+  const i = idx(x, y);
+  gridLife[i]--;
+  if (gridLife[i] <= 0) {
+    if (Math.random() < 0.3) set(x, y, SMOKE);
+    else set(x, y, EMPTY);
+    return true;
+  }
+
+  // Spread to wood
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      if (dx === 0 && dy === 0) continue;
+      const nx = x + dx, ny = y + dy;
+      if (get(nx, ny) === WOOD && Math.random() < 0.08) {
+        set(nx, ny, FIRE);
+      }
+      if (get(nx, ny) === WATER) {
+        set(x, y, STEAM);
+        set(nx, ny, STEAM);
+        return true;
+      }
+    }
+  }
+
+  // Rise
+  const above = get(x, y - 1);
+  if (above === EMPTY && Math.random() < 0.7) {
+    swap(x, y, x, y - 1);
+    return true;
+  }
+  const ul = get(x - 1, y - 1);
+  if (ul === EMPTY && Math.random() < 0.3) {
+    swap(x, y, x - 1, y - 1);
+    return true;
+  }
+  const ur = get(x + 1, y - 1);
+  if (ur === EMPTY && Math.random() < 0.3) {
+    swap(x, y, x + 1, y - 1);
+    return true;
+  }
+  return false;
+}
+
+function updateSteamSmoke(x, y, type) {
+  const i = idx(x, y);
+  gridLife[i]--;
+  if (gridLife[i] <= 0) {
+    set(x, y, EMPTY);
+    return true;
+  }
+
+  const above = get(x, y - 1);
+  if (above === EMPTY && Math.random() < 0.6) {
+    swap(x, y, x, y - 1);
+    return true;
+  }
+  const ul = get(x - 1, y - 1);
+  if (ul === EMPTY && Math.random() < 0.3) {
+    swap(x, y, x - 1, y - 1);
+    return true;
+  }
+  const ur = get(x + 1, y - 1);
+  if (ur === EMPTY && Math.random() < 0.3) {
+    swap(x, y, x + 1, y - 1);
+    return true;
+  }
+  return false;
+}
+
+function updatePhysics() {
+  // Process bottom to top for falling, top to bottom for rising
+  const bottomUp = [];
+  const topDown = [];
+
+  for (let y = rows - 1; y >= 0; y--) {
+    for (let x = 0; x < cols; x++) {
+      const t = grid[idx(x, y)];
+      if (t === SAND || t === WATER) bottomUp.push([x, y, t]);
+      else if (t === FIRE || t === STEAM || t === SMOKE) topDown.push([x, y, t]);
+    }
+  }
+
+  for (const [x, y, t] of bottomUp) {
+    if (!inBounds(x, y)) continue;
+    const i = idx(x, y);
+    if (grid[i] !== t) continue;
+    if (t === SAND) updateSand(x, y);
+    else if (t === WATER) updateWater(x, y);
+  }
+
+  for (const [x, y, t] of topDown) {
+    if (!inBounds(x, y)) continue;
+    const i = idx(x, y);
+    if (grid[i] !== t) continue;
+    if (t === FIRE) updateFire(x, y);
+    else if (t === STEAM || t === SMOKE) updateSteamSmoke(x, y, t);
+  }
+}
+
+// Colors
+function getColor(type, x, y) {
+  const noise = ((x * 31 + y * 17 + tick * 3) & 0xFF) / 255;
+  const noise2 = ((x * 7 + y * 23 + tick * 7) & 0xFF) / 255;
+
+  switch (type) {
+    case EMPTY: return [10, 10, 15];
+    case SAND: {
+      const v = 180 + noise * 40;
+      return [v, v * 0.82, v * 0.55];
+    }
+    case WATER: {
+      const v = 40 + noise * 20;
+      return [v * 0.4, v * 0.6 + noise * 15, v + 30];
+    }
+    case FIRE: {
+      const life = gridLife[idx(x, y)];
+      const maxLife = 90;
+      const ratio = Math.max(0, life / maxLife);
+      if (ratio > 0.7) return [255, 200 + noise * 55, 50 + noise * 40];
+      if (ratio > 0.4) return [255, 80 + noise * 60, 10 + noise * 20];
+      return [200 + noise * 55, 30 + noise * 30, 10];
+    }
+    case WOOD: {
+      const v = 100 + noise * 30;
+      return [v * 0.7, v * 0.45, v * 0.2];
+    }
+    case STONE: {
+      const v = 80 + noise * 30;
+      return [v, v + 2, v + 5];
+    }
+    case STEAM: {
+      const life = gridLife[idx(x, y)];
+      const maxLife = 140;
+      const ratio = Math.max(0, life / maxLife);
+      const v = 150 + noise * 40;
+      return [v * ratio, v * ratio, v * ratio];
+    }
+    case SMOKE: {
+      const life = gridLife[idx(x, y)];
+      const maxLife = 90;
+      const ratio = Math.max(0, life / maxLife);
+      const v = 60 + noise * 30;
+      return [v * ratio, v * ratio, v * ratio];
+    }
+    default: return [0, 0, 0];
+  }
+}
+
+function render() {
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const type = grid[idx(x, y)];
+      const [r, g, b] = getColor(type, x, y);
+
+      for (let py = 0; py < CELL; py++) {
+        for (let px = 0; px < CELL; px++) {
+          const sx = x * CELL + px;
+          const sy = y * CELL + py;
+          if (sx < W && sy < H) {
+            const pi = (sy * W + sx) * 4;
+            pixels[pi] = r;
+            pixels[pi + 1] = g;
+            pixels[pi + 2] = b;
+            pixels[pi + 3] = 255;
+          }
         }
+      }
+    }
+  }
+  ctx.putImageData(imageData, 0, 0);
+}
 
-        function updateStone(x, y) {
-            // Erosion Logic: Stone turns to Sand over time
-            // Check if top is eroded (empty) or water is hitting it?
-            // Simplified: Random erosion if exposed to air
-            if (getElem(x, y-1) === EMPTY) {
-                if (Math.random() < 0.0005) { // Very slow erosion
-                    // Turn into sand
-                    setElem(x, y, SAND, 0, Math.random()*20);
-                    lifeGrid[idx(x,y)] = 0; // Sand doesn't have life logic
-                }
-            }
+// Background gradient
+function drawBackground() {
+  for (let y = 0; y < rows; y++) {
+    const t = y / rows;
+    const r = Math.floor(8 + t * 5);
+    const g = Math.floor(8 + t * 3);
+    const b = Math.floor(15 + t * 10);
+    for (let py = 0; py < CELL; py++) {
+      for (let px = 0; px < CELL; px++) {
+        const sx = px;
+        const sy = y * CELL + py;
+        if (sy < H) {
+          for (let x = 0; x < cols; x++) {
+            const pi = (sy * W + x * CELL + px) * 4;
+            pixels[pi] = r;
+            pixels[pi + 1] = g;
+            pixels[pi + 2] = b;
+            pixels[pi + 3] = 255;
+          }
         }
+      }
+    }
+  }
+}
 
-        // --- Main Loop ---
+// Initialize
+function init() {
+  resize();
+  generateLedges();
+  drawBackground();
+}
 
-        function update() {
-            runEmitter();
+function loop() {
+  tick++;
+  updateEmitter();
+  updatePhysics();
+  erodeLedges();
+  regenerateLedges();
 
-            // Iterate Bottom-Up for falling things, but we do a simple pass.
-            // To prevent multi-movement in one frame, we can alternate scan direction or use a 'moved' flag.
-            // For this chunky style, a randomized scan direction is often sufficient.
-            
-            // We will scan Left->Right and Right->Left alternatingly or just random order
-            // to prevent bias.
-            
-            // Let's do standard Bottom-Up to handle stacking correctly
-            for (let y = HEIGHT - 1; y >= 0; y--) {
-                // Randomize X direction slightly or just full sweep
-                for (let x = 0; x < WIDTH; x++) {
-                    const i = idx(x, y);
-                    const type = grid[i];
-                    
-                    switch(type) {
-                        case SAND: updateSand(x, y); break;
-                        case WATER: updateWater(x, y); break;
-                        case FIRE: updateFire(x, y); break;
-                        case SMOKE: updateSmoke(x, y); break;
-                        case STEAM: updateSteam(x, y); break;
-                        case STONE: updateStone(x, y); break;
-                        // WOOD is static, only interacts when fire is on neighbor
-                    }
-                }
-            }
-        }
+  // Occasionally rebuild ledges for variety
+  if (tick % 600 === 0) {
+    const newLedges = [];
+    const numLedges = 3 + (Math.random() * 3 | 0);
+    for (let l = 0; l < numLedges; l++) {
+      const yBase = Math.floor(rows * 0.35) + (l * rows * 0.15 | 0);
+      const segments = [];
+      let x = 0;
+      while (x < cols) {
+        const segW = 10 + (Math.random() * 30 | 0);
+        const y = yBase + (Math.random() * 10 | 0) - 5;
+        segments.push({ xStart: x, xEnd: Math.min(x + segW, cols), y: Math.min(y, rows - 5) });
+        x += segW + (Math.random() * 20 | 0);
+      }
+      newLedges.push(segments);
+    }
+    ledges = newLedges;
+    buildLedges();
+  }
 
-        function draw() {
-            // Clear with background color
-            ctx.fillStyle = `rgb(${COLORS[EMPTY].join(',')})`;
-            ctx.fillRect(0, 0, WIDTH, HEIGHT);
+  render();
+  requestAnimationFrame(loop);
+}
 
-            // Draw particles
-            // We use ImageData for performance
-            const imgData = ctx.getImageData(0, 0, WIDTH, HEIGHT);
-            const data = imgData.data;
+window.addEventListener('resize', () => {
+  const oldGrid = grid;
+  const oldCols = cols;
+  const oldRows = rows;
+  resize();
+  grid = new Uint8Array(cols * rows);
+  gridLife = new Int16Array(cols * rows);
+  gridErode = new Uint8Array(cols * rows);
+  gridRegen = new Uint8Array(cols * rows);
+  imageData = ctx.createImageData(W, H);
+  pixels = imageData.data;
 
-            for (let i = 0; i < WIDTH * HEIGHT; i++) {
-                const type = grid[i];
-                if (type === EMPTY) continue;
+  // Copy old data
+  const minCols = Math.min(oldCols, cols);
+  const minRows = Math.min(oldRows, rows);
+  for (let y = 0; y < minRows; y++) {
+    for (let x = 0; x < minCols; x++) {
+      grid[y * cols + x] = oldGrid[y * oldCols + x];
+      gridLife[y * cols + x] = oldGrid[y * oldCols + x] ? (gridLife[y * oldCols + x] || 0) : 0;
+    }
+  }
+  drawBackground();
+});
 
-                // Get base color
-                const [r, g, b] = COLORS[type];
-                
-                // Add variation
-                const v = colorVarGrid[i];
-                let rVar = 0, gVar = 0, bVar = 0;
-                
-                if (type === FIRE) {
-                    // Flicker
-                    const flicker = Math.random() * 50;
-                    rVar = flicker;
-                    gVar = -flicker / 2;
-                } else if (type === SAND) {
-                    rVar = v - 10;
-                    gVar = v - 10;
-                    bVar = v - 10;
-                } else if (type === WATER) {
-                    rVar = -v;
-                    gVar = -v;
-                    bVar = v;
-                } else {
-                    rVar = v - 10;
-                    gVar = v - 10;
-                    bVar = v - 10;
-                }
-
-                const pixelIndex = i * 4;
-                data[pixelIndex] = r + rVar;
-                data[pixelIndex + 1] = g + gVar;
-                data[pixelIndex + 2] = b + bVar;
-                data[pixelIndex + 3] = 255; // Alpha
-            }
-
-            ctx.putImageData(imgData, 0, 0);
-        }
-
-        // --- Initialization ---
-
-        function initWorld() {
-            // Generate some initial ledges
-            for (let y = 0; y < HEIGHT; y++) {
-                for (let x = 0; x < WIDTH; x++) {
-                    // Floor
-                    if (y > HEIGHT - 10) {
-                        setElem(x, y, STONE, 0, 0);
-                    } 
-                    // Walls
-                    else if (x === 0 || x === WIDTH - 1) {
-                        setElem(x, y, STONE, 0, 0);
-                    }
-                    // Random Ledges
-                    else {
-                        // Simple noise-like generation
-                        if (Math.random() < 0.2) {
-                            setElem(x, y, STONE, 0, 0);
-                        }
-                        // Random Wood platforms
-                        else if (Math.random() < 0.01) {
-                            // Create a small platform
-                            for(let w=0; w<5; w++) {
-                                if(x+w < WIDTH-1) setElem(x+w, y, WOOD, 100, Math.random()*10);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        function loop() {
-            update();
-            draw();
-            requestAnimationFrame(loop);
-        }
-
-        initWorld();
-        loop();
-
-    </script>
+init();
+loop();
+</script>
 </body>
 </html>

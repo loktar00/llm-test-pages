@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Dripping Paint</title>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body { width: 100%; height: 100%; overflow: hidden; background: #f0f0f0; }
-  canvas { display: block; width: 100%; height: 100%; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; width: 100%; height: 100%; }
 </style>
 </head>
 <body>
@@ -16,339 +16,370 @@
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 
-// Offscreen buffer for the persistent paint layer
-const offCanvas = document.createElement('canvas');
-const offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
+let W, H, cols, rows;
+const CELL = 3;
+const THRESHOLD = 0.65;
 
-let W, H;
-let drops = [];
-let fadeAlpha = 0;
-let fadeDir = 0; // 0 = none, 1 = fading in, -1 = fading out
+let grid, gridR, gridG, gridB, gridThick, gridWet;
+let drips = [];
+let spawnTimer = 0;
+let whiteOverlay = 0;
+let resetting = false;
+let resetTimer = 0;
 let frameCount = 0;
 
-// Paint color palette - saturated colors
 const PALETTE = [
-  { r: 255, g: 50, b: 50 },    // Red
-  { r: 50, g: 200, b: 255 },   // Blue
-  { r: 255, g: 220, b: 30 },   // Yellow
-  { r: 50, g: 255, b: 100 },   // Green
-  { r: 255, g: 80, b: 220 },   // Magenta
-  { r: 255, g: 160, b: 30 },   // Orange
-  { r: 100, g: 50, b: 255 },   // Purple
-  { r: 30, g: 255, b: 255 },   // Cyan
+  [255, 30, 60],
+  [255, 140, 0],
+  [255, 220, 30],
+  [30, 200, 80],
+  [30, 120, 255],
+  [180, 40, 255],
+  [255, 60, 180],
+  [0, 200, 200],
+  [255, 80, 30],
+  [60, 255, 120],
+  [255, 50, 120],
+  [80, 180, 255],
+  [255, 200, 100],
+  [200, 50, 255],
+  [50, 255, 200],
 ];
 
-function resize() {
-  W = canvas.width = offCanvas.width = window.innerWidth;
-  H = canvas.height = offCanvas.height = window.innerHeight;
-  // Reset offscreen when resizing
-  offCtx.fillStyle = '#f0f0f0';
-  offCtx.fillRect(0, 0, W, H);
-  drops = [];
-  fadeAlpha = 0;
-  fadeDir = 0;
+function init() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  cols = Math.ceil(W / CELL);
+  rows = Math.ceil(H / CELL);
+
+  gridR = new Float32Array(cols * rows);
+  gridG = new Float32Array(cols * rows);
+  gridB = new Float32Array(cols * rows);
+  gridThick = new Float32Array(cols * rows);
+  gridWet = new Float32Array(cols * rows);
+
+  drips = [];
+  spawnTimer = 0;
+  whiteOverlay = 0;
+  resetting = false;
+  resetTimer = 0;
+  frameCount = 0;
 }
 
-window.addEventListener('resize', resize);
-resize();
+function idx(x, y) {
+  return y * cols + x;
+}
 
-// Drop class
-class Drop {
-  constructor() {
-    this.x = Math.random() * W;
-    this.y = -20 - Math.random() * 40;
-    this.vx = (Math.random() - 0.5) * 0.5;
-    this.vy = 1 + Math.random() * 2;
-    this.radius = 4 + Math.random() * 8;
-    this.mass = this.radius * this.radius;
-    
-    const c = PALETTE[Math.floor(Math.random() * PALETTE.length)];
-    this.r = c.r;
-    this.g = c.g;
-    this.b = c.b;
-    this.a = 0.7 + Math.random() * 0.3; // opacity
-    
-    this.wetness = 1.0; // 1 = fully wet, 0 = dry
-    this.dryingRate = 0.0003 + Math.random() * 0.0005;
-    this.alive = true;
-    this.pooled = false;
-    this.branchTimer = 0;
-    this.hasBranched = false;
-    this.stretch = 1.0;
-  }
-  
-  update() {
-    if (!this.alive) return;
-    
-    // Get local paint thickness to affect speed
-    const thickness = getLocalThickness(this.x, this.y);
-    
-    // Gravity with thickness-dependent drag
-    const gravity = 0.15;
-    const drag = 0.98 - thickness * 0.005; // thicker = more drag
-    const wetDrag = 1.0 - (1.0 - this.wetness) * 0.3; // drier = more drag
-    
-    this.vy += gravity * wetDrag;
-    this.vy *= drag;
-    this.vx *= 0.99;
-    
-    // Add slight wobble
-    this.vx += (Math.random() - 0.5) * 0.1;
-    
-    // Stretch based on velocity
-    this.stretch = 1.0 + Math.abs(this.vy) * 0.15;
-    
-    // Move
-    this.x += this.vx;
-    this.y += this.vy;
-    
-    // Drying
-    this.wetness -= this.dryingRate;
-    if (this.wetness < 0) this.wetness = 0;
-    
-    // Branching logic - chance to split when wet and moving
-    if (!this.hasBranched && this.wetness > 0.4 && this.y > 50 && Math.random() < 0.002) {
-      this.branch();
-      this.hasBranched = true;
-    }
-    
-    // Pooling - slow down and flatten when near bottom or thick paint
-    const speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
-    if (speed < 0.3 || this.y > H - 20 || thickness > 0.4) {
-      this.pooled = true;
-      this.vy *= 0.95;
-      this.vx *= 0.95;
-      this.stretch = 1.0;
-      this.radius += 0.05; // spread out
-    }
-    
-    // Remove if off screen
-    if (this.y > H + 50 || this.x < -50 || this.x > W + 50) {
-      this.alive = false;
-    }
-    
-    // Remove if fully stopped and dry
-    if (this.pooled && this.wetness < 0.1 && speed < 0.05) {
-      this.alive = false;
-    }
-  }
-  
-  branch() {
-    const newDrop = new Drop();
-    newDrop.x = this.x + (Math.random() - 0.5) * 10;
-    newDrop.y = this.y;
-    newDrop.r = this.r;
-    newDrop.g = this.g;
-    newDrop.b = this.b;
-    newDrop.radius = this.radius * 0.6;
-    newDrop.mass = newDrop.radius * newDrop.radius;
-    newDrop.vy = this.vy * 0.7;
-    newDrop.vx = this.vx + (Math.random() - 0.5) * 2;
-    newDrop.wetness = this.wetness;
-    drops.push(newDrop);
-  }
-  
-  draw(context) {
-    if (!this.alive) return;
-    
-    const speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
-    
-    // Drying darkens the color
-    const dryFactor = 0.5 + this.wetness * 0.5; // 0.5 when dry, 1.0 when wet
-    const dr = Math.floor(this.r * dryFactor);
-    const dg = Math.floor(this.g * dryFactor);
-    const db = Math.floor(this.b * dryFactor);
-    
-    // Adjust opacity based on wetness
-    const alpha = this.a * (0.3 + this.wetness * 0.7);
-    
-    context.save();
-    context.translate(this.x, this.y);
-    
-    // Draw stretched drop
-    if (speed > 0.5) {
-      // Elongated drop shape
-      const angle = Math.atan2(this.vy, this.vx);
-      context.rotate(angle);
-      context.scale(1, this.stretch);
-    }
-    
-    // Main drop body
-    const grad = context.createRadialGradient(0, 0, 0, 0, 0, this.radius);
-    grad.addColorStop(0, `rgba(${dr}, ${dg}, ${db}, ${alpha})`);
-    grad.addColorStop(0.6, `rgba(${dr}, ${dg}, ${db}, ${alpha * 0.8})`);
-    grad.addColorStop(1, `rgba(${dr}, ${dg}, ${db}, 0)`);
-    
-    context.fillStyle = grad;
-    context.beginPath();
-    context.arc(0, 0, this.radius, 0, Math.PI * 2);
-    context.fill();
-    
-    // Highlight for wet drops
-    if (this.wetness > 0.5) {
-      const hlGrad = context.createRadialGradient(
-        -this.radius * 0.3, -this.radius * 0.3, 0,
-        -this.radius * 0.3, -this.radius * 0.3, this.radius * 0.5
-      );
-      hlGrad.addColorStop(0, `rgba(255, 255, 255, ${(this.wetness - 0.5) * 0.4})`);
-      hlGrad.addColorStop(1, `rgba(255, 255, 255, 0)`);
-      context.fillStyle = hlGrad;
-      context.beginPath();
-      context.arc(0, 0, this.radius, 0, Math.PI * 2);
-      context.fill();
-    }
-    
-    context.restore();
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
+function spawnDrip() {
+  const ci = Math.floor(Math.random() * PALETTE.length);
+  const c = PALETTE[ci];
+  const x = Math.random() * W;
+  const radius = 6 + Math.random() * 18;
+  const dripsToSpawn = 1 + Math.floor(Math.random() * 3);
+
+  for (let i = 0; i < dripsToSpawn; i++) {
+    const ox = (Math.random() - 0.5) * radius * 2;
+    drips.push({
+      x: x + ox,
+      y: -radius,
+      vx: (Math.random() - 0.5) * 0.3,
+      vy: 0.5 + Math.random() * 1.5,
+      r: c[0],
+      g: c[1],
+      b: c[2],
+      radius: radius * (0.5 + Math.random() * 0.5),
+      thickness: 0.3 + Math.random() * 0.7,
+      wetness: 1.0,
+      life: 1.0,
+      pooling: false,
+      poolTimer: 0,
+      branchChance: 0.001 + Math.random() * 0.003,
+    });
   }
 }
 
-// Get local paint thickness from offscreen buffer
-function getLocalThickness(x, y) {
-  const ix = Math.floor(x);
-  const iy = Math.floor(y);
-  if (ix < 0 || ix >= W || iy < 0 || iy >= H) return 0;
-  
-  const data = offCtx.getImageData(ix, iy, 1, 1).data;
-  // Use luminance as thickness indicator
-  return (data[0] + data[1] + data[2]) / (3 * 255);
-}
+function depositPaint(x, y, r, g, b, thickness, wetness) {
+  const gx = Math.floor(x / CELL);
+  const gy = Math.floor(y / CELL);
+  const spread = Math.max(1, Math.floor(drips[0]?.radius / CELL || 2));
 
-// Spawn drops
-function spawnDrops() {
-  const spawnRate = 3 + Math.floor(frameCount / 500); // Increase over time
-  for (let i = 0; i < spawnRate; i++) {
-    if (Math.random() < 0.3) {
-      drops.push(new Drop());
+  for (let dy = -spread; dy <= spread; dy++) {
+    for (let dx = -spread; dx <= spread; dx++) {
+      const nx = gx + dx;
+      const ny = gy + dy;
+      if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) continue;
+
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist > spread) continue;
+
+      const falloff = 1 - dist / (spread + 1);
+      const amount = thickness * falloff * 0.15;
+      const i = idx(nx, ny);
+
+      const oldThick = gridThick[i];
+      const newThick = oldThick + amount;
+      const blend = amount / newThick;
+
+      gridR[i] = gridR[i] * (1 - blend) + r * blend;
+      gridG[i] = gridG[i] * (1 - blend) + g * blend;
+      gridB[i] = gridB[i] * (1 - blend) + b * blend;
+      gridThick[i] = newThick;
+      gridWet[i] = Math.min(1, gridWet[i] + wetness * amount * 2);
     }
   }
 }
 
-// Check coverage threshold
-function checkCoverage() {
-  if (fadeDir !== 0) return;
-  
-  // Sample a grid of points to estimate coverage
-  const sampleRate = 8;
-  let covered = 0;
-  let total = 0;
-  
-  const imgData = offCtx.getImageData(0, 0, W, H);
-  const data = imgData.data;
-  
-  for (let y = 0; y < H; y += sampleRate) {
-    for (let x = 0; x < W; x += sampleRate) {
-      const i = (y * W + x) * 4;
-      const r = data[i], g = data[i+1], b = data[i+2];
-      // Check if pixel is not white/background
-      const brightness = (r + g + b) / 3;
-      if (brightness < 240) {
-        covered++;
+function updateDrips() {
+  for (let i = drips.length - 1; i >= 0; i--) {
+    const d = drips[i];
+
+    const gx = Math.floor(d.x / CELL);
+    const gy = Math.floor(d.y / CELL);
+
+    let localThick = 0;
+    let sampleCount = 0;
+    const sampleR = 2;
+
+    for (let sy = -sampleR; sy <= sampleR; sy++) {
+      for (let sx = -sampleR; sx <= sampleR; sx++) {
+        const nx = gx + sx;
+        const ny = gy + sy;
+        if (nx >= 0 && nx < cols && ny >= 0 && ny < rows) {
+          localThick += gridThick[idx(nx, ny)];
+          sampleCount++;
+        }
       }
-      total++;
     }
-  }
-  
-  const coverage = covered / total;
-  if (coverage > 0.6) {
-    fadeDir = 1; // Start fading to white
+    localThick = sampleCount > 0 ? localThick / sampleCount : 0;
+
+    const speedFactor = 1 / (1 + localThick * 0.8);
+    const gravity = 0.08;
+    const viscosity = 0.985;
+
+    d.vy = (d.vy + gravity * speedFactor) * viscosity;
+    d.vy = Math.min(d.vy, 4);
+
+    if (d.pooling) {
+      d.poolTimer++;
+      d.vy *= 0.96;
+      d.vx *= 0.96;
+      if (d.poolTimer > 120 || d.vy < 0.02) {
+        d.life -= 0.02;
+      }
+    }
+
+    if (!d.pooling && localThick > 1.5 && Math.random() < 0.02) {
+      d.pooling = true;
+    }
+
+    d.x += d.vx;
+    d.y += d.vy;
+
+    depositPaint(d.x, d.y, d.r, d.g, d.b, d.thickness * 0.1, d.wetness);
+
+    // Branching
+    if (!d.pooling && Math.random() < d.branchChance && d.y > 50) {
+      const bx = d.x + (Math.random() - 0.5) * 30;
+      const br = Math.floor(Math.random() * PALETTE.length);
+      const bc = PALETTE[br];
+      drips.push({
+        x: bx,
+        y: d.y,
+        vx: (Math.random() - 0.5) * 1.5,
+        vy: d.vy * (0.5 + Math.random() * 0.5),
+        r: bc[0],
+        g: bc[1],
+        b: bc[2],
+        radius: d.radius * (0.3 + Math.random() * 0.4),
+        thickness: d.thickness * 0.5,
+        wetness: d.wetness,
+        life: 1.0,
+        pooling: false,
+        poolTimer: 0,
+        branchChance: d.branchChance * 0.5,
+      });
+    }
+
+    // Dry over time
+    d.wetness *= 0.9995;
+
+    // Remove dead drips
+    if (d.life <= 0 || d.y > H + 50 || d.x < -50 || d.x > W + 50) {
+      drips.splice(i, 1);
+    }
   }
 }
 
-// Main render loop
+function updateDrying() {
+  for (let i = 0; i < gridThick.length; i++) {
+    if (gridWet[i] > 0) {
+      gridWet[i] *= 0.9997;
+      if (gridWet[i] < 0.01) gridWet[i] = 0;
+    }
+  }
+}
+
+function getCoverage() {
+  let count = 0;
+  const total = cols * rows;
+  const step = 4;
+  for (let i = 0; i < total; i += step) {
+    if (gridThick[i] > 0.05) count++;
+  }
+  return count / (total / step);
+}
+
 function render() {
-  frameCount++;
-  
-  // Handle fade transitions
-  if (fadeDir === 1) {
-    fadeAlpha += 0.003;
-    if (fadeAlpha >= 1) {
-      fadeAlpha = 1;
-      fadeDir = -1; // Start fading back
-      // Reset the paint canvas
-      offCtx.fillStyle = '#f0f0f0';
-      offCtx.fillRect(0, 0, W, H);
-      drops = [];
-    }
-  } else if (fadeDir === -1) {
-    fadeAlpha -= 0.005;
-    if (fadeAlpha <= 0) {
-      fadeAlpha = 0;
-      fadeDir = 0;
-    }
-  }
-  
-  // Update drops
-  spawnDrops();
-  
-  for (let i = drops.length - 1; i >= 0; i--) {
-    const drop = drops[i];
-    drop.update();
-    
-    // Paint drop onto offscreen canvas
-    if (drop.alive && drop.wetness > 0.1) {
-      const speed = Math.sqrt(drop.vx * drop.vx + drop.vy * drop.vy);
-      const dryFactor = 0.5 + drop.wetness * 0.5;
-      const dr = Math.floor(drop.r * dryFactor);
-      const dg = Math.floor(drop.g * dryFactor);
-      const db = Math.floor(drop.b * dryFactor);
-      const alpha = drop.a * (0.2 + drop.wetness * 0.8) * 0.15; // Lower alpha for accumulation
-      
-      offCtx.save();
-      offCtx.translate(drop.x, drop.y);
-      if (speed > 0.5) {
-        const angle = Math.atan2(drop.vy, drop.vx);
-        offCtx.rotate(angle);
-        offCtx.scale(1, drop.stretch);
+  const imgData = ctx.createImageData(W, H);
+  const data = imgData.data;
+
+  for (let py = 0; py < H; py++) {
+    for (let px = 0; px < W; px++) {
+      const gx = Math.floor(px / CELL);
+      const gy = Math.floor(py / CELL);
+      if (gx >= cols || gy >= rows) continue;
+
+      const i = idx(gx, gy);
+      const thick = gridThick[i];
+      const wet = gridWet[i];
+
+      if (thick < 0.01) {
+        // White canvas background
+        const pi = (py * W + px) * 4;
+        data[pi] = 255;
+        data[pi + 1] = 255;
+        data[pi + 2] = 255;
+        data[pi + 3] = 255;
+        continue;
       }
-      
-      const grad = offCtx.createRadialGradient(0, 0, 0, 0, 0, drop.radius);
-      grad.addColorStop(0, `rgba(${dr}, ${dg}, ${db}, ${alpha})`);
-      grad.addColorStop(0.7, `rgba(${dr}, ${dg}, ${db}, ${alpha * 0.6})`);
-      grad.addColorStop(1, `rgba(${dr}, ${dg}, ${db}, 0)`);
-      
-      offCtx.fillStyle = grad;
-      offCtx.beginPath();
-      offCtx.arc(0, 0, drop.radius, 0, Math.PI * 2);
-      offCtx.fill();
-      offCtx.restore();
-    }
-    
-    if (!drop.alive) {
-      drops.splice(i, 1);
+
+      let r = gridR[i];
+      let g = gridG[i];
+      let b = gridB[i];
+
+      // Drying darkens
+      const dryFactor = 1 - wet * 0.4;
+      r *= dryFactor;
+      g *= dryFactor;
+      b *= dryFactor;
+
+      // Glossy highlight on wet paint
+      if (wet > 0.3 && thick > 0.2) {
+        const gloss = wet * 0.15 * Math.min(thick, 2);
+        r += gloss * 255;
+        g += gloss * 255;
+        b += gloss * 255;
+      }
+
+      // Saturation boost for wet paint
+      const satBoost = 1 + wet * 0.2;
+      const gray = (r + g + b) / 3;
+      r = gray + (r - gray) * satBoost;
+      g = gray + (g - gray) * satBoost;
+      b = gray + (b - gray) * satBoost;
+
+      // Thickness affects opacity and intensity
+      const intensity = Math.min(1, thick * 0.5);
+      r = 255 + (r - 255) * intensity;
+      g = 255 + (g - 255) * intensity;
+      b = 255 + (b - 255) * intensity;
+
+      const pi = (py * W + px) * 4;
+      data[pi] = clamp(r, 0, 255);
+      data[pi + 1] = clamp(g, 0, 255);
+      data[pi + 2] = clamp(b, 0, 255);
+      data[pi + 3] = 255;
     }
   }
-  
-  // Draw to main canvas
-  ctx.clearRect(0, 0, W, H);
-  
-  // Draw background
-  ctx.fillStyle = '#f0f0f0';
-  ctx.fillRect(0, 0, W, H);
-  
-  // Draw accumulated paint
-  ctx.drawImage(offCanvas, 0, 0);
-  
-  // Draw active drops on top
-  for (const drop of drops) {
-    drop.draw(ctx);
+
+  ctx.putImageData(imgData, 0, 0);
+
+  // Draw wet drips on top for extra richness
+  for (const d of drips) {
+    if (d.wetness < 0.1) continue;
+    const grad = ctx.createRadialGradient(d.x, d.y, 0, d.x, d.y, d.radius);
+    const alpha = d.wetness * d.life * 0.6;
+    grad.addColorStop(0, `rgba(${d.r|0},${d.g|0},${d.b|0},${alpha})`);
+    grad.addColorStop(0.6, `rgba(${d.r|0},${d.g|0},${d.b|0},${alpha * 0.4})`);
+    grad.addColorStop(1, `rgba(${d.r|0},${d.g|0},${d.b|0},0)`);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(d.x, d.y, d.radius, 0, Math.PI * 2);
+    ctx.fill();
   }
-  
-  // Apply fade overlay
-  if (fadeAlpha > 0) {
-    ctx.fillStyle = `rgba(240, 240, 240, ${fadeAlpha})`;
+
+  // White overlay for reset
+  if (whiteOverlay > 0) {
+    ctx.fillStyle = `rgba(255,255,255,${whiteOverlay})`;
     ctx.fillRect(0, 0, W, H);
   }
-  
-  // Check coverage periodically
-  if (frameCount % 120 === 0) {
-    checkCoverage();
-  }
-  
-  requestAnimationFrame(render);
 }
 
-// Start
-render();
+function update() {
+  frameCount++;
+
+  if (resetting) {
+    resetTimer++;
+    whiteOverlay = Math.min(1, resetTimer / 120);
+    if (whiteOverlay >= 1) {
+      // Reset
+      gridR.fill(0);
+      gridG.fill(0);
+      gridB.fill(0);
+      gridThick.fill(0);
+      gridWet.fill(0);
+      drips = [];
+      whiteOverlay = 1;
+      resetTimer++;
+      if (resetTimer > 180) {
+        resetting = false;
+        resetTimer = 0;
+        whiteOverlay = 0;
+      }
+    }
+    return;
+  }
+
+  // Spawn drips
+  spawnTimer++;
+  const spawnRate = Math.max(3, 20 - drips.length * 0.3);
+  if (spawnTimer >= spawnRate) {
+    spawnTimer = 0;
+    spawnDrip();
+  }
+
+  // Also spawn fat drops periodically
+  if (frameCount % 90 === 0) {
+    spawnDrip();
+    spawnDrip();
+  }
+
+  updateDrips();
+  updateDrying();
+
+  // Check coverage
+  if (frameCount % 60 === 0) {
+    const coverage = getCoverage();
+    if (coverage > THRESHOLD) {
+      resetting = true;
+      resetTimer = 0;
+    }
+  }
+}
+
+function loop() {
+  update();
+  render();
+  requestAnimationFrame(loop);
+}
+
+window.addEventListener('resize', init);
+init();
+loop();
 </script>
 </body>
 </html>

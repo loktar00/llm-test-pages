@@ -1,376 +1,378 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Falling Sand Simulation</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background-color: #111;
-        }
-        canvas {
-            display: block;
-            image-rendering: pixelated; /* Essential for chunky aesthetic */
-            width: 100%;
-            height: 100%;
-        }
-        #ui {
-            position: absolute;
-            top: 10px;
-            left: 10px;
-            color: rgba(255, 255, 255, 0.5);
-            font-family: monospace;
-            pointer-events: none;
-            user-select: none;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Falling Sand</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a0f; }
+canvas { display: block; width: 100%; height: 100%; image-rendering: pixelated; image-rendering: crisp-edges; }
+</style>
 </head>
 <body>
-    <div id="ui">AUTOMATED EMITTER ACTIVE</div>
-    <canvas id="simCanvas"></canvas>
-
+<canvas id="c"></canvas>
 <script>
-/**
- * FALLING SAND SIMULATION
- * 
- * Grid-based Eulerian simulation.
- * 0: Empty
- * 1: Sand
- * 2: Water
- * 3: Fire
- * 4: Stone (Eroding)
- * 5: Wood (Burnable)
- */
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
 
-const canvas = document.getElementById('simCanvas');
-const ctx = canvas.getContext('2d', { alpha: false });
+const AIR = 0, SAND = 1, WATER = 2, FIRE = 3, STONE = 4, WOOD = 5, ASH = 6, SMOKE = 7;
 
-// Simulation Resolution (Coarse grid for performance and aesthetic)
-const WIDTH = 200;
-const HEIGHT = 150;
-const SCALE = 4; // Visual scale factor
+const COLS = 200, ROWS = 150;
+let grid, nextGrid, age, colorGrid;
+let scale;
 
-// Grid State
-let grid = new Uint8Array(WIDTH * HEIGHT);
-// Color variation buffer (to make sand/stone look textured)
-let colorVar = new Uint8Array(WIDTH * HEIGHT);
+function initGrid() {
+  grid = new Uint8Array(COLS * ROWS);
+  nextGrid = new Uint8Array(COLS * ROWS);
+  age = new Int16Array(COLS * ROWS);
+  colorGrid = new Uint32Array(COLS * ROWS);
+}
 
-// Emitter State
-let emitterX = 0;
-let emitterDir = 1;
-let emitterTimer = 0;
-let emitterType = 0; // 0: Sand, 1: Water, 2: Fire
+function idx(x, y) { return y * COLS + x; }
+function inBounds(x, y) { return x >= 0 && x < COLS && y >= 0 && y < ROWS; }
+function isEmpty(x, y) { return inBounds(x, y) && grid[idx(x, y)] === AIR; }
+function getType(x, y) { return inBounds(x, y) ? grid[idx(x, y)] : -1; }
 
-// Configuration
-const UPDATE_RATE = 1; // Run every frame
-const FIRE_LIFE = 50;
-const WOOD_REGEN_RATE = 0.002;
+function setCell(x, y, type, a, c) {
+  const i = idx(x, y);
+  grid[i] = type;
+  age[i] = a || 0;
+  colorGrid[i] = c || 0;
+}
 
-// Colors
-const COLORS = {
-    0: '#111111', // Empty
-    1: '#E6C229', // Sand
-    2: '#3498db', // Water
-    3: '#e74c3c', // Fire
-    4: '#555555', // Stone
-    5: '#8B4513'  // Wood
-};
+function swap(x1, y1, x2, y2) {
+  const i1 = idx(x1, y1), i2 = idx(x2, y2);
+  let t;
+  t = grid[i1]; grid[i1] = grid[i2]; grid[i2] = t;
+  t = age[i1]; age[i1] = age[i2]; age[i2] = t;
+  t = colorGrid[i1]; colorGrid[i1] = colorGrid[i2]; colorGrid[i2] = t;
+}
 
-function init() {
-    // Resize canvas to fit window while maintaining aspect ratio logic
-    resize();
-    window.addEventListener('resize', resize);
+function sandColor() {
+  const r = 180 + Math.random() * 40 | 0;
+  const g = 140 + Math.random() * 30 | 0;
+  const b = 60 + Math.random() * 20 | 0;
+  return (255 << 24) | (b << 16) | (g << 8) | r;
+}
 
-    // Initialize some static stone at the bottom
-    for (let y = HEIGHT - 20; y < HEIGHT; y++) {
-        for (let x = 0; x < WIDTH; x++) {
-            grid[y * WIDTH + x] = 4;
-            colorVar[y * WIDTH + x] = Math.random();
-        }
+function waterColor() {
+  const r = 20 + Math.random() * 30 | 0;
+  const g = 80 + Math.random() * 60 | 0;
+  const b = 180 + Math.random() * 50 | 0;
+  return (255 << 24) | (b << 16) | (g << 8) | r;
+}
+
+function fireColor(a) {
+  const maxA = 80;
+  const t = Math.min(a / maxA, 1);
+  const r = 255;
+  const g = (200 + t * 55) | 0;
+  const b = (t * 100) | 0;
+  return (255 << 24) | (b << 16) | (g << 8) | r;
+}
+
+function stoneColor() {
+  const v = 60 + Math.random() * 40 | 0;
+  return (255 << 24) | (v << 16) | (v << 8) | v;
+}
+
+function woodColor() {
+  const r = 100 + Math.random() * 40 | 0;
+  const g = 65 + Math.random() * 25 | 0;
+  const b = 30 + Math.random() * 15 | 0;
+  return (255 << 24) | (b << 16) | (g << 8) | r;
+}
+
+function ashColor() {
+  const v = 30 + Math.random() * 25 | 0;
+  return (255 << 24) | (v << 16) | (v << 8) | v;
+}
+
+function smokeColor() {
+  const v = 40 + Math.random() * 30 | 0;
+  return ((120 + Math.random() * 60 | 0) << 24) | (v << 16) | (v << 8) | v;
+}
+
+// Emitter state
+let emitterX = 0, emitterDir = 1, emitterTimer = 0;
+let emitterMaterial = SAND;
+let emitterSwitchTimer = 0;
+
+function updateEmitter() {
+  emitterTimer++;
+  if (emitterTimer >= 3) {
+    emitterTimer = 0;
+    emitterX += emitterDir;
+    if (emitterX >= COLS - 5) emitterDir = -1;
+    if (emitterX <= 5) emitterDir = 1;
+  }
+
+  emitterSwitchTimer++;
+  if (emitterSwitchTimer > 120 + Math.random() * 180 | 0) {
+    emitterSwitchTimer = 0;
+    const r = Math.random();
+    if (r < 0.45) emitterMaterial = SAND;
+    else if (r < 0.8) emitterMaterial = WATER;
+    else emitterMaterial = FIRE;
+  }
+
+  // Drop particles
+  for (let dy = 0; dy < 3; dy++) {
+    const x = emitterX + (Math.random() * 3 - 1 | 0);
+    const y = 0 + dy;
+    if (inBounds(x, y) && isEmpty(x, y)) {
+      let c;
+      if (emitterMaterial === SAND) c = sandColor();
+      else if (emitterMaterial === WATER) c = waterColor();
+      else c = fireColor(0);
+      setCell(x, y, emitterMaterial, emitterMaterial === FIRE ? 0 : 0, c);
     }
+  }
+}
 
-    // Initialize some wooden platforms
-    createPlatform(50, 100);
-    createPlatform(140, 80);
+function updateSand(x, y) {
+  const below = getType(x, y + 1);
+  if (below === AIR) { swap(x, y, x, y + 1); return; }
+  if (below === WATER) { swap(x, y, x, y + 1); return; }
 
-    requestAnimationFrame(loop);
+  const dir = Math.random() < 0.5 ? -1 : 1;
+  const bl = getType(x + dir, y + 1);
+  if (bl === AIR || bl === WATER) { swap(x, y, x + dir, y + 1); return; }
+  const br = getType(x - dir, y + 1);
+  if (br === AIR || br === WATER) { swap(x, y, x - dir, y + 1); return; }
+}
+
+function updateWater(x, y) {
+  const below = getType(x, y + 1);
+  if (below === AIR) { swap(x, y, x, y + 1); return; }
+  if (below === FIRE) {
+    setCell(x, y + 1, SMOKE, 30, smokeColor());
+    setCell(x, y, AIR, 0, 0);
+    return;
+  }
+
+  const dir = Math.random() < 0.5 ? -1 : 1;
+  const bl = getType(x + dir, y + 1);
+  if (bl === AIR) { swap(x, y, x + dir, y + 1); return; }
+  const br = getType(x - dir, y + 1);
+  if (br === AIR) { swap(x, y, x - dir, y + 1); return; }
+
+  // Flow sideways
+  for (let d = 1; d <= 3; d++) {
+    if (isEmpty(x + dir * d, y)) { swap(x, y, x + dir * d, y); return; }
+  }
+  for (let d = 1; d <= 3; d++) {
+    if (isEmpty(x - dir * d, y)) { swap(x, y, x - dir * d, y); return; }
+  }
+}
+
+function updateFire(x, y) {
+  const a = age[idx(x, y)];
+  if (a > 80 + Math.random() * 40 | 0) {
+    if (Math.random() < 0.3) {
+      setCell(x, y, SMOKE, 60 + Math.random() * 40 | 0, smokeColor());
+    } else {
+      setCell(x, y, AIR, 0, 0);
+    }
+    return;
+  }
+
+  age[idx(x, y)]++;
+  colorGrid[idx(x, y)] = fireColor(age[idx(x, y)]);
+
+  // Rise
+  if (isEmpty(x, y - 1)) { swap(x, y, x, y - 1); return; }
+
+  const dir = Math.random() < 0.5 ? -1 : 1;
+  if (isEmpty(x + dir, y - 1)) { swap(x, y, x + dir, y - 1); return; }
+  if (isEmpty(x - dir, y - 1)) { swap(x, y, x - dir, y - 1); return; }
+
+  // Spread sideways occasionally
+  if (Math.random() < 0.15) {
+    const d = Math.random() < 0.5 ? -1 : 1;
+    if (isEmpty(x + d, y)) { swap(x, y, x + d, y); return; }
+  }
+
+  // Burn neighbors
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      const nx = x + dx, ny = y + dy;
+      if (inBounds(nx, ny) && grid[idx(nx, ny)] === WOOD) {
+        if (Math.random() < 0.04) {
+          setCell(nx, ny, FIRE, 0, fireColor(0));
+        }
+      }
+      if (inBounds(nx, ny) && grid[idx(nx, ny)] === WATER) {
+        setCell(x, y, SMOKE, 30, smokeColor());
+        setCell(nx, ny, AIR, 0, 0);
+        return;
+      }
+    }
+  }
+}
+
+function updateSmoke(x, y) {
+  const a = age[idx(x, y)];
+  if (a > 80 + Math.random() * 40 | 0) {
+    setCell(x, y, AIR, 0, 0);
+    return;
+  }
+  age[idx(x, y)]++;
+
+  if (isEmpty(x, y - 1)) { swap(x, y, x, y - 1); return; }
+  const dir = Math.random() < 0.5 ? -1 : 1;
+  if (isEmpty(x + dir, y - 1)) { swap(x, y, x + dir, y - 1); return; }
+  if (isEmpty(x - dir, y - 1)) { swap(x, y, x - dir, y - 1); return; }
+  if (isEmpty(x + dir, y)) { swap(x, y, x + dir, y); return; }
+}
+
+function updateStone(x, y) {
+  // Slow erosion
+  if (Math.random() < 0.00008) {
+    setCell(x, y, AIR, 0, 0);
+    return;
+  }
+  // Regeneration: nearby air can become stone
+  if (Math.random() < 0.00005) {
+    const dir = Math.random() < 0.5 ? -1 : 1;
+    if (isEmpty(x + dir, y)) {
+      setCell(x + dir, y, STONE, 0, stoneColor());
+    }
+  }
+}
+
+function updateWood(x, y) {
+  // Wood doesn't move, just check for fire neighbors (handled by fire update)
+}
+
+function simulate() {
+  // Copy grid
+  nextGrid.set(grid);
+  const nextAge = new Int16Array(age);
+  const nextColor = new Uint32Array(colorGrid);
+
+  // Process bottom to top for falling, top to bottom for rising
+  for (let y = ROWS - 1; y >= 0; y--) {
+    const leftToRight = Math.random() < 0.5;
+    for (let xi = 0; xi < COLS; xi++) {
+      const x = leftToRight ? xi : COLS - 1 - xi;
+      const i = idx(x, y);
+      const type = grid[i];
+
+      if (type === SAND) {
+        if (nextGrid[i] === SAND) updateSand(x, y);
+      } else if (type === WATER) {
+        if (nextGrid[i] === WATER) updateWater(x, y);
+      } else if (type === FIRE) {
+        if (nextGrid[i] === FIRE) updateFire(x, y);
+      } else if (type === SMOKE) {
+        if (nextGrid[i] === SMOKE) updateSmoke(x, y);
+      } else if (type === STONE) {
+        if (nextGrid[i] === STONE) updateStone(x, y);
+      }
+    }
+  }
+
+  // Copy back
+  grid.set(nextGrid);
+  age.set(nextAge);
+  colorGrid.set(nextColor);
+}
+
+function buildLedges() {
+  // Create stone ledges at various heights
+  const ledgeHeights = [
+    { y: ROWS * 0.35, w: 0.6, cx: 0.3 },
+    { y: ROWS * 0.55, w: 0.5, cx: 0.6 },
+    { y: ROWS * 0.75, w: 0.7, cx: 0.5 },
+    { y: ROWS * 0.2, w: 0.3, cx: 0.8 },
+  ];
+
+  for (const ledge of ledgeHeights) {
+    const start = (ledge.cx - ledge.w / 2) * COLS | 0;
+    const end = (ledge.cx + ledge.w / 2) * COLS | 0;
+    const y = ledge.y | 0;
+    for (let x = start; x <= end; x++) {
+      if (inBounds(x, y) && grid[idx(x, y)] === AIR) {
+        setCell(x, y, STONE, 0, stoneColor());
+      }
+      // Add some thickness
+      if (inBounds(x, y + 1) && grid[idx(x, y + 1)] === AIR) {
+        if (Math.random() < 0.5) setCell(x, y + 1, STONE, 0, stoneColor());
+      }
+    }
+  }
+
+  // Wood platforms
+  const woodPlatforms = [
+    { y: ROWS * 0.3, w: 0.2, cx: 0.5 },
+    { y: ROWS * 0.5, w: 0.25, cx: 0.2 },
+    { y: ROWS * 0.7, w: 0.15, cx: 0.75 },
+  ];
+
+  for (const plat of woodPlatforms) {
+    const start = (plat.cx - plat.w / 2) * COLS | 0;
+    const end = (plat.cx + plat.w / 2) * COLS | 0;
+    const y = plat.y | 0;
+    for (let x = start; x <= end; x++) {
+      if (inBounds(x, y) && grid[idx(x, y)] === AIR) {
+        setCell(x, y, WOOD, 0, woodColor());
+      }
+    }
+  }
 }
 
 function resize() {
-    canvas.width = WIDTH;
-    canvas.height = HEIGHT;
-    // CSS handles the stretching, but we set internal buffer to low res
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  scale = Math.max(Math.ceil(w / COLS), Math.ceil(h / ROWS));
+  canvas.width = COLS;
+  canvas.height = ROWS;
+  canvas.style.width = COLS * scale + 'px';
+  canvas.style.height = ROWS * scale + 'px';
 }
 
-function createPlatform(x, y) {
-    for (let i = -10; i <= 10; i++) {
-        if (x + i >= 0 && x + i < WIDTH && y >= 0 && y < HEIGHT) {
-            grid[y * WIDTH + (x + i)] = 5;
-            colorVar[y * WIDTH + (x + i)] = Math.random();
-        }
+let imageData;
+function render() {
+  if (!imageData || imageData.width !== COLS || imageData.height !== ROWS) {
+    imageData = ctx.createImageData(COLS, ROWS);
+  }
+  const data = imageData.data;
+  for (let i = 0; i < COLS * ROWS; i++) {
+    const type = grid[i];
+    const j = i * 4;
+    if (type === AIR) {
+      data[j] = 10; data[j + 1] = 10; data[j + 2] = 15; data[j + 3] = 255;
+    } else {
+      const c = colorGrid[i] || 0;
+      data[j] = c & 0xFF;
+      data[j + 1] = (c >> 8) & 0xFF;
+      data[j + 2] = (c >> 16) & 0xFF;
+      data[j + 3] = (c >> 24) & 0xFF;
     }
+  }
+  ctx.putImageData(imageData, 0, 0);
 }
 
-function idx(x, y) {
-    return y * WIDTH + x;
-}
-
-function isEmpty(x, y) {
-    return grid[idx(x, y)] === 0;
-}
-
-function isWater(x, y) {
-    return grid[idx(x, y)] === 2;
-}
-
-function isFire(x, y) {
-    return grid[idx(x, y)] === 3;
-}
-
-function setCell(x, y, type, life = 0) {
-    if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return;
-    const i = idx(x, y);
-    grid[i] = type;
-    // Randomize color variation slightly for texture
-    colorVar[i] = Math.random();
-}
-
-function update() {
-    // 1. Emitter Logic
-    emitterTimer++;
-    if (emitterTimer > 10) {
-        emitterTimer = 0;
-        // Move emitter
-        emitterX += emitterDir;
-        if (emitterX > WIDTH - 20) emitterDir = -1;
-        if (emitterX < 10) emitterDir = 1;
-
-        // Drop particles
-        const dropY = 2;
-        
-        // 70% Sand, 20% Water, 10% Fire
-        const r = Math.random();
-        if (r < 0.7) {
-            if (isEmpty(emitterX, dropY)) setCell(emitterX, dropY, 1);
-        } else if (r < 0.9) {
-            if (isEmpty(emitterX, dropY)) setCell(emitterX, dropY, 2);
-        } else {
-            if (isEmpty(emitterX, dropY)) setCell(emitterX, dropY, 3);
-        }
-    }
-
-    // Iterate bottom-up for falling particles to prevent teleporting
-    // We use a separate array or careful iteration to avoid updating same particle twice per frame
-    // For simple sand, bottom-up left-right is usually fine.
-    
-    for (let y = HEIGHT - 2; y >= 0; y--) {
-        // Randomize x direction to prevent bias
-        const leftToRight = Math.random() > 0.5;
-        const startX = leftToRight ? 0 : WIDTH - 1;
-        const endX = leftToRight ? WIDTH : -1;
-        const stepX = leftToRight ? 1 : -1;
-
-        for (let x = startX; x !== endX; x += stepX) {
-            const i = idx(x, y);
-            const type = grid[i];
-
-            if (type === 0) continue;
-
-            if (type === 1) { // Sand
-                // Fall down
-                if (y + 1 < HEIGHT && isEmpty(x, y + 1)) {
-                    setCell(x, y + 1, 1);
-                    setCell(x, y, 0);
-                } 
-                // Slide down-left or down-right
-                else if (y + 1 < HEIGHT) {
-                    const dir = Math.random() > 0.5 ? 1 : -1;
-                    if (x + dir >= 0 && x + dir < WIDTH && isEmpty(x + dir, y + 1)) {
-                        setCell(x + dir, y + 1, 1);
-                        setCell(x, y, 0);
-                    } else if (x - dir >= 0 && x - dir < WIDTH && isEmpty(x - dir, y + 1)) {
-                        setCell(x - dir, y + 1, 1);
-                        setCell(x, y, 0);
-                    }
-                }
-            } 
-            else if (type === 2) { // Water
-                // Fall down
-                if (y + 1 < HEIGHT && isEmpty(x, y + 1)) {
-                    setCell(x, y + 1, 2);
-                    setCell(x, y, 0);
-                }
-                // Flow sideways
-                else if (y + 1 < HEIGHT) {
-                    // Check diagonal first (water piles slightly)
-                    const dir = Math.random() > 0.5 ? 1 : -1;
-                    if (x + dir >= 0 && x + dir < WIDTH && isEmpty(x + dir, y + 1)) {
-                        setCell(x + dir, y + 1, 2);
-                        setCell(x, y, 0);
-                    } else if (x - dir >= 0 && x - dir < WIDTH && isEmpty(x - dir, y + 1)) {
-                        setCell(x - dir, y + 1, 2);
-                        setCell(x, y, 0);
-                    } else {
-                        // Just flow flat
-                        if (x + dir >= 0 && x + dir < WIDTH && isEmpty(x + dir, y)) {
-                            setCell(x + dir, y, 2);
-                            setCell(x, y, 0);
-                        } else if (x - dir >= 0 && x - dir < WIDTH && isEmpty(x - dir, y)) {
-                            setCell(x - dir, y, 2);
-                            setCell(x, y, 0);
-                        }
-                    }
-                }
-            }
-            else if (type === 3) { // Fire
-                // Fire moves up randomly
-                if (Math.random() < 0.2) {
-                    const dir = Math.floor(Math.random() * 3) - 1; // -1, 0, 1
-                    const ny = y - 1;
-                    const nx = x + dir;
-                    if (ny >= 0 && nx >= 0 && nx < WIDTH) {
-                        if (isEmpty(nx, ny)) {
-                            setCell(nx, ny, 3);
-                            setCell(x, y, 0);
-                        } else if (grid[idx(nx, ny)] === 5) {
-                            // Burn wood
-                            setCell(nx, ny, 3); // Ignite wood cell
-                            setCell(x, y, 0);
-                        }
-                    }
-                }
-                
-                // Interactions
-                // Quench by water
-                if (y + 1 < HEIGHT && isWater(x, y + 1)) {
-                    setCell(x, y, 0); // Fire dies
-                    // setCell(x, y+1, 0); // Optional: consume water
-                }
-                for (let dx = -1; dx <= 1; dx++) {
-                    if (x+dx >= 0 && x+dx < WIDTH && isWater(x+dx, y)) {
-                        setCell(x, y, 0);
-                    }
-                }
-
-                // Chance to die out
-                if (Math.random() < 0.05) setCell(x, y, 0);
-            }
-            else if (type === 5) { // Wood
-                // If on fire, turn to fire or vanish
-                let burning = false;
-                // Check neighbors for fire
-                for(let dy=-1; dy<=1; dy++){
-                    for(let dx=-1; dx<=1; dx++){
-                        if(x+dx >=0 && x+dx < WIDTH && y+dy >=0 && y+dy < HEIGHT) {
-                            if(isFire(x+dx, y+dy)) burning = true;
-                        }
-                    }
-                }
-
-                if (burning && Math.random() < 0.1) {
-                    setCell(x, y, 3); // Turn into fire
-                }
-            }
-            else if (type === 4) { // Stone
-                // Erosion: Water slowly erodes stone
-                if (y + 1 < HEIGHT && isWater(x, y + 1)) {
-                    if (Math.random() < 0.001) {
-                        setCell(x, y, 0); // Stone falls away
-                    }
-                }
-            }
-        }
-    }
-
-    // Regeneration Logic (Keep scene dynamic)
-    // Slowly regenerate wood platforms if they are gone or low
-    if (Math.random() < WOOD_REGEN_RATE) {
-        // Randomly pick a spot in the middle area to try and regrow wood
-        // This simulates "nature" or a machine rebuilding
-        const rx = Math.floor(Math.random() * WIDTH);
-        const ry = Math.floor(Math.random() * (HEIGHT - 50)) + 50;
-        if (isEmpty(rx, ry)) {
-            // Only regrow if near existing stone or wood to keep it grounded
-            let grounded = false;
-            if (ry + 1 < HEIGHT && grid[idx(rx, ry+1)] === 4) grounded = true;
-            if (rx > 0 && grid[idx(rx-1, ry)] === 5) grounded = true;
-            if (rx < WIDTH-1 && grid[idx(rx+1, ry)] === 5) grounded = true;
-
-            if (grounded) setCell(rx, ry, 5);
-        }
-    }
-    
-    // Regenerate bottom stone floor if eroded
-    if (Math.random() < 0.01) {
-        const rx = Math.floor(Math.random() * WIDTH);
-        if (isEmpty(rx, HEIGHT - 1)) setCell(rx, HEIGHT - 1, 4);
-    }
-}
-
-function draw() {
-    // Create ImageData buffer
-    const imgData = ctx.createImageData(WIDTH, HEIGHT);
-    const data = imgData.data;
-
-    for (let i = 0; i < grid.length; i++) {
-        const type = grid[i];
-        const pixelIndex = i * 4;
-        const variance = colorVar[i]; // 0 to 1
-
-        let r, g, b, a;
-
-        if (type === 0) {
-            r = 17; g = 17; b = 17; // Background
-        } 
-        else if (type === 1) { // Sand
-            // Vary yellow/brown
-            const v = Math.floor(variance * 40);
-            r = 230 - v; g = 194 - v; b = 41 - v;
-        } 
-        else if (type === 2) { // Water
-            // Vary blue
-            const v = Math.floor(variance * 50);
-            r = 52 - v; g = 152 - v; b = 219 + v;
-        } 
-        else if (type === 3) { // Fire
-            // Flicker orange/red/yellow
-            const flicker = Math.random();
-            r = 231 * flicker + 255 * (1-flicker);
-            g = 76 * flicker + 100 * (1-flicker);
-            b = 60 * flicker;
-        }
-        else if (type === 4) { // Stone
-            const v = Math.floor(variance * 60);
-            r = 85 - v; g = 85 - v; b = 85 - v;
-        }
-        else if (type === 5) { // Wood
-            const v = Math.floor(variance * 40);
-            r = 139 - v; g = 69 - v; b = 19 - v;
-        }
-
-        data[pixelIndex] = r;
-        data[pixelIndex + 1] = g;
-        data[pixelIndex + 2] = b;
-        data[pixelIndex + 3] = 255; // Alpha
-    }
-
-    ctx.putImageData(imgData, 0, 0);
-}
-
+let frameCount = 0;
 function loop() {
-    update();
-    draw();
-    requestAnimationFrame(loop);
+  updateEmitter();
+  simulate();
+  render();
+  frameCount++;
+  requestAnimationFrame(loop);
 }
 
-// Start
-init();
+function init() {
+  resize();
+  initGrid();
+  buildLedges();
+  loop();
+}
 
+window.addEventListener('resize', resize);
+init();
 </script>
 </body>
 </html>

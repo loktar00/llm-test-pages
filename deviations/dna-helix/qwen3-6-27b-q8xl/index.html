@@ -1,452 +1,379 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Rotating DNA Helix</title>
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            overflow: hidden;
-            background-color: #050508;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            font-family: sans-serif;
-        }
-
-        canvas {
-            display: block;
-        }
-
-        #ui {
-            position: absolute;
-            bottom: 20px;
-            left: 20px;
-            color: rgba(255, 255, 255, 0.5);
-            font-size: 12px;
-            pointer-events: none;
-            user-select: none;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DNA Double Helix</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; width: 100%; height: 100%; }
+</style>
 </head>
 <body>
-
-    <canvas id="canvas"></canvas>
-    <div id="ui">DNA Replication Visualization</div>
-
+<canvas id="c"></canvas>
 <script>
-    const canvas = document.getElementById('canvas');
-    const ctx = canvas.getContext('2d');
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
 
-    let width, height;
-    
-    // Configuration
-    const config = {
-        strandColor: '#00f0ff',
-        basePairs: [
-            { type: 'A-T', color: '#ff0055', glow: '#ff0055' }, // Red/Pink
-            { type: 'T-A', color: '#00ff55', glow: '#00ff55' }, // Green
-            { type: 'G-C', color: '#ffff00', glow: '#ffff00' }, // Yellow
-            { type: 'C-G', color: '#aa00ff', glow: '#aa00ff' }  // Purple
-        ],
-        helixRadius: 120,
-        twist: 0.12, // Radians per rung
-        verticalSpacing: 12,
-        rotationSpeed: 0.015,
-        replicationSpeed: 0.05
-    };
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
 
-    // State
-    let rotation = 0;
-    let rungs = [];
-    const totalRungs = 60;
-    
-    // Replication Event State
-    let replication = {
-        active: false,
-        centerIndex: 0,
-        progress: 0, // 0 to 1 (unzipping), 1 to 2 (rebuilding)
-        direction: 1,
-        duration: 0
-    };
+const NUM_PAIRS = 120;
+const HELIX_RADIUS = 120;
+const VERTICAL_SPACING = 14;
+const TWIST_RATE = 0.35;
+const FOCAL_LENGTH = 800;
 
-    // Mouse interaction for subtle tilt (optional polish)
-    let mouseX = 0;
-    let mouseY = 0;
+const BASE_COLORS = {
+  'A-T': { r: 0, g: 255, b: 100, glow: '#00ff64' },
+  'T-A': { r: 0, g: 255, b: 100, glow: '#00ff64' },
+  'C-G': { r: 255, g: 50, b: 80, glow: '#ff3250' },
+  'G-C': { r: 80, g: 150, b: 255, glow: '#5096ff' }
+};
+const BASE_TYPES = ['A-T', 'T-A', 'C-G', 'G-C'];
 
-    function init() {
-        resize();
-        window.addEventListener('resize', resize);
-        window.addEventListener('mousemove', e => {
-            mouseX = (e.clientX - width/2) / width;
-            mouseY = (e.clientY - height/2) / height;
-        });
+let basePairs = [];
+for (let i = 0; i < NUM_PAIRS; i++) {
+  basePairs.push({
+    type: BASE_TYPES[Math.floor(Math.random() * 4)],
+    theta: i * TWIST_RATE,
+    y: (i - NUM_PAIRS / 2) * VERTICAL_SPACING
+  });
+}
 
-        // Initialize Rungs
-        for (let i = 0; i < totalRungs; i++) {
-            rungs.push({
-                index: i,
-                pair: config.basePairs[Math.floor(Math.random() * config.basePairs.length)],
-                offset: (Math.random() - 0.5) * 10 // slight randomness
-            });
-        }
+let rotationAngle = 0;
+let time = 0;
 
-        // Schedule first event
-        setTimeout(triggerReplication, 2000);
-        
-        requestAnimationFrame(loop);
+// Replication state
+let replication = {
+  active: false,
+  phase: 'idle', // idle, unzipping, rebuilding, done
+  startIdx: 0,
+  endIdx: 0,
+  progress: 0,
+  unzipProgress: 0,
+  rebuildProgress: 0,
+  timer: 0,
+  delay: 0,
+  newTypes: []
+};
+
+function startReplication() {
+  const sectionSize = 12 + Math.floor(Math.random() * 10);
+  const startIdx = Math.floor(Math.random() * (NUM_PAIRS - sectionSize));
+  const endIdx = startIdx + sectionSize;
+
+  replication.active = true;
+  replication.phase = 'unzipping';
+  replication.startIdx = startIdx;
+  replication.endIdx = endIdx;
+  replication.unzipProgress = 0;
+  replication.rebuildProgress = 0;
+  replication.newTypes = [];
+  for (let i = startIdx; i < endIdx; i++) {
+    replication.newTypes.push(BASE_TYPES[Math.floor(Math.random() * 4)]);
+  }
+}
+
+function project(x, y, z) {
+  const scale = FOCAL_LENGTH / (FOCAL_LENGTH + z);
+  return {
+    sx: x * scale + W / 2,
+    sy: y * scale + H / 2,
+    scale: scale,
+    z: z
+  };
+}
+
+function getHelixPoint(theta, y, strandOffset) {
+  const t = theta + strandOffset;
+  return {
+    x: HELIX_RADIUS * Math.cos(t),
+    y: y,
+    z: HELIX_RADIUS * Math.sin(t)
+  };
+}
+
+function applyRotation(p, angle) {
+  const cosA = Math.cos(angle);
+  const sinA = Math.sin(angle);
+  return {
+    x: p.x * cosA - p.z * sinA,
+    y: p.y,
+    z: p.x * sinA + p.z * cosA
+  };
+}
+
+function drawGlowCircle(sx, sy, radius, color, alpha) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = radius * 3;
+  ctx.beginPath();
+  ctx.arc(sx, sy, radius, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawGlowLine(x1, y1, x2, y2, color, alpha, lineWidth) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 12;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lineWidth;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawStrandPoint(sx, sy, scale, depthAlpha, color) {
+  const r = Math.max(1.5, 3.5 * scale);
+  drawGlowCircle(sx, sy, r, color, depthAlpha * 0.9);
+}
+
+function draw() {
+  ctx.fillStyle = 'rgba(5, 5, 18, 1)';
+  ctx.fillRect(0, 0, W, H);
+
+  // Draw subtle background stars
+  ctx.save();
+  for (let i = 0; i < 80; i++) {
+    const sx = ((i * 7919 + 13) % W);
+    const sy = ((i * 6271 + 37) % H);
+    const brightness = 0.1 + 0.15 * Math.sin(time * 0.5 + i);
+    ctx.globalAlpha = brightness;
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(sx, sy, 0.8, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+
+  rotationAngle = time * 0.3;
+
+  // Collect all drawable elements with z-depth for sorting
+  let elements = [];
+
+  const helixCenterY = 0;
+
+  for (let i = 0; i < NUM_PAIRS; i++) {
+    const bp = basePairs[i];
+    const theta = bp.theta;
+    const y = bp.y + helixCenterY;
+
+    let inReplication = replication.active && i >= replication.startIdx && i < replication.endIdx;
+    let unzipFactor = 0;
+    let visible = 1;
+    let newType = bp.type;
+
+    if (inReplication) {
+      if (replication.phase === 'unzipping') {
+        const idx = i - replication.startIdx;
+        const total = replication.endIdx - replication.startIdx;
+        const wave = Math.max(0, Math.min(1, (replication.unzipProgress * 1.5 - idx / total * 0.5)));
+        unzipFactor = Math.min(1, wave);
+        visible = 1 - unzipFactor;
+      } else if (replication.phase === 'rebuilding') {
+        const idx = i - replication.startIdx;
+        const total = replication.endIdx - replication.startIdx;
+        const wave = Math.max(0, Math.min(1, (replication.rebuildProgress * 1.5 - idx / total * 0.5)));
+        visible = wave;
+        unzipFactor = 1 - wave * 0.3;
+        newType = replication.newTypes[idx];
+      } else if (replication.phase === 'done') {
+        visible = 1;
+        unzipFactor = 0;
+        newType = replication.newTypes[i - replication.startIdx];
+      }
     }
 
-    function resize() {
-        width = canvas.width = window.innerWidth;
-        height = canvas.height = window.innerHeight;
+    const sep = 1 + unzipFactor * 1.6;
+
+    const p1 = getHelixPoint(theta, y, 0);
+    const p2 = getHelixPoint(theta, y, Math.PI);
+
+    const rp1 = applyRotation(p1, rotationAngle);
+    const rp2 = applyRotation(p2, rotationAngle);
+
+    // Apply separation for unzipping
+    const sepX = (rp2.x - rp1.x) * unzipFactor * 0.3;
+    const sepZ = (rp2.z - rp1.z) * unzipFactor * 0.3;
+
+    rp1.x -= sepX * 0.5;
+    rp1.z -= sepZ * 0.5;
+    rp2.x += sepX * 0.5;
+    rp2.z += sepZ * 0.5;
+
+    const proj1 = project(rp1.x, rp1.y, rp1.z);
+    const proj2 = project(rp2.x, rp2.y, rp2.z);
+
+    const avgZ = (rp1.z + rp2.z) / 2;
+    const depthFactor = 1 - (avgZ + HELIX_RADIUS) / (2 * HELIX_RADIUS);
+    const depthAlpha = Math.max(0.15, Math.min(1, 0.3 + depthFactor * 0.7));
+
+    const colorInfo = BASE_COLORS[newType];
+    const hexColor = `rgb(${colorInfo.r},${colorInfo.g},${colorInfo.b})`;
+
+    // Base pair rung
+    if (visible > 0.01) {
+      elements.push({
+        type: 'rung',
+        x1: proj1.sx, y1: proj1.sy,
+        x2: proj2.sx, y2: proj2.sy,
+        color: hexColor,
+        alpha: depthAlpha * visible,
+        z: avgZ,
+        scale: (proj1.scale + proj2.scale) / 2
+      });
     }
 
-    function triggerReplication() {
-        if (!replication.active) {
-            replication.active = true;
-            replication.centerIndex = Math.floor(Math.random() * (totalRungs - 10)) + 5;
-            replication.progress = 0;
-            replication.direction = 1;
-        }
+    // Strand points
+    elements.push({
+      type: 'point',
+      sx: proj1.sx, sy: proj1.sy,
+      scale: proj1.scale,
+      depthAlpha: depthAlpha,
+      color: '#a0c4ff',
+      z: rp1.z
+    });
+
+    elements.push({
+      type: 'point',
+      sx: proj2.sx, sy: proj2.sy,
+      scale: proj2.scale,
+      depthAlpha: depthAlpha,
+      color: '#a0c4ff',
+      z: rp2.z
+    });
+
+    // Update base pair type if replication is done
+    if (replication.phase === 'done' && inReplication) {
+      bp.type = newType;
     }
+  }
 
-    function update() {
-        rotation += config.rotationSpeed;
+  // Sort by z (back to front)
+  elements.sort((a, b) => a.z - b.z);
 
-        // Update Replication Animation
-        if (replication.active) {
-            replication.progress += config.replicationSpeed;
+  // Draw strand connections (subtle lines between consecutive points on each strand)
+  for (let strand = 0; strand < 2; strand++) {
+    ctx.save();
+    for (let i = 0; i < NUM_PAIRS - 1; i++) {
+      const bp = basePairs[i];
+      const bp2 = basePairs[i + 1];
+      const theta = bp.theta;
+      const theta2 = bp2.theta;
+      const y = bp.y + helixCenterY;
+      const y2 = bp2.y + helixCenterY;
 
-            if (replication.progress >= 2) {
-                // Event finished
-                replication.active = false;
-                // Schedule next event randomly between 3 and 8 seconds
-                setTimeout(triggerReplication, 3000 + Math.random() * 5000);
-            }
-        }
+      const p1 = getHelixPoint(theta, y, strand * Math.PI);
+      const p2 = getHelixPoint(theta2, y2, strand * Math.PI);
+
+      const rp1 = applyRotation(p1, rotationAngle);
+      const rp2 = applyRotation(p2, rotationAngle);
+
+      const proj1 = project(rp1.x, rp1.y, rp1.z);
+      const proj2 = project(rp2.x, rp2.y, rp2.z);
+
+      const avgZ = (rp1.z + rp2.z) / 2;
+      const depthFactor = 1 - (avgZ + HELIX_RADIUS) / (2 * HELIX_RADIUS);
+      const depthAlpha = Math.max(0.08, Math.min(0.4, 0.1 + depthFactor * 0.3));
+
+      ctx.globalAlpha = depthAlpha;
+      ctx.strokeStyle = '#6080cc';
+      ctx.lineWidth = 1.5 * proj1.scale;
+      ctx.beginPath();
+      ctx.moveTo(proj1.sx, proj1.sy);
+      ctx.lineTo(proj2.sx, proj2.sy);
+      ctx.stroke();
     }
+    ctx.restore();
+  }
 
-    function draw() {
-        // Clear screen with slight fade for trails? No, clean clear for crispness.
-        ctx.fillStyle = '#050508';
-        ctx.fillRect(0, 0, width, height);
-
-        ctx.save();
-        
-        // Center canvas
-        ctx.translate(width / 2, height / 2);
-        
-        // Apply subtle tilt based on mouse
-        ctx.rotate(mouseX * 0.1);
-        ctx.rotate(-mouseY * 0.1);
-
-        // 3D Projection Variables
-        // We need to draw back-to-front (painter's algorithm)
-        // But calculating 3D coordinates for every rung first allows sorting
-        
-        const points = [];
-
-        for (let i = 0; i < totalRungs; i++) {
-            const rung = rungs[i];
-            
-            // Base Y position (vertical helix)
-            // Center the helix vertically
-            const yRaw = (i - totalRungs / 2) * config.verticalSpacing;
-            
-            // Base Rotation
-            const angle = i * config.twist + rotation;
-            
-            // 3D Coordinates before replication offset
-            let x1 = Math.cos(angle) * config.helixRadius;
-            let z1 = Math.sin(angle) * config.helixRadius;
-            
-            let x2 = Math.cos(angle + Math.PI) * config.helixRadius;
-            let z2 = Math.sin(angle + Math.PI) * config.helixRadius;
-
-            // Apply Replication Logic (Unzipping)
-            let replicationOffset = 0;
-            if (replication.active) {
-                // Determine distance from replication center
-                const dist = Math.abs(i - replication.centerIndex);
-                const range = 10; // How many rungs unzip
-
-                if (dist < range) {
-                    // Calculate intensity based on distance (center is max)
-                    const intensity = 1 - (dist / range);
-                    
-                    // Calculate phase (0..1 unzip, 1..2 zip)
-                    // We want a smooth easing
-                    let phase = replication.progress;
-                    if (phase > 1) phase = 2 - phase; 
-                    
-                    // Apply separation on X axis (visual effect of unzipping)
-                    // The strands move away from each other
-                    const separation = 60 * intensity * phase;
-                    
-                    // Move x1 left, x2 right (relative to their rotation position)
-                    // To make it look like it's opening, we expand along the vector connecting them
-                    // Simplified: just push them apart on X for visual clarity in 2D projection
-                    // Or better: expand the radius locally
-                    
-                    // Let's push them apart based on their current x-positions
-                    x1 -= separation;
-                    x2 += separation;
-                }
-            }
-
-            // Perspective Projection
-            const fov = 400;
-            const scale = fov / (fov + z1); // z1 and z2 are roughly same depth for a rung
-            
-            // Since z1 and z2 are opposite, we use the average Z for the rung's depth
-            // Actually, let's use z1 for strand 1 and z2 for strand 2 for accurate depth sorting if we were drawing segments
-            // But for rungs, we treat them as a single unit or draw lines. 
-            // To do painter's algorithm correctly, we should sort by Z.
-            
-            // Let's project
-            const pX1 = x1 * scale;
-            const pY1 = yRaw * scale;
-            const pX2 = x2 * scale;
-            const pY2 = yRaw * scale; // Y is usually unaffected by perspective in simple ortho-ish views, but let's scale it slightly for realism
-            const pY = yRaw * scale; 
-
-            // Calculate Depth for Sorting (Average Z)
-            // z1 is sin(angle), z2 is sin(angle + PI) = -sin(angle). Sum is 0.
-            // This means the rung is always centered in Z.
-            // To fix sorting issues where a rung crosses the center, we can just use the index order 
-            // or a slight Z-offset. 
-            // Actually, standard helix sorting by index works if we draw back-to-front in a loop, 
-            // but with perspective, "back" changes.
-            // Simple approach: Sort by Z of the center point? No, it's always 0.
-            // Better approach: Sort by Y? No.
-            // The strands wrap around. We need to draw the back parts of the circle first.
-            // Since we are drawing rungs (lines), we can sort them by their Z-depth.
-            // Since Z averages to 0, let's use the Z of the "front" strand to determine if it's in front of the "back" strand of another rung?
-            // Let's just use the Z of the first strand.
-            
-            points.push({
-                i: i,
-                y: pY,
-                x1: pX1, z1: z1,
-                x2: pX2, z2: z2,
-                scale: scale,
-                rung: rung
-            });
-        }
-
-        // Sort by depth (Z). 
-        // Since the helix rotates, we need to sort based on the Z coordinate.
-        // However, a rung connects front and back. 
-        // We will sort by the Z of the "back" strand (the one with positive Z in our coord system usually, or negative depending on definition).
-        // Let's just sort by the average Z (which is 0) -> useless.
-        // Let's sort by the Z of the strand that is currently "behind".
-        // Actually, simpler: The helix is a cylinder. We draw from back to front.
-        // The "back" of the cylinder is where Z is large positive (or negative).
-        // Let's assume camera is at -Z looking at +Z.
-        // Points with smaller Z (further away) should be drawn first.
-        // Since the rung spans the whole diameter, it's tricky.
-        // We will draw the strands (lines) first, then the rungs?
-        // No, let's just sort by the Z of the midpoint, but add a bias based on rotation.
-        // Actually, if we just iterate i from 0 to N, it looks okay if the rotation is slow, but breaks at high tilt.
-        // Correct Painter's Algo: Sort by Z.
-        // For a rung, let's use the Z of the strand that is furthest away.
-        
-        points.sort((a, b) => {
-            // We want to draw the furthest point first.
-            // Let's pick the max Z of the two endpoints for the object depth.
-            const zA = Math.max(a.z1, a.z2);
-            const zB = Math.max(b.z1, b.z2);
-            return zA - zB;
-        });
-
-        // Draw
-        ctx.lineCap = 'round';
-
-        // 1. Draw the Backbone Strands (Continuous lines)
-        // Since we sorted by depth, drawing continuous lines is hard because the order is jumbled.
-        // We will draw the backbone as a series of segments or just draw the rungs and dots.
-        // To get the glowing wire look, we will draw the segments between sorted points? No, that breaks continuity.
-        // Compromise: Draw the backbone first (unsorted, just a loop), then draw the rungs (sorted).
-        // This creates a "flat" backbone but 3D rungs. To make it better, we draw the backbone twice?
-        // Or we just draw the backbone segments in the sorted loop. It will look like dashed lines but if they overlap perfectly, it's fine.
-        
-        // Let's try drawing backbone segments in the sorted loop.
-        // We need to know where the previous point was in the 3D structure, not the sorted list.
-        // So we draw the backbone as two separate continuous paths first.
-        
-        drawBackbone();
-
-        // Then draw rungs sorted by depth
-        for (let p of points) {
-            drawRung(p);
-        }
-
-        ctx.restore();
+  // Draw all elements
+  for (const el of elements) {
+    if (el.type === 'point') {
+      drawStrandPoint(el.sx, el.sy, el.scale, el.depthAlpha, el.color);
+    } else if (el.type === 'rung') {
+      drawGlowLine(el.x1, el.y1, el.x2, el.y2, el.color, el.alpha, Math.max(1, 2.5 * el.scale));
     }
+  }
 
-    function drawBackbone() {
-        ctx.lineWidth = 2;
-        
-        // Draw Strand 1
-        ctx.beginPath();
-        ctx.strokeStyle = config.strandColor;
-        ctx.shadowBlur = 10;
-        ctx.shadowColor = config.strandColor;
-        
-        for (let i = 0; i < totalRungs; i++) {
-            const yRaw = (i - totalRungs / 2) * config.verticalSpacing;
-            const angle = i * config.twist + rotation;
-            let x = Math.cos(angle) * config.helixRadius;
-            let z = Math.sin(angle) * config.helixRadius;
-            
-            // Replication offset
-            if (replication.active) {
-                const dist = Math.abs(i - replication.centerIndex);
-                if (dist < 10) {
-                    const intensity = 1 - (dist / 10);
-                    let phase = replication.progress;
-                    if (phase > 1) phase = 2 - phase; 
-                    x -= 60 * intensity * phase;
-                }
-            }
+  // Draw replication indicator
+  if (replication.active && (replication.phase === 'unzipping' || replication.phase === 'rebuilding')) {
+    ctx.save();
+    ctx.globalAlpha = 0.6;
+    ctx.fillStyle = '#ffcc00';
+    ctx.font = '14px monospace';
+    ctx.textAlign = 'center';
+    const phaseText = replication.phase === 'unzipping' ? '⧫ REPLICATION: UNZIPPING ⧫' : '⧫ REPLICATION: REBUILDING ⧫';
+    ctx.shadowColor = '#ffcc00';
+    ctx.shadowBlur = 15;
+    ctx.fillText(phaseText, W / 2, 30);
+    ctx.restore();
+  }
+}
 
-            const scale = 400 / (400 + z);
-            const px = x * scale;
-            const py = yRaw * scale;
-
-            if (i === 0) ctx.moveTo(px, py);
-            else ctx.lineTo(px, py);
-        }
-        ctx.stroke();
-
-        // Draw Strand 2
-        ctx.beginPath();
-        for (let i = 0; i < totalRungs; i++) {
-            const yRaw = (i - totalRungs / 2) * config.verticalSpacing;
-            const angle = i * config.twist + rotation;
-            let x = Math.cos(angle + Math.PI) * config.helixRadius;
-            let z = Math.sin(angle + Math.PI) * config.helixRadius;
-
-            // Replication offset
-            if (replication.active) {
-                const dist = Math.abs(i - replication.centerIndex);
-                if (dist < 10) {
-                    const intensity = 1 - (dist / 10);
-                    let phase = replication.progress;
-                    if (phase > 1) phase = 2 - phase; 
-                    x += 60 * intensity * phase;
-                }
-            }
-
-            const scale = 400 / (400 + z);
-            const px = x * scale;
-            const py = yRaw * scale;
-
-            if (i === 0) ctx.moveTo(px, py);
-            else ctx.lineTo(px, py);
-        }
-        ctx.stroke();
-        
-        // Reset shadow for rungs
-        ctx.shadowBlur = 0;
+function updateReplication(dt) {
+  if (!replication.active) {
+    replication.timer += dt;
+    if (replication.timer > replication.delay) {
+      replication.timer = 0;
+      replication.delay = 4 + Math.random() * 6;
+      startReplication();
     }
+    return;
+  }
 
-    function drawRung(p) {
-        const { x1, x2, y, scale, rung, z1, z2 } = p;
-        
-        // Calculate depth brightness
-        // z ranges from -radius to +radius. 
-        // Let's normalize z to 0..1 where 1 is front.
-        // z = sin(angle). Max is 1 (front), Min is -1 (back).
-        // We want the rung to be brighter when it's in front.
-        // Since the rung connects front and back, we can use the average Z or just make it constant?
-        // The prompt asks for "depth-based brightness as each strand passes front and back".
-        // Since the rung is a rigid bar connecting them, it's partially front, partially back.
-        // However, visually, if the whole helix rotates, the "front" rungs are brighter.
-        // Let's use the Z of the midpoint (which is 0). That's constant.
-        // Let's cheat slightly: Use the Z of the "front" strand to determine if this rung is currently "facing" us?
-        // Actually, let's just use a sine wave based on the rotation angle to simulate lighting.
-        
-        const angle = rung.index * config.twist + rotation;
-        // 0 is right, PI/2 is front (z=1), PI is left, 3PI/2 is back (z=-1)
-        // We want brightness to peak at PI/2.
-        // sin(angle) gives z.
-        // Let's map z (-1 to 1) to brightness (0.3 to 1.0).
-        // But wait, z1 and z2 are opposite. One is bright, one is dark.
-        // Let's average the brightness or just pick a middle ground.
-        // Or, simpler: The rung is a "rung". It's a ladder. 
-        // Let's dim it if it's on the back side of the cylinder.
-        // We can approximate the "front-ness" of the rung by checking if the normal points to camera?
-        // Too complex. Let's just use a global dimming factor based on the index rotation.
-        
-        // Let's assume the light is coming from the camera.
-        // The rung is horizontal. The strands curve around.
-        // Let's just make the rungs slightly dimmer when they are at the back (z ~ -1).
-        // But the rung spans -R to +R.
-        // Let's just keep them constant brightness but maybe dim the ones that are strictly "behind" the center plane?
-        // No, let's make the *strands* fade, and the rungs stay visible but maybe slightly pulsating.
-        
-        // Prompt: "depth-based brightness as each strand passes front and back"
-        // This usually implies the whole object or parts of it.
-        // Since we draw the backbone separately, we can't easily fade segments of the line in the main loop.
-        // But we can fade the rungs.
-        
-        // Let's calculate a "depth factor" for the rung.
-        // If the helix is viewed from the side, rungs are lines.
-        // If viewed from front, rungs are points? No, rungs are always horizontal.
-        // Let's fade rungs based on the Z of the *center* of the rung? Center Z is 0.
-        // Let's fade based on the Z of the *strand* at the connection point?
-        // Let's just use a simple sine wave based on rotation for the whole rung to simulate it passing through a light cone.
-        
-        // Actually, let's look at the Z of the "front-most" point of the rung.
-        // If the rung is at the very back, both points are at -R? No, opposite.
-        // Okay, let's just use a subtle pulsating opacity based on the rotation index.
-        
-        const depthFactor = 0.6 + 0.4 * Math.sin(angle); // Simple oscillation
-        // Better: Map Z (sin(angle)) which is -1 to 1.
-        // But since the rung connects +Z and -Z, it always has a point in front and a point in back.
-        // Let's just keep them solid. The 3D effect comes from the X/Y projection.
-        
-        const alpha = 0.8; 
-        
-        ctx.beginPath();
-        ctx.moveTo(x1, y);
-        ctx.lineTo(x2, y);
-        
-        // Color
-        ctx.strokeStyle = rung.pair.color;
-        ctx.lineWidth = 4 * scale; // Thicker in front
-        
-        // Glow
-        ctx.shadowBlur = 15 * scale;
-        ctx.shadowColor = rung.pair.glow;
-        
-        ctx.globalAlpha = alpha;
-        ctx.stroke();
-        ctx.globalAlpha = 1.0;
-        
-        // Draw little circles at connection points for detail
-        ctx.fillStyle = '#fff';
-        ctx.shadowBlur = 5;
-        ctx.beginPath();
-        ctx.arc(x1, y, 2 * scale, 0, Math.PI * 2);
-        ctx.arc(x2, y, 2 * scale, 0, Math.PI * 2);
-        ctx.fill();
+  if (replication.phase === 'unzipping') {
+    replication.unzipProgress += dt * 0.8;
+    if (replication.unzipProgress >= 1) {
+      replication.phase = 'rebuilding';
+      replication.rebuildProgress = 0;
     }
-
-    function loop() {
-        update();
-        draw();
-        requestAnimationFrame(loop);
+  } else if (replication.phase === 'rebuilding') {
+    replication.rebuildProgress += dt * 0.5;
+    if (replication.rebuildProgress >= 1) {
+      replication.phase = 'done';
+      // Update actual base pair types
+      for (let i = replication.startIdx; i < replication.endIdx; i++) {
+        basePairs[i].type = replication.newTypes[i - replication.startIdx];
+      }
+      setTimeout(() => {
+        replication.active = false;
+        replication.phase = 'idle';
+        replication.timer = 0;
+        replication.delay = 5 + Math.random() * 7;
+      }, 500);
     }
+  }
+}
 
-    // Start
-    init();
+let lastTime = performance.now();
+replication.delay = 3 + Math.random() * 3;
 
+function loop(now) {
+  const dt = Math.min(0.05, (now - lastTime) / 1000);
+  lastTime = now;
+  time += dt;
+
+  updateReplication(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
 </script>
 </body>
 </html>

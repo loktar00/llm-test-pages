@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wind Farm Dawn</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// Wind model
+function getWind(t) {
+  const base = 2.5 + 1.5 * Math.sin(t * 0.0008);
+  const gust = 1.2 * Math.sin(t * 0.0031) + 0.8 * Math.sin(t * 0.0073) + 0.5 * Math.sin(t * 0.0137);
+  return Math.max(0.3, base + gust);
+}
+
+// Sun cycle: 90 seconds
+function getSunAngle(t) {
+  const cycle = (t % 90000) / 90000;
+  return Math.PI * (cycle - 0.5);
+}
+
+function getSunPos(t) {
+  const angle = getSunAngle(t);
+  const x = W * 0.5 + Math.cos(angle) * W * 0.45;
+  const y = H * 0.65 - Math.sin(angle) * H * 0.55;
+  return { x, y, angle, aboveHorizon: Math.sin(angle) > -0.1 };
+}
+
+// Turbine definitions
+const turbines = [];
+const turbineDefs = [
+  { x: 0.08, y: 0.42, scale: 0.55 },
+  { x: 0.18, y: 0.38, scale: 0.65 },
+  { x: 0.28, y: 0.44, scale: 0.48 },
+  { x: 0.38, y: 0.36, scale: 0.72 },
+  { x: 0.48, y: 0.41, scale: 0.58 },
+  { x: 0.55, y: 0.35, scale: 0.78 },
+  { x: 0.65, y: 0.43, scale: 0.52 },
+  { x: 0.72, y: 0.37, scale: 0.68 },
+  { x: 0.80, y: 0.40, scale: 0.60 },
+  { x: 0.88, y: 0.45, scale: 0.45 },
+  { x: 0.95, y: 0.39, scale: 0.62 },
+  { x: 0.12, y: 0.33, scale: 0.82 },
+];
+
+turbineDefs.forEach(d => {
+  turbines.push({
+    x: d.x * W,
+    baseY: d.y * H,
+    scale: d.scale,
+    rotation: Math.random() * Math.PI * 2,
+    bladeLen: 50 * d.scale,
+    towerH: 120 * d.scale,
+    nacelleW: 14 * d.scale,
+    nacelleH: 8 * d.scale,
+  });
+});
+
+// Clouds
+const clouds = [];
+for (let i = 0; i < 12; i++) {
+  clouds.push({
+    x: Math.random() * W * 1.5 - W * 0.25,
+    y: H * 0.05 + Math.random() * H * 0.25,
+    w: 80 + Math.random() * 160,
+    h: 25 + Math.random() * 40,
+    speed: 0.15 + Math.random() * 0.25,
+    opacity: 0.3 + Math.random() * 0.5,
+    puffs: Array.from({ length: 4 + Math.floor(Math.random() * 4) }, () => ({
+      ox: (Math.random() - 0.5) * 0.8,
+      oy: (Math.random() - 0.5) * 0.5,
+      r: 0.3 + Math.random() * 0.5,
+    })),
+  });
+}
+
+// Wheat stalks
+const wheatCount = Math.min(600, Math.floor(W / 3));
+const wheatStalks = [];
+for (let i = 0; i < wheatCount; i++) {
+  wheatStalks.push({
+    x: (i / wheatCount) * W,
+    baseY: H * 0.72 + Math.random() * H * 0.28,
+    height: 15 + Math.random() * 25,
+    phase: Math.random() * Math.PI * 2,
+    thickness: 1 + Math.random() * 1.5,
+  });
+}
+
+// Access road
+const roadY = H * 0.68;
+const roadH = H * 0.03;
+
+// Truck
+let truckActive = false;
+let truckX = -80;
+let truckDir = 1;
+let truckTimer = 0;
+let truckInterval = 8000 + Math.random() * 12000;
+const truckW = 40;
+const truckH = 18;
+const truckSpeed = 1.2;
+let dustParticles = [];
+
+// Stars
+const stars = [];
+for (let i = 0; i < 120; i++) {
+  stars.push({
+    x: Math.random() * W,
+    y: Math.random() * H * 0.5,
+    r: 0.5 + Math.random() * 1.5,
+    twinkle: Math.random() * Math.PI * 2,
+  });
+}
+
+// Hill terrain points
+function getTerrainY(x) {
+  const base = H * 0.68;
+  const hill = Math.sin(x / W * Math.PI * 2.3) * H * 0.04 +
+               Math.sin(x / W * Math.PI * 5.1 + 1) * H * 0.015;
+  return base - hill;
+}
+
+function drawSky(t, sunAbove) {
+  const sunAngle = getSunAngle(t);
+  const sunHeight = Math.sin(sunAngle);
+  const dawnFactor = Math.max(0, Math.min(1, (sunHeight + 0.2) / 0.6));
+
+  let topR, topG, topB, botR, botG, botB;
+
+  if (dawnFactor <= 0) {
+    topR = 8; topG = 8; topB = 30;
+    botR = 15; botG = 12; botB = 35;
+  } else if (dawnFactor < 0.5) {
+    const f = dawnFactor * 2;
+    topR = 8 + f * 40; topG = 8 + f * 55; topB = 30 + f * 80;
+    botR = 15 + f * 120; botG = 12 + f * 80; botB = 35 + f * 60;
+  } else {
+    const f = (dawnFactor - 0.5) * 2;
+    topR = 48 + f * 52; topG = 63 + f * 120; topB = 110 + f * 90;
+    botR = 135 + f * 60; botG = 92 + f * 100; botB = 95 + f * 80;
+  }
+
+  const grad = ctx.createLinearGradient(0, 0, 0, H * 0.7);
+  grad.addColorStop(0, `rgb(${topR},${topG},${topB})`);
+  grad.addColorStop(1, `rgb(${botR},${botG},${botB})`);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+}
+
+function drawStars(t, sunHeight) {
+  const alpha = Math.max(0, 1 - (sunHeight + 0.3) * 3);
+  if (alpha <= 0) return;
+  stars.forEach(s => {
+    const tw = 0.5 + 0.5 * Math.sin(t * 0.003 + s.twinkle);
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,255,240,${alpha * tw})`;
+    ctx.fill();
+  });
+}
+
+function drawSun(t) {
+  const sp = getSunPos(t);
+  if (sp.y > H * 0.7) return;
+
+  const sunHeight = Math.sin(sp.angle);
+  const glow = Math.max(0, Math.min(1, (sunHeight + 0.15) / 0.4));
+
+  // Glow
+  const glowR = 60 + glow * 40;
+  const grad = ctx.createRadialGradient(sp.x, sp.y, 0, sp.x, sp.y, glowR);
+  if (glow < 0.5) {
+    grad.addColorStop(0, `rgba(255,180,80,${0.4 + glow})`);
+    grad.addColorStop(0.5, `rgba(255,120,40,${0.15 + glow * 0.2})`);
+  } else {
+    grad.addColorStop(0, `rgba(255,255,200,${0.6 + glow * 0.2})`);
+    grad.addColorStop(0.5, `rgba(255,220,120,${0.2 + glow * 0.1})`);
+  }
+  grad.addColorStop(1, 'rgba(255,200,100,0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(sp.x - glowR, sp.y - glowR, glowR * 2, glowR * 2);
+
+  // Sun disk
+  ctx.beginPath();
+  ctx.arc(sp.x, sp.y, 18, 0, Math.PI * 2);
+  const sunBright = Math.min(1, glow * 2);
+  ctx.fillStyle = `rgba(255,${200 + sunBright * 55},${150 + sunBright * 100},${0.7 + sunBright * 0.3})`;
+  ctx.fill();
+}
+
+function drawClouds(t, wind) {
+  clouds.forEach(c => {
+    c.x += wind * c.speed * 0.5;
+    if (c.x > W + c.w) c.x = -c.w * 1.5;
+
+    const sunHeight = Math.sin(getSunAngle(t));
+    const brightness = Math.max(0.3, (sunHeight + 0.3) * 1.5);
+    const r = Math.min(255, Math.floor(200 * brightness + 55));
+    const g = Math.min(255, Math.floor(200 * brightness + 55));
+    const b = Math.min(255, Math.floor(210 * brightness + 45));
+
+    ctx.fillStyle = `rgba(${r},${g},${b},${c.opacity})`;
+    c.puffs.forEach(p => {
+      ctx.beginPath();
+      ctx.ellipse(
+        c.x + p.ox * c.w,
+        c.y + p.oy * c.h,
+        c.w * p.r * 0.5,
+        c.h * p.r * 0.5,
+        0, 0, Math.PI * 2
+      );
+      ctx.fill();
+    });
+  });
+}
+
+function drawTerrain(t) {
+  const sunHeight = Math.sin(getSunAngle(t));
+  const green = Math.max(30, Math.floor(60 + sunHeight * 80));
+  const brown = Math.max(20, Math.floor(40 + sunHeight * 40));
+
+  // Far hills
+  ctx.beginPath();
+  ctx.moveTo(0, H);
+  for (let x = 0; x <= W; x += 4) {
+    const y = getTerrainY(x) - 15 + Math.sin(x / W * Math.PI * 1.7 + 2) * H * 0.02;
+    ctx.lineTo(x, y);
+  }
+  ctx.lineTo(W, H);
+  ctx.closePath();
+  const hillGrad = ctx.createLinearGradient(0, H * 0.55, 0, H * 0.75);
+  hillGrad.addColorStop(0, `rgb(${green + 20},${green + 30},${brown})`);
+  hillGrad.addColorStop(1, `rgb(${green},${green + 10},${brown - 10})`);
+  ctx.fillStyle = hillGrad;
+  ctx.fill();
+
+  // Near ground
+  ctx.beginPath();
+  ctx.moveTo(0, H);
+  for (let x = 0; x <= W; x += 4) {
+    ctx.lineTo(x, getTerrainY(x));
+  }
+  ctx.lineTo(W, H);
+  ctx.closePath();
+  const gndGrad = ctx.createLinearGradient(0, H * 0.65, 0, H);
+  gndGrad.addColorStop(0, `rgb(${green + 10},${green + 20},${brown - 5})`);
+  gndGrad.addColorStop(0.3, `rgb(${green - 5},${green + 10},${brown - 15})`);
+  gndGrad.addColorStop(1, `rgb(${green - 20},${green - 10},${brown - 25})`);
+  ctx.fillStyle = gndGrad;
+  ctx.fill();
+}
+
+function drawRoad(t) {
+  ctx.beginPath();
+  ctx.moveTo(0, roadY);
+  for (let x = 0; x <= W; x += 6) {
+    ctx.lineTo(x, roadY + Math.sin(x / 120) * 3);
+  }
+  ctx.lineTo(W, roadY + roadH);
+  for (let x = W; x >= 0; x -= 6) {
+    ctx.lineTo(x, roadY + roadH + Math.sin(x / 120) * 3);
+  }
+  ctx.closePath();
+  ctx.fillStyle = '#5a5a50';
+  ctx.fill();
+
+  // Road line
+  ctx.beginPath();
+  for (let x = 0; x <= W; x += 4) {
+    const y = roadY + roadH * 0.5 + Math.sin(x / 120) * 3;
+    if (x === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.strokeStyle = 'rgba(200,200,180,0.3)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+
+function drawTurbine(turb, t, wind) {
+  const { x, baseY, scale, rotation, bladeLen, towerH, nacelleW, nacelleH } = turb;
+  const topY = baseY - towerH;
+
+  // Shadow
+  const sunAngle = getSunAngle(t);
+  const shadowLen = towerH * Math.max(0.5, Math.cos(sunAngle) * 2);
+  const shadowDir = Math.cos(sunAngle) > 0 ? 1 : -1;
+  ctx.beginPath();
+  ctx.moveTo(x, baseY);
+  ctx.lineTo(x + shadowDir * shadowLen, baseY + 5);
+  ctx.lineTo(x + shadowDir * shadowLen * 0.8, baseY + 2);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(0,0,0,0.15)';
+  ctx.fill();
+
+  // Tower
+  ctx.beginPath();
+  ctx.moveTo(x - 3 * scale, baseY);
+  ctx.lineTo(x - 1.5 * scale, topY + 5);
+  ctx.lineTo(x + 1.5 * scale, topY + 5);
+  ctx.lineTo(x + 3 * scale, baseY);
+  ctx.closePath();
+  ctx.fillStyle = '#e8e8e0';
+  ctx.fill();
+  ctx.strokeStyle = '#ccc';
+  ctx.lineWidth = 0.5;
+  ctx.stroke();
+
+  // Nacelle
+  ctx.fillStyle = '#ddd';
+  ctx.fillRect(x - nacelleW / 2, topY - nacelleH / 2, nacelleW, nacelleH);
+  ctx.strokeStyle = '#bbb';
+  ctx.lineWidth = 0.5;
+  ctx.strokeRect(x - nacelleW / 2, topY - nacelleH / 2, nacelleW, nacelleH);
+
+  // Hub
+  ctx.beginPath();
+  ctx.arc(x, topY, 3 * scale, 0, Math.PI * 2);
+  ctx.fillStyle = '#aaa';
+  ctx.fill();
+
+  // Blades
+  const bladeSpeed = wind * 0.003 * scale;
+  const rot = rotation + t * bladeSpeed;
+
+  for (let i = 0; i < 3; i++) {
+    const angle = rot + (i * Math.PI * 2) / 3;
+    const bx = x + Math.cos(angle) * bladeLen;
+    const by = topY + Math.sin(angle) * bladeLen;
+
+    ctx.beginPath();
+    ctx.moveTo(x, topY);
+    const cp1x = x + Math.cos(angle - 0.15) * bladeLen * 0.4;
+    const cp1y = topY + Math.sin(angle - 0.15) * bladeLen * 0.4;
+    const cp2x = x + Math.cos(angle + 0.1) * bladeLen * 0.7;
+    const cp2y = topY + Math.sin(angle + 0.1) * bladeLen * 0.7;
+    ctx.quadraticCurveTo(cp1x, cp1y, bx, by);
+    ctx.quadraticCurveTo(cp2x, cp2y, x, topY);
+    ctx.fillStyle = 'rgba(240,240,235,0.9)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(200,200,195,0.5)';
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+  }
+
+  // Warning light at dusk
+  const sunHeight = Math.sin(sunAngle);
+  if (sunHeight < 0.15) {
+    const blinkPhase = t * 0.004;
+    const blink = Math.sin(blinkPhase) > 0.3 ? 1 : 0.2;
+    const lightAlpha = Math.min(1, (0.15 - sunHeight) * 5) * blink;
+    if (lightAlpha > 0.1) {
+      ctx.beginPath();
+      ctx.arc(x, topY - nacelleH / 2 - 2, 3, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(255,30,30,${lightAlpha})`;
+      ctx.fill();
+      // Glow
+      const glowGrad = ctx.createRadialGradient(x, topY - nacelleH / 2 - 2, 0, x, topY - nacelleH / 2 - 2, 15);
+      glowGrad.addColorStop(0, `rgba(255,50,50,${lightAlpha * 0.4})`);
+      glowGrad.addColorStop(1, 'rgba(255,50,50,0)');
+      ctx.fillStyle = glowGrad;
+      ctx.fillRect(x - 15, topY - nacelleH / 2 - 17, 30, 30);
+    }
+  }
+}
+
+function drawWheat(t, wind) {
+  const sunHeight = Math.sin(getSunAngle(t));
+  const golden = Math.max(0.3, sunHeight * 0.8 + 0.2);
+
+  wheatStalks.forEach(s => {
+    const wave = Math.sin(s.x * 0.02 - t * 0.002 * wind + s.phase) * wind * 4;
+    const wave2 = Math.sin(s.x * 0.008 - t * 0.0012 * wind + s.phase * 2) * wind * 2;
+    const totalWave = wave + wave2;
+
+    const topX = s.x + totalWave;
+    const topY = s.baseY - s.height;
+
+    const r = Math.floor(160 * golden + 40);
+    const g = Math.floor(130 * golden + 20);
+    const b = Math.floor(40 * golden + 10);
+
+    ctx.beginPath();
+    ctx.moveTo(s.x, s.baseY);
+    ctx.quadraticCurveTo(s.x + totalWave * 0.5, s.baseY - s.height * 0.5, topX, topY);
+    ctx.strokeStyle = `rgb(${r},${g},${b})`;
+    ctx.lineWidth = s.thickness;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+
+    // Head of wheat
+    ctx.beginPath();
+    ctx.ellipse(topX, topY - 2, 1.5, 3, totalWave * 0.03, 0, Math.PI * 2);
+    ctx.fillStyle = `rgb(${r + 15},${g + 10},${b})`;
+    ctx.fill();
+  });
+}
+
+function drawTruck(t) {
+  truckTimer += 16;
+  if (!truckActive && truckTimer > truckInterval) {
+    truckActive = true;
+    truckDir = Math.random() > 0.5 ? 1 : -1;
+    truckX = truckDir > 0 ? -truckW : W + truckW;
+    truckTimer = 0;
+    truckInterval = 10000 + Math.random() * 15000;
+    dustParticles = [];
+  }
+
+  if (truckActive) {
+    truckX += truckSpeed * truckDir;
+    if ((truckDir > 0 && truckX > W + truckW) || (truckDir < 0 && truckX < -truckW)) {
+      truckActive = false;
+      dustParticles = [];
+    }
+
+    const ty = roadY + roadH * 0.3 + Math.sin(truckX / 120) * 3;
+
+    // Dust particles
+    if (Math.random() > 0.3) {
+      dustParticles.push({
+        x: truckX - truckDir * truckW * 0.4,
+        y: ty + truckH * 0.6 + Math.random() * 3,
+        vx: -truckDir * (0.3 + Math.random() * 0.5),
+        vy: -0.2 - Math.random() * 0.3,
+        life: 1,
+        r: 2 + Math.random() * 4,
+      });
+    }
+
+    dustParticles.forEach(p => {
+      p.x += p.vx;
+      p.y += p.vy;
+      p.life -= 0.015;
+      p.r += 0.1;
+    });
+    dustParticles = dustParticles.filter(p => p.life > 0);
+
+    dustParticles.forEach(p => {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(180,160,130,${p.life * 0.3})`;
+      ctx.fill();
+    });
+
+    // Truck body
+    ctx.fillStyle = '#4a7a4a';
+    ctx.fillRect(truckX - truckW / 2, ty - truckH, truckW, truckH * 0.7);
+    // Cab
+    ctx.fillStyle = '#3a6a3a';
+    const cabX = truckDir > 0 ? truckX + truckW * 0.15 : truckX - truckW * 0.45;
+    ctx.fillRect(cabX, ty - truckH - 4, truckW * 0.35, truckH * 0.8);
+    // Window
+    ctx.fillStyle = '#8ab';
+    const winX = truckDir > 0 ? cabX + truckW * 0.2 : cabX + 2;
+    ctx.fillRect(winX, ty - truckH - 2, truckW * 0.12, truckH * 0.35);
+    // Wheels
+    ctx.fillStyle = '#222';
+    ctx.beginPath();
+    ctx.arc(truckX - truckW * 0.3, ty + 1, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(truckX + truckW * 0.3, ty + 1, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawForegroundGrass(t, wind) {
+  const sunHeight = Math.sin(getSunAngle(t));
+  const green = Math.max(30, Math.floor(50 + sunHeight * 70));
+
+  for (let i = 0; i < 80; i++) {
+    const x = (i / 80) * W + Math.sin(i * 7.3) * 15;
+    const baseY = H * 0.92 + Math.sin(x / W * Math.PI * 3) * 8;
+    const h = 8 + Math.sin(i * 3.7) * 5;
+    const wave = Math.sin(x * 0.03 - t * 0.003 * wind + i) * wind * 3;
+
+    ctx.beginPath();
+    ctx.moveTo(x, baseY);
+    ctx.quadraticCurveTo(x + wave * 0.5, baseY - h * 0.5, x + wave, baseY - h);
+    ctx.strokeStyle = `rgb(${green - 15},${green + 10},${green - 30})`;
+    ctx.lineWidth = 1.5;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+  }
+}
+
+function drawShadows(t) {
+  const sunAngle = getSunAngle(t);
+  const sunHeight = Math.sin(sunAngle);
+  if (sunHeight <= 0) return;
+
+  const shadowAlpha = Math.min(0.25, sunHeight * 0.3);
+  const shadowDir = Math.cos(sunAngle) > 0 ? 1 : -1;
+
+  turbines.forEach(turb => {
+    const topY = turb.baseY - turb.towerH;
+    const shadowLen = turb.towerH * Math.max(0.3, Math.cos(sunAngle) * 1.5);
+    ctx.beginPath();
+    ctx.moveTo(turb.x, turb.baseY);
+    ctx.lineTo(turb.x + shadowDir * shadowLen, turb.baseY + 8);
+    ctx.lineTo(turb.x + shadowDir * shadowLen * 0.6, turb.baseY + 3);
+    ctx.closePath();
+    ctx.fillStyle = `rgba(0,0,0,${shadowAlpha})`;
+    ctx.fill();
+  });
+}
+
+let lastTime = 0;
+function animate(timestamp) {
+  const t = timestamp || 0;
+  const wind = getWind(t);
+
+  ctx.clearRect(0, 0, W, H);
+
+  drawSky(t, true);
+  drawStars(t, Math.sin(getSunAngle(t)));
+  drawSun(t);
+  drawClouds(t, wind);
+  drawTerrain(t);
+  drawShadows(t);
+  drawRoad(t);
+
+  // Sort turbines by distance (scale) for proper layering
+  const sorted = [...turbines].sort((a, b) => a.scale - b.scale);
+  sorted.forEach(turb => drawTurbine(turb, t, wind));
+
+  drawWheat(t, wind);
+  drawTruck(t);
+  drawForegroundGrass(t, wind);
+
+  // Vignette
+  const vigGrad = ctx.createRadialGradient(W / 2, H / 2, W * 0.3, W / 2, H / 2, W * 0.75);
+  vigGrad.addColorStop(0, 'rgba(0,0,0,0)');
+  vigGrad.addColorStop(1, 'rgba(0,0,0,0.35)');
+  ctx.fillStyle = vigGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  requestAnimationFrame(animate);
+}
+
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>

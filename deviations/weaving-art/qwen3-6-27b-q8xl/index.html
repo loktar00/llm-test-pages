@@ -1,370 +1,433 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Generative Weaving</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            background-color: #1a1a1a;
-            overflow: hidden;
-        }
-        canvas {
-            display: block;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Generative Weaving Art</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a1a; overflow: hidden; }
+canvas { display: block; }
+</style>
 </head>
 <body>
-    <canvas id="loom"></canvas>
-    <script>
-        /**
-         * Generative Weaving
-         * A procedural tapestry generator that visualizes the weaving process.
-         */
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
 
-        const canvas = document.getElementById('loom');
-        const ctx = canvas.getContext('2d', { alpha: false });
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', () => { resize(); initTapestry(); });
 
-        // Configuration
-        const CONFIG = {
-            threadSize: 6,          // Size of one thread in pixels
-            warpColor: '#e0e0e0',   // Base color for vertical threads
-            weftSpeed: 1.5,         // Pixels per frame for shuttle
-            scrollSpeed: 4,         // Pixels per frame for scrolling
-            patternLength: 20,      // Length of a pattern segment in threads
-            totalTapestryLength: 100 // How many rows before scrolling
-        };
+const THREAD_COUNT = Math.min(120, Math.floor(W / 8));
+const THREAD_SPACING = Math.max(4, W / THREAD_COUNT);
+const ROW_HEIGHT = THREAD_SPACING;
+const TAPESRY_ROWS = Math.floor(H / ROW_HEIGHT) + 20;
 
-        let width, height;
-        let cols, rows;
-        
-        // State
-        let state = {
-            warp: [],           // Array of vertical threads
-            weft: [],           // Array of horizontal rows being built
-            shuttle: {
-                x: 0,
-                y: 0,
-                dir: 1,         // 1 = right, -1 = left
-                color: '#000',
-                active: false
-            },
-            scrollOffset: 0,
-            tapestryProgress: 0,
-            phase: 'setup',     // setup, weaving, scrolling
-            patterns: [],       // Generated pattern data
-            hueBase: 0
-        };
+let warpThreads = [];
+let weftRows = [];
+let palette = [];
+let patternType = '';
+let shuttleX = 0;
+let shuttleDir = 1;
+let currentRow = 0;
+let phase = 'warp';
+let warpProgress = 0;
+let scrollY = 0;
+let scrollSpeed = 0;
+let scrollPhase = false;
+let tapestryOffset = 0;
+let shuttleBobbin = null;
+let shuttleTrail = [];
+let animTime = 0;
+let patternSeed = 0;
+let warpBaseColor = null;
+let weavePattern = [];
+let rowColors = [];
 
-        // --- Utilities ---
+function hsl(h, s, l, a = 1) {
+  return `hsla(${h % 360}, ${s}%, ${l}%, ${a})`;
+}
 
-        function resize() {
-            width = canvas.width = window.innerWidth;
-            height = canvas.height = window.innerHeight;
-            cols = Math.ceil(width / CONFIG.threadSize);
-            rows = Math.ceil(height / CONFIG.threadSize);
-            initLoom();
+function generatePalette() {
+  const hueBase = Math.random() * 360;
+  const schemes = ['analogous', 'complementary', 'triadic', 'split', 'tetradic'];
+  const scheme = schemes[Math.floor(Math.random() * schemes.length)];
+  const colors = [];
+  const satBase = 40 + Math.random() * 35;
+  const litBase = 35 + Math.random() * 25;
+
+  switch (scheme) {
+    case 'analogous':
+      for (let i = 0; i < 6; i++) colors.push({ h: hueBase + i * 25, s: satBase + Math.random() * 15, l: litBase + Math.random() * 15 });
+      break;
+    case 'complementary':
+      for (let i = 0; i < 3; i++) colors.push({ h: hueBase + i * 15, s: satBase, l: litBase + i * 5 });
+      for (let i = 0; i < 3; i++) colors.push({ h: hueBase + 180 + i * 15, s: satBase, l: litBase + i * 5 });
+      break;
+    case 'triadic':
+      for (let i = 0; i < 2; i++) colors.push({ h: hueBase + i * 10, s: satBase, l: litBase });
+      for (let i = 0; i < 2; i++) colors.push({ h: hueBase + 120 + i * 10, s: satBase, l: litBase });
+      for (let i = 0; i < 2; i++) colors.push({ h: hueBase + 240 + i * 10, s: satBase, l: litBase });
+      break;
+    case 'split':
+      for (let i = 0; i < 2; i++) colors.push({ h: hueBase + i * 10, s: satBase, l: litBase });
+      for (let i = 0; i < 2; i++) colors.push({ h: hueBase + 150 + i * 10, s: satBase, l: litBase });
+      for (let i = 0; i < 2; i++) colors.push({ h: hueBase + 210 + i * 10, s: satBase, l: litBase });
+      break;
+    case 'tetradic':
+      for (let i = 0; i < 2; i++) colors.push({ h: hueBase + i * 10, s: satBase, l: litBase });
+      for (let i = 0; i < 2; i++) colors.push({ h: hueBase + 90 + i * 10, s: satBase, l: litBase });
+      for (let i = 0; i < 2; i++) colors.push({ h: hueBase + 180 + i * 10, s: satBase, l: litBase });
+      for (let i = 0; i < 2; i++) colors.push({ h: hueBase + 270 + i * 10, s: satBase, l: litBase });
+      break;
+  }
+  return colors;
+}
+
+function generatePattern() {
+  const types = ['stripes', 'diamonds', 'chevrons', 'twill', 'herringbone'];
+  patternType = types[Math.floor(Math.random() * types.length)];
+  patternSeed = Math.random() * 1000;
+
+  weavePattern = [];
+  rowColors = [];
+
+  for (let row = 0; row < TAPESRY_ROWS; row++) {
+    const rowData = [];
+    for (let col = 0; col < THREAD_COUNT; col++) {
+      let over = (row + col) % 2 === 0;
+      let colorIdx = 0;
+
+      switch (patternType) {
+        case 'stripes': {
+          const bandWidth = 8 + Math.floor(Math.random() * 12);
+          const band = Math.floor(row / bandWidth);
+          colorIdx = band % palette.length;
+          over = (row + col) % 2 === 0;
+          break;
         }
-
-        function randomRange(min, max) {
-            return Math.floor(Math.random() * (max - min + 1)) + min;
+        case 'diamonds': {
+          const dSize = 10 + Math.floor(Math.random() * 8);
+          const cx = col;
+          const cy = row;
+          const dist = Math.abs(cx % (dSize * 2) - dSize) + Math.abs(cy % (dSize * 2) - dSize);
+          const inside = dist < dSize;
+          colorIdx = inside ? (Math.floor(patternSeed * 10) % palette.length) : ((Math.floor(patternSeed * 7) + 1) % palette.length);
+          over = inside ? (col % 2 === 0) : (row % 2 === 0);
+          break;
         }
-
-        // HSL to Hex for easier manipulation
-        function hslToHex(h, s, l) {
-            l /= 100;
-            const a = s * Math.min(l, 1 - l) / 100;
-            const f = n => {
-                const k = (n + h / 30) % 12;
-                const color = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
-                return Math.round(255 * color).toString(16).padStart(2, '0');
-            };
-            return `#${f(0)}${f(8)}${f(4)}`;
+        case 'chevrons': {
+          const cPeriod = 16 + Math.floor(Math.random() * 8);
+          const cPhase = (row * 0.5 + patternSeed * 3) % cPeriod;
+          const chevronVal = Math.abs((col % cPeriod) - cPeriod / 2) - (row % cPeriod);
+          const inChevron = chevronVal < cPeriod / 4 && chevronVal > -cPeriod / 4;
+          colorIdx = inChevron ? (Math.floor(patternSeed * 3) % palette.length) : ((Math.floor(patternSeed * 5) + 2) % palette.length);
+          over = (row + col) % 2 === 0;
+          break;
         }
-
-        // --- Pattern Generators ---
-
-        // Returns an array of booleans (true = weft over warp) for a single row
-        function generatePatternRow(x, y, type) {
-            const gx = x / CONFIG.threadSize;
-            const gy = y / CONFIG.threadSize;
-            
-            switch (type) {
-                case 'plain':
-                    // Simple checkerboard
-                    return (Math.floor(gx) + Math.floor(gy)) % 2 === 0;
-                
-                case 'stripe':
-                    // Vertical stripes
-                    return Math.floor(gx) % 4 < 2;
-
-                case 'diamond':
-                    // Diamond pattern
-                    const cx = width / 2;
-                    const cy = (y + state.scrollOffset); // Relative to tapestry start
-                    const dist = Math.abs(gx - (cx/CONFIG.threadSize)) + Math.abs(gy - (cy/CONFIG.threadSize));
-                    return Math.floor(dist) % 2 === 0;
-
-                case 'chevron':
-                    // V-shape
-                    const shift = Math.sin(gy * 0.1) * 5;
-                    return (gx + shift) % 4 < 2;
-                
-                case 'herringbone':
-                    // Zig-zag
-                    const rowParity = Math.floor(gy) % 2;
-                    const colParity = Math.floor(gx) % 2;
-                    const zig = (Math.floor(gy) % 4 < 2) ? 1 : -1;
-                    return (colParity + (Math.floor(gx/2) % 2) * zig) % 2 === 0;
-
-                default:
-                    return (Math.floor(gx) + Math.floor(gy)) % 2 === 0;
-            }
+        case 'twill': {
+          const tShift = Math.floor(row / 2) % 4;
+          over = (col + tShift) % 2 === 0;
+          const twillBand = Math.floor(row / 12);
+          colorIdx = twillBand % palette.length;
+          break;
         }
-
-        // --- Core Logic ---
-
-        function initLoom() {
-            // Reset State
-            state.weft = [];
-            state.warp = [];
-            state.scrollOffset = 0;
-            state.tapestryProgress = 0;
-            state.phase = 'weaving';
-            state.hueBase = Math.random() * 360;
-            
-            // Generate a new palette
-            const palette = [];
-            for(let i=0; i<5; i++) {
-                palette.push(hslToHex(
-                    (state.hueBase + i * 30) % 360, 
-                    randomRange(60, 80), 
-                    randomRange(40, 60)
-                ));
-            }
-            state.palette = palette;
-
-            // Initialize Warp (Vertical threads)
-            // We don't draw them yet, just set up the grid logic
-            for (let i = 0; i < cols; i++) {
-                state.warp.push({ x: i * CONFIG.threadSize });
-            }
-
-            // Initialize Shuttle
-            state.shuttle.x = 0;
-            state.shuttle.y = 0;
-            state.shuttle.dir = 1;
-            state.shuttle.active = true;
-            state.shuttle.color = state.palette[0];
-            
-            // Pick random patterns for this tapestry
-            const types = ['plain', 'stripe', 'chevron', 'diamond', 'herringbone'];
-            state.currentPatternType = types[randomRange(0, types.length - 1)];
+        case 'herringbone': {
+          const hPeriod = 20;
+          const hDir = Math.floor(row / 8) % 2;
+          const hVal = hDir === 0 ? col + row : col - row;
+          const hNorm = ((hVal % hPeriod) + hPeriod) % hPeriod;
+          over = hNorm < hPeriod / 2;
+          colorIdx = Math.floor(row / 15) % palette.length;
+          break;
         }
+      }
 
-        function update() {
-            if (state.phase === 'weaving') {
-                updateShuttle();
-            } else if (state.phase === 'scrolling') {
-                updateScroll();
-            }
-        }
+      rowData.push({ over, colorIdx });
+    }
+    weavePattern.push(rowData);
+    rowColors.push(weavePattern[row][Math.floor(THREAD_COUNT / 2)].colorIdx);
+  }
+}
 
-        function updateShuttle() {
-            const s = state.shuttle;
-            
-            // Move Shuttle
-            s.x += CONFIG.weftSpeed * s.dir;
+function initTapestry() {
+  palette = generatePalette();
+  warpBaseColor = { h: (palette[0].h + 180) % 360, s: 15 + Math.random() * 10, l: 70 + Math.random() * 15 };
 
-            // Check bounds
-            if (s.x >= width && s.dir === 1) {
-                s.dir = -1;
-                s.x = width;
-                nextRow();
-            } else if (s.x <= 0 && s.dir === -1) {
-                s.dir = 1;
-                s.x = 0;
-                nextRow();
-            }
-        }
+  warpThreads = [];
+  for (let i = 0; i < THREAD_COUNT; i++) {
+    const variation = (Math.random() - 0.5) * 10;
+    warpThreads.push({
+      x: i * THREAD_SPACING + THREAD_SPACING / 2,
+      h: warpBaseColor.h + variation,
+      s: warpBaseColor.s + (Math.random() - 0.5) * 5,
+      l: warpBaseColor.l + (Math.random() - 0.5) * 8,
+      thickness: THREAD_SPACING * 0.35 + Math.random() * THREAD_SPACING * 0.1
+    });
+  }
 
-        function nextRow() {
-            // Finalize the current row that was just "woven"
-            // We create a row object representing the finished weft
-            const rowY = state.tapestryProgress * CONFIG.threadSize;
-            const rowColor = state.palette[state.tapestryProgress % state.palette.length];
-            
-            // Generate the weave logic for this row
-            const weaveData = [];
-            for(let x=0; x<width; x+=CONFIG.threadSize) {
-                // Determine if weft is OVER warp
-                const isOver = generatePatternRow(x, rowY, state.currentPatternType);
-                weaveData.push({ x: x, over: isOver });
-            }
+  generatePattern();
+  weftRows = [];
+  currentRow = 0;
+  shuttleX = 0;
+  shuttleDir = 1;
+  phase = 'warp';
+  warpProgress = 0;
+  scrollPhase = false;
+  scrollY = 0;
+  tapestryOffset = 0;
+  shuttleTrail = [];
+}
 
-            state.weft.push({
-                y: rowY,
-                color: rowColor,
-                data: weaveData
-            });
+function drawWarp() {
+  const progress = Math.min(1, warpProgress);
+  const drawRows = Math.floor(TAPESRY_ROWS * progress);
 
-            // Move to next row
-            state.tapestryProgress++;
-            state.shuttle.y = state.tapestryProgress * CONFIG.threadSize;
-            
-            // Cycle pattern occasionally
-            if (state.tapestryProgress % CONFIG.patternLength === 0) {
-                 const types = ['plain', 'stripe', 'chevron', 'diamond', 'herringbone'];
-                 state.currentPatternType = types[randomRange(0, types.length - 1)];
-            }
+  for (let i = 0; i < THREAD_COUNT; i++) {
+    const wt = warpThreads[i];
+    ctx.beginPath();
+    ctx.strokeStyle = hsl(wt.h, wt.s, wt.l, 0.9);
+    ctx.lineWidth = wt.thickness;
+    ctx.moveTo(wt.x, tapestryOffset);
+    ctx.lineTo(wt.x, tapestryOffset + drawRows * ROW_HEIGHT);
+    ctx.stroke();
 
-            // Check if tapestry is full
-            if (state.tapestryProgress * CONFIG.threadSize > height) {
-                state.phase = 'scrolling';
-            }
-        }
+    // subtle shine
+    ctx.beginPath();
+    ctx.strokeStyle = hsl(wt.h, wt.s, wt.l + 15, 0.15);
+    ctx.lineWidth = wt.thickness * 0.3;
+    ctx.moveTo(wt.x - wt.thickness * 0.15, tapestryOffset);
+    ctx.lineTo(wt.x - wt.thickness * 0.15, tapestryOffset + drawRows * ROW_HEIGHT);
+    ctx.stroke();
+  }
+}
 
-        function updateScroll() {
-            state.scrollOffset += CONFIG.scrollSpeed;
-            
-            // Remove rows that have scrolled off screen
-            if (state.weft.length > 0 && state.weft[0].y - state.scrollOffset < -CONFIG.threadSize * 2) {
-                state.weft.shift();
-            }
+function drawWeftRow(rowIdx, partial = false) {
+  if (rowIdx >= weavePattern.length) return;
+  const rowData = weavePattern[rowIdx];
+  const y = rowIdx * ROW_HEIGHT + tapestryOffset;
 
-            // Reset if fully scrolled (just for demo loop, though technically we keep going)
-            if (state.weft.length === 0 && state.scrollOffset > height * 2) {
-                initLoom();
-            }
-        }
+  for (let col = 0; col < THREAD_COUNT; col++) {
+    if (partial && col > Math.floor((shuttleX / W) * THREAD_COUNT)) break;
 
-        // --- Rendering ---
+    const cell = rowData[col];
+    const wt = warpThreads[col];
+    const color = palette[cell.colorIdx];
+    const x = col * THREAD_SPACING;
+    const halfW = THREAD_SPACING / 2;
 
-        function draw() {
-            // Clear background
-            ctx.fillStyle = '#111';
-            ctx.fillRect(0, 0, width, height);
+    if (cell.over) {
+      // Weft goes OVER warp
+      ctx.fillStyle = hsl(color.h, color.s, color.l, 0.92);
+      ctx.fillRect(x + 1, y + 1, THREAD_SPACING - 2, ROW_HEIGHT - 2);
 
-            // Apply scroll transform
-            ctx.save();
-            ctx.translate(0, -state.scrollOffset);
+      // thread texture
+      ctx.fillStyle = hsl(color.h, color.s, color.l + 12, 0.25);
+      ctx.fillRect(x + 2, y + ROW_HEIGHT * 0.3, THREAD_SPACING - 4, ROW_HEIGHT * 0.15);
 
-            // 1. Draw Warp (Vertical Threads)
-            // These are drawn first, so they appear UNDER the weft when weft is over
-            ctx.fillStyle = CONFIG.warpColor;
-            for (let i = 0; i < cols; i++) {
-                const x = i * CONFIG.threadSize;
-                // Draw a full vertical line
-                // Optimization: Only draw visible part if we were doing infinite scroll, 
-                // but here we just draw the height of the canvas + scroll
-                ctx.fillRect(x, 0, CONFIG.threadSize - 1, height + CONFIG.threadSize * 2);
-            }
+      // shadow on warp below
+      ctx.fillStyle = hsl(color.h, color.s, color.l - 15, 0.12);
+      ctx.fillRect(x + 1, y + ROW_HEIGHT - 2, THREAD_SPACING - 2, 2);
+    } else {
+      // Weft goes UNDER warp — draw weft behind (subtle tint)
+      ctx.fillStyle = hsl(color.h, color.s, color.l, 0.15);
+      ctx.fillRect(x + 1, y + 1, THREAD_SPACING - 2, ROW_HEIGHT - 2);
 
-            // 2. Draw Completed Weft Rows
-            for (let row of state.weft) {
-                drawWeftRow(row.y, row.color, row.data);
-            }
+      // warp shadow
+      ctx.fillStyle = hsl(wt.h, wt.s, wt.l - 10, 0.08);
+      ctx.fillRect(x + halfW - 1, y + 1, 2, ROW_HEIGHT - 2);
+    }
+  }
+}
 
-            // 3. Draw Active Shuttle / Current Row
-            if (state.phase === 'weaving') {
-                drawActiveWeft();
-            }
+function drawShuttle() {
+  if (phase !== 'weft') return;
 
-            ctx.restore();
+  const y = currentRow * ROW_HEIGHT + tapestryOffset;
+  const color = palette[rowColors[currentRow]];
 
-            requestAnimationFrame(loop);
-        }
+  // Shuttle body
+  const sw = 18, sh = 8;
+  const sx = shuttleX - sw / 2;
 
-        function drawWeftRow(y, color, data) {
-            ctx.fillStyle = color;
-            
-            // Draw segments based on over/under logic
-            for (let i = 0; i < data.length; i++) {
-                const seg = data[i];
-                
-                if (seg.over) {
-                    // Weft is OVER Warp
-                    ctx.fillRect(seg.x, y, CONFIG.threadSize - 1, CONFIG.threadSize - 1);
-                } else {
-                    // Weft is UNDER Warp
-                    // We draw a shadow to simulate depth
-                    ctx.fillStyle = adjustColor(color, -40); // Darken
-                    ctx.fillRect(seg.x, y + 2, CONFIG.threadSize - 1, CONFIG.threadSize - 3);
-                    ctx.fillStyle = color; // Reset
-                }
-            }
-        }
+  // Glow
+  const grad = ctx.createRadialGradient(shuttleX, y, 0, shuttleX, y, 25);
+  grad.addColorStop(0, hsl(color.h, color.s, color.l, 0.3));
+  grad.addColorStop(1, 'transparent');
+  ctx.fillStyle = grad;
+  ctx.fillRect(shuttleX - 25, y - 25, 50, 50);
 
-        function drawActiveWeft() {
-            const s = state.shuttle;
-            const y = s.y;
-            
-            // We need to draw the weft thread up to the shuttle position
-            // We calculate the over/under logic on the fly for the partial row
-            
-            // Determine the X range to draw based on direction
-            let startX = 0;
-            let endX = s.x;
-            
-            // If moving left, we are filling from right to left, but visually we just want the line up to x
-            // The logic is simpler: Just draw segments from 0 to s.x
-            
-            // To make it look like a continuous thread, we draw the segments
-            // We must ensure we use the same logic as nextRow()
-            
-            for (let x = 0; x < s.x; x += CONFIG.threadSize) {
-                const isOver = generatePatternRow(x, y, state.currentPatternType);
-                
-                if (isOver) {
-                    ctx.fillStyle = s.color;
-                    ctx.fillRect(x, y, CONFIG.threadSize - 1, CONFIG.threadSize - 1);
-                } else {
-                    // Under
-                    ctx.fillStyle = adjustColor(s.color, -40);
-                    ctx.fillRect(x, y + 2, CONFIG.threadSize - 1, CONFIG.threadSize - 3);
-                }
-            }
+  // Shuttle shape
+  ctx.save();
+  ctx.translate(shuttleX, y);
 
-            // Draw the Shuttle Head
-            // A small bobbin shape at the current X
-            ctx.fillStyle = '#fff';
-            ctx.beginPath();
-            const bobbinSize = CONFIG.threadSize * 1.5;
-            ctx.arc(s.x, y + CONFIG.threadSize/2, bobbinSize/2, 0, Math.PI * 2);
-            ctx.fill();
-            
-            // Shuttle tail (thread coming from the spool)
-            // Visual flair: a faint line connecting to the edge
-            ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.moveTo(s.x, y + CONFIG.threadSize/2);
-            // If moving right, spool is on left, line goes left
-            // If moving left, spool is on right, line goes right
-            const spoolX = s.dir === 1 ? 0 : width;
-            ctx.lineTo(spoolX, y + CONFIG.threadSize/2);
-            ctx.stroke();
-        }
+  // Main body
+  ctx.fillStyle = hsl(color.h, Math.min(90, color.s + 20), 60, 0.95);
+  ctx.beginPath();
+  ctx.ellipse(0, 0, sw / 2, sh / 2, 0, 0, Math.PI * 2);
+  ctx.fill();
 
-        function loop() {
-            update();
-            draw();
-        }
+  // Highlight
+  ctx.fillStyle = hsl(color.h, color.s, 80, 0.5);
+  ctx.beginPath();
+  ctx.ellipse(-2, -1, sw / 4, sh / 4, 0, 0, Math.PI * 2);
+  ctx.fill();
 
-        // Helper to darken/lighten hex color
-        function adjustColor(color, amount) {
-            return '#' + color.replace(/^#/, '').replace(/../g, color => ('0'+Math.min(255, Math.max(0, parseInt(color, 16) + amount)).toString(16)).substr(-2));
-        }
+  // Thread trailing from shuttle
+  if (shuttleTrail.length > 0) {
+    ctx.beginPath();
+    ctx.strokeStyle = hsl(color.h, color.s, color.l, 0.6);
+    ctx.lineWidth = 2;
+    ctx.moveTo(shuttleTrail[0].x, shuttleTrail[0].y);
+    for (let i = 1; i < shuttleTrail.length; i++) {
+      ctx.lineTo(shuttleTrail[i].x, shuttleTrail[i].y);
+    }
+    ctx.stroke();
+  }
 
-        // --- Init ---
-        window.addEventListener('resize', resize);
-        resize();
-        loop();
+  ctx.restore();
+}
 
-    </script>
+function drawLoomFrame() {
+  // Top bar
+  const barGrad = ctx.createLinearGradient(0, 0, 0, 12);
+  barGrad.addColorStop(0, '#5a4a3a');
+  barGrad.addColorStop(0.5, '#8a7a6a');
+  barGrad.addColorStop(1, '#4a3a2a');
+  ctx.fillStyle = barGrad;
+  ctx.fillRect(0, tapestryOffset - 12, W, 12);
+
+  // Bottom bar (only if tapestry is done)
+  if (scrollPhase || phase === 'done') {
+    ctx.fillStyle = barGrad;
+    ctx.fillRect(0, tapestryOffset + TAPESRY_ROWS * ROW_HEIGHT, W, 12);
+  }
+
+  // Side ropes
+  ctx.strokeStyle = '#6a5a4a';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(0, tapestryOffset - 12);
+  ctx.lineTo(0, tapestryOffset + TAPESRY_ROWS * ROW_HEIGHT + 12);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(W, tapestryOffset - 12);
+  ctx.lineTo(W, tapestryOffset + TAPESRY_ROWS * ROW_HEIGHT + 12);
+  ctx.stroke();
+}
+
+function drawProgress() {
+  if (phase === 'weft') {
+    const pct = (currentRow / TAPESRY_ROWS * 100).toFixed(0);
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.font = '12px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(`${pct}%`, W - 15, H - 15);
+  }
+}
+
+function update(dt) {
+  animTime += dt;
+
+  if (phase === 'warp') {
+    warpProgress += dt * 0.4;
+    if (warpProgress >= 1) {
+      warpProgress = 1;
+      phase = 'weft';
+    }
+  } else if (phase === 'weft') {
+    const speed = 2.5 + Math.random() * 0.5;
+    shuttleX += shuttleDir * speed * dt * 60;
+
+    // Trail
+    shuttleTrail.push({ x: shuttleX, y: currentRow * ROW_HEIGHT + tapestryOffset });
+    if (shuttleTrail.length > 40) shuttleTrail.shift();
+
+    if (shuttleDir === 1 && shuttleX >= W) {
+      shuttleX = W;
+      drawWeftRow(currentRow);
+      weftRows.push(currentRow);
+      currentRow++;
+      shuttleDir = -1;
+      shuttleTrail = [];
+    } else if (shuttleDir === -1 && shuttleX <= 0) {
+      shuttleX = 0;
+      drawWeftRow(currentRow, true);
+      weftRows.push(currentRow);
+      currentRow++;
+      shuttleDir = 1;
+      shuttleTrail = [];
+    }
+
+    // Draw partial row for current direction
+    if (shuttleDir === 1) {
+      drawWeftRow(currentRow, true);
+    }
+
+    if (currentRow >= TAPESRY_ROWS) {
+      phase = 'done';
+      setTimeout(() => { scrollPhase = true; }, 800);
+    }
+  } else if (scrollPhase) {
+    scrollSpeed = Math.min(scrollSpeed + dt * 2, 3);
+    tapestryOffset -= scrollSpeed * dt * 60;
+
+    if (tapestryOffset < -TAPESRY_ROWS * ROW_HEIGHT - 50) {
+      tapestryOffset = 0;
+      scrollPhase = false;
+      scrollSpeed = 0;
+      initTapestry();
+    }
+  }
+}
+
+function render() {
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillRect(0, 0, W, H);
+
+  // Background subtle texture
+  ctx.fillStyle = 'rgba(40,35,30,0.5)';
+  ctx.fillRect(0, 0, W, H);
+
+  drawLoomFrame();
+
+  if (phase === 'warp' || phase === 'weft' || phase === 'done' || scrollPhase) {
+    drawWarp();
+
+    // Draw completed weft rows
+    for (let i = 0; i < weftRows.length; i++) {
+      drawWeftRow(weftRows[i]);
+    }
+
+    if (phase === 'weft') {
+      drawShuttle();
+    }
+  }
+
+  drawProgress();
+}
+
+let lastTime = 0;
+function loop(time) {
+  const dt = Math.min((time - lastTime) / 1000, 0.05);
+  lastTime = time;
+
+  update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+
+initTapestry();
+requestAnimationFrame((time) => {
+  lastTime = time;
+  loop(time);
+});
+</script>
 </body>
 </html>

@@ -1,459 +1,424 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dungeon Self-Builder</title>
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            background-color: #050505;
-            overflow: hidden;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            color: #444;
-            font-family: monospace;
-        }
-        canvas {
-            box-shadow: 0 0 20px rgba(0,0,0,0.8);
-        }
-        #ui {
-            position: absolute;
-            bottom: 20px;
-            left: 20px;
-            color: #666;
-            pointer-events: none;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dungeon Drawn from Darkness</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; }
+canvas { display: block; }
+</style>
 </head>
 <body>
-    <canvas id="dungeon"></canvas>
-    <div id="ui">
-        <div id="status">Generating...</div>
-    </div>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
 
-    <script>
-        const canvas = document.getElementById('dungeon');
-        const ctx = canvas.getContext('2d');
-        const statusEl = document.getElementById('status');
+let W, H, cols, rows, cellSize;
+const WALL = 0, FLOOR = 1, CORRIDOR = 2;
 
-        // Configuration
-        const TILE_SIZE = 12;
-        const COLS = 60;
-        const ROWS = 40;
-        const CARVE_SPEED = 2; // Tiles per frame
-        const EXPLORER_SPEED = 0.15; // Tiles per frame (fractional movement)
-        
-        canvas.width = COLS * TILE_SIZE;
-        canvas.height = ROWS * TILE_SIZE;
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    cellSize = Math.max(10, Math.min(Math.floor(W / 65), Math.floor(H / 40)));
+    cols = Math.floor(W / cellSize);
+    rows = Math.floor(H / cellSize);
+}
+resize();
+window.addEventListener('resize', () => { resize(); generateDungeon(); });
 
-        // State
-        let grid = [];
-        let torches = [];
-        let explorer = { x: 0, y: 0, targetX: 0, targetY: 0, path: [], moveProgress: 0 };
-        let phase = 'GENERATING'; // GENERATING, WANDERING, TRANSITIONING, IDLING
-        let generationQueue = [];
-        let frameCount = 0;
-        let totalTiles = 0;
-        let visibleTiles = 0;
+let grid, revealed, torches, roomList, corridorList;
+let revealQueue, revealIndex, revealTimer;
+let explorer, explorerTimer, explorerVisited;
+let fadeAlpha, fading, fadeDir;
+let time = 0;
+let dungeonActive = false;
 
-        // Grid Types
-        const EMPTY = 0;
-        const WALL = 1;
-        const FLOOR = 2;
+function generateDungeon() {
+    grid = Array.from({ length: rows }, () => Array(cols).fill(WALL));
+    revealed = Array.from({ length: rows }, () => Array(cols).fill(false));
+    torches = [];
+    roomList = [];
+    corridorList = [];
+    revealQueue = [];
+    revealIndex = 0;
+    revealTimer = 0;
+    explorer = { x: 0, y: 0, visited: new Set() };
+    explorerTimer = 0;
+    explorerVisited = new Set();
+    fadeAlpha = 0;
+    fading = false;
+    fadeDir = 0;
+    dungeonActive = true;
 
-        class Tile {
-            constructor(c, r) {
-                this.c = c;
-                this.r = r;
-                this.type = WALL;
-                this.carved = false;
-                this.hasTorch = false;
-                this.torchIntensity = 0;
-                this.visited = false;
+    const numRooms = Math.floor(6 + Math.random() * 8);
+    const rooms = [];
+
+    for (let attempt = 0; attempt < numRooms * 20 && rooms.length < numRooms; attempt++) {
+        const rw = 3 + Math.floor(Math.random() * 5);
+        const rh = 3 + Math.floor(Math.random() * 4);
+        const rx = 2 + Math.floor(Math.random() * (cols - rw - 4));
+        const ry = 2 + Math.floor(Math.random() * (rows - rh - 4));
+
+        let overlap = false;
+        for (const r of rooms) {
+            if (rx < r.x + r.w + 1 && rx + rw + 1 > r.x && ry < r.y + r.h + 1 && ry + rh + 1 > r.y) {
+                overlap = true;
+                break;
             }
         }
+        if (overlap) continue;
 
-        // Initialization
-        function init() {
-            grid = [];
-            for (let r = 0; r < ROWS; r++) {
-                let row = [];
-                for (let c = 0; c < COLS; c++) {
-                    row.push(new Tile(c, r));
-                }
-                grid.push(row);
-            }
-            
-            // Fill border with walls initially
-            for (let r = 0; r < ROWS; r++) {
-                grid[r][0].type = WALL;
-                grid[r][COLS-1].type = WALL;
-            }
-            for (let c = 0; c < COLS; c++) {
-                grid[0][c].type = WALL;
-                grid[ROWS-1][c].type = WALL;
-            }
-
-            phase = 'GENERATING';
-            statusEl.innerText = "Generating Dungeon...";
-            statusEl.style.color = "#888";
-            
-            // Start generation from center
-            const startC = Math.floor(COLS / 2);
-            const startR = Math.floor(ROWS / 2);
-            
-            carveTile(startC, startR);
-            addTorch(startC, startR);
-            
-            // Start DFS
-            const stack = [{c: startC, r: startR}];
-            const dirs = [[0,1], [0,-1], [1,0], [-1,0]]; // Down, Up, Right, Left
-
-            // We process a batch of stack items per frame to control speed
-            generationQueue = stack;
-
-            // Start explorer at start pos
-            explorer = {
-                x: startC,
-                y: startR,
-                targetX: startC,
-                targetY: startR,
-                moveProgress: 1.0,
-                path: []
-            };
-        }
-
-        function carveTile(c, r) {
-            if (c < 1 || c >= COLS - 1 || r < 1 || r >= ROWS - 1) return;
-            if (grid[r][c].type === WALL) {
-                grid[r][c].type = FLOOR;
-                grid[r][c].carved = true;
-                visibleTiles++;
+        for (let y = ry; y < ry + rh; y++) {
+            for (let x = rx; x < rx + rw; x++) {
+                grid[y][x] = FLOOR;
             }
         }
+        rooms.push({ x: rx, y: ry, w: rw, h: rh, cx: Math.floor(rx + rw / 2), cy: Math.floor(ry + rh / 2) });
+    }
 
-        function addTorch(c, r) {
-            // Only add torch if it's a floor and has at least 2 adjacent floors (corner/corridor)
-            // or if it's an open area (4 adjacent floors).
-            // For this visual, let's just add torches to dead-ends or intersections to reduce clutter.
-            let neighbors = 0;
-            const dirs = [[0,1], [0,-1], [1,0], [-1,0]];
-            dirs.forEach(d => {
-                const nr = r + d[1];
-                const nc = c + d[0];
-                if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && grid[nr][nc].type === FLOOR) {
-                    neighbors++;
-                }
-            });
+    for (let i = 1; i < rooms.length; i++) {
+        const a = rooms[i - 1], b = rooms[i];
+        carveCorridor(a.cx, a.cy, b.cx, b.cy);
+    }
 
-            // Add torch to dead ends or intersections
-            if (neighbors === 1 || neighbors >= 3) {
-                grid[r][c].hasTorch = true;
-                torches.push({ x: c, y: r, flickerOffset: Math.random() * 100 });
+    for (let i = 0; i < rooms.length; i++) {
+        const r = rooms[i];
+        roomList.push({ x: r.x, y: r.y, w: r.w, h: r.h, cx: r.cx, cy: r.cy });
+        const numTorches = 1 + Math.floor(Math.random() * 2);
+        for (let t = 0; t < numTorches; t++) {
+            const tx = r.x + 1 + Math.floor(Math.random() * Math.max(1, r.w - 2));
+            const ty = r.y + 1 + Math.floor(Math.random() * Math.max(1, r.h - 2));
+            torches.push({ x: tx, y: ty, flicker: Math.random() * Math.PI * 2, radius: 3 + Math.random() * 3 });
+        }
+    }
+
+    for (let i = 0; i < corridorList.length; i++) {
+        const c = corridorList[i];
+        if (c.length > 0) {
+            const mid = Math.floor(c.length / 2);
+            const mc = c[mid];
+            if (mc) {
+                torches.push({ x: mc.x, y: mc.y, flicker: Math.random() * Math.PI * 2, radius: 2 + Math.random() * 2 });
             }
         }
+    }
 
-        function generateStep() {
-            if (phase !== 'GENERATING') return;
+    for (const r of roomList) {
+        revealQueue.push({ type: 'room', data: r });
+    }
+    for (const c of corridorList) {
+        revealQueue.push({ type: 'corridor', data: c });
+    }
 
-            if (generationQueue.length === 0) {
-                // Check if generation is actually done
-                let allCarved = true;
-                for(let r=1; r<ROWS-1; r++) {
-                    for(let c=1; c<COLS-1; c++) {
-                        if (grid[r][c].type === FLOOR) {
-                            // Check if we have unvisited neighbors
-                            const dirs = [[0,1], [0,-1], [1,0], [-1,0]];
-                            let hasUnvisited = false;
-                            dirs.forEach(d => {
-                                const nr = r + d[1];
-                                const nc = c + d[0];
-                                if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && grid[nr][nc].type === WALL) {
-                                    hasUnvisited = true;
-                                }
-                            });
-                            if (!hasUnvisited) {
-                                // This floor is surrounded by walls or bounds, but we need to carve walls
-                                // Actually, the DFS only adds valid neighbors to queue.
-                                // If queue is empty, DFS is done.
-                            }
-                        }
-                    }
+    if (rooms.length > 0) {
+        const sr = rooms[0];
+        explorer.x = sr.cx;
+        explorer.y = sr.cy;
+        explorer.visited.add(`${sr.cx},${sr.cy}`);
+        explorerVisited.add(`${sr.cx},${sr.cy}`);
+    }
+}
+
+function carveCorridor(x1, y1, x2, y2) {
+    const segs = [];
+    let x = x1, y = y1;
+    while (x !== x2) {
+        if (grid[y] && grid[y][x] !== CORRIDOR) {
+            grid[y][x] = CORRIDOR;
+            segs.push({ x, y });
+        }
+        x += x < x2 ? 1 : -1;
+    }
+    while (y !== y2) {
+        if (grid[y] && grid[y][x] !== CORRIDOR) {
+            grid[y][x] = CORRIDOR;
+            segs.push({ x, y });
+        }
+        y += y < y2 ? 1 : -1;
+    }
+    corridorList.push(segs);
+}
+
+function revealNext() {
+    if (revealIndex >= revealQueue.length) {
+        if (!fading) {
+            fading = true;
+            fadeDir = 1;
+        }
+        return;
+    }
+    const item = revealQueue[revealIndex];
+    if (item.type === 'room') {
+        const r = item.data;
+        for (let y = r.y; y < r.y + r.h; y++) {
+            for (let x = r.x; x < r.x + r.w; x++) {
+                if (y >= 0 && y < rows && x >= 0 && x < cols) {
+                    revealed[y][x] = true;
                 }
-                
-                // Simple check: if queue is empty, generation is done
-                phase = 'WANDERING';
-                statusEl.innerText = "Exploring...";
-                statusEl.style.color = "#d84";
-                assignNextTarget();
-                return;
-            }
-
-            // Process multiple items per frame for speed
-            for (let i = 0; i < CARVE_SPEED; i++) {
-                if (generationQueue.length === 0) break;
-                
-                const current = generationQueue.pop();
-                const dirs = [[0,1], [0,-1], [1,0], [-1,0]];
-                
-                // Shuffle directions for organic look
-                dirs.sort(() => Math.random() - 0.5);
-
-                for (let d of dirs) {
-                    const nc = current.c + d[0];
-                    const nr = current.r + d[1];
-
-                    if (nc >= 1 && nc < COLS - 1 && nr >= 1 && nr < ROWS - 1) {
-                        if (grid[nr][nc].type === WALL) {
-                            carveTile(nc, nr);
-                            addTorch(nc, nr);
-                            generationQueue.push({c: nc, r: nr});
-                            break; // Only carve one branch per step (DFS)
-                        }
-                    }
-                }
-            }
-
-            // Check completion
-            if (generationQueue.length === 0) {
-                // Ensure we didn't miss any isolated rooms (though DFS usually handles connected graphs)
-                // Just switch state
-                phase = 'WANDERING';
-                statusEl.innerText = "Exploring...";
-                statusEl.style.color = "#d84";
-                assignNextTarget();
             }
         }
-
-        function assignNextTarget() {
-            // Find a random floor tile that hasn't been visited by the explorer
-            // Prefer unvisited corridors (dead ends)
-            
-            let candidates = [];
-            
-            // Scan grid
-            for (let r = 1; r < ROWS - 1; r++) {
-                for (let c = 1; c < COLS - 1; c++) {
-                    if (grid[r][c].type === FLOOR) {
-                        let neighbors = 0;
-                        const dirs = [[0,1], [0,-1], [1,0], [-1,0]];
-                        dirs.forEach(d => {
-                            const nr = r + d[1];
-                            const nc = c + d[0];
-                            if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && grid[nr][nc].type === FLOOR) {
-                                neighbors++;
-                            }
-                        });
-
-                        if (!grid[r][c].visited) {
-                            candidates.push({c, r, score: neighbors});
-                        }
-                    }
-                }
+    } else {
+        for (const s of item.data) {
+            if (s.y >= 0 && s.y < rows && s.x >= 0 && s.x < cols) {
+                revealed[s.y][s.x] = true;
             }
+        }
+    }
+    revealIndex++;
+}
 
-            if (candidates.length === 0) {
-                phase = 'TRANSITIONING';
-                statusEl.innerText = "Map Complete. Fading...";
-                statusEl.style.color = "#fff";
-                return;
+function updateExplorer(dt) {
+    if (!dungeonActive) return;
+    explorerTimer += dt;
+    if (explorerTimer < 0.15) return;
+    explorerTimer = 0;
+
+    const dirs = [[0, -1], [0, 1], [-1, 0], [1, 0]];
+    const shuffled = dirs.sort(() => Math.random() - 0.5);
+
+    let best = null;
+    let bestUnvisited = -1;
+
+    for (const [dx, dy] of shuffled) {
+        const nx = explorer.x + dx;
+        const ny = explorer.y + dy;
+        if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) continue;
+        if (grid[ny][nx] === WALL) continue;
+        const key = `${nx},${ny}`;
+        if (!explorer.visited.has(key)) {
+            if (bestUnvisited === -1 || Math.random() < 0.5) {
+                best = { x: nx, y: ny };
+                bestUnvisited = 0;
             }
+        }
+    }
 
-            // Sort by score (lower score = more likely to be a dead end/corridor)
-            candidates.sort((a, b) => a.score - b.score);
+    if (best) {
+        explorer.x = best.x;
+        explorer.y = best.y;
+        explorer.visited.add(`${best.x},${best.y}`);
+        explorerVisited.add(`${best.x},${best.y}`);
+    } else {
+        for (const [dx, dy] of shuffled) {
+            const nx = explorer.x + dx;
+            const ny = explorer.y + dy;
+            if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) continue;
+            if (grid[ny][nx] === WALL) continue;
+            explorer.x = nx;
+            explorer.y = ny;
+            explorer.visited.add(`${nx},${ny}`);
+            explorerVisited.add(`${nx},${ny}`);
+            break;
+        }
+    }
 
-            // Pick from top 10% of candidates to prefer dead ends but add randomness
-            const selectionPool = candidates.slice(0, Math.max(1, Math.floor(candidates.length * 0.1)));
-            const target = selectionPool[Math.floor(Math.random() * selectionPool.length)];
+    const totalFloor = explorerVisited.size;
+    let allRevealed = true;
+    for (let y = 0; y < rows && allRevealed; y++) {
+        for (let x = 0; x < cols && allRevealed; x++) {
+            if ((grid[y][x] === FLOOR || grid[y][x] === CORRIDOR) && !revealed[y][x]) allRevealed = false;
+        }
+    }
 
-            // Simple pathfinding (BFS) to find path to target
-            const path = findPath(explorer.x, explorer.y, target.c, target.r);
-            
-            if (path.length > 0) {
-                explorer.path = path;
-                explorer.targetX = path[path.length - 1].c;
-                explorer.targetY = path[path.length - 1].r;
-                explorer.moveProgress = 0;
+    if (allRevealed && !fading) {
+        fading = true;
+        fadeDir = 1;
+    }
+}
+
+function update(dt) {
+    time += dt;
+
+    if (!dungeonActive) return;
+
+    revealTimer += dt;
+    if (revealTimer >= 0.4) {
+        revealTimer = 0;
+        revealNext();
+    }
+
+    updateExplorer(dt);
+
+    if (fading) {
+        fadeAlpha += fadeDir * dt * 0.6;
+        if (fadeDir === 1 && fadeAlpha >= 1) {
+            fadeDir = -1;
+        } else if (fadeDir === -1 && fadeAlpha <= 0) {
+            generateDungeon();
+        }
+    }
+}
+
+function drawStoneTile(x, y, type) {
+    const px = x * cellSize;
+    const py = y * cellSize;
+    const hash = ((x * 73856093) ^ (y * 19349663)) & 0xFFFF;
+    const variation = (hash % 30) / 30 - 0.5;
+
+    if (type === WALL) {
+        const r = 28 + variation * 15;
+        const g = 26 + variation * 12;
+        const b = 30 + variation * 12;
+        ctx.fillStyle = `rgb(${r},${g},${b})`;
+        ctx.fillRect(px, py, cellSize, cellSize);
+        ctx.strokeStyle = `rgba(15,14,16,0.5)`;
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(px + 0.5, py + 0.5, cellSize - 1, cellSize - 1);
+        if (cellSize > 12) {
+            const hash2 = ((x * 31) ^ (y * 57)) & 0xFF;
+            if (hash2 > 180) {
+                ctx.fillStyle = 'rgba(50,48,52,0.4)';
+                ctx.fillRect(px + 2, py + 2, cellSize * 0.3, cellSize * 0.3);
+            }
+        }
+    } else {
+        const r = 55 + variation * 20;
+        const g = 50 + variation * 18;
+        const b = 42 + variation * 15;
+        ctx.fillStyle = `rgb(${r},${g},${b})`;
+        ctx.fillRect(px, py, cellSize, cellSize);
+        ctx.strokeStyle = `rgba(35,32,28,0.4)`;
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(px + 0.5, py + 0.5, cellSize - 1, cellSize - 1);
+        if (cellSize > 14) {
+            const hash2 = ((x * 41) ^ (y * 71)) & 0xFF;
+            if (hash2 > 200) {
+                ctx.fillStyle = 'rgba(65,58,48,0.3)';
+                ctx.fillRect(px + cellSize * 0.2, py + cellSize * 0.6, cellSize * 0.4, cellSize * 0.2);
+            }
+        }
+    }
+}
+
+function drawLighting() {
+    const lightCanvas = document.createElement('canvas');
+    lightCanvas.width = W;
+    lightCanvas.height = H;
+    const lctx = lightCanvas.getContext('2d');
+
+    lctx.fillStyle = 'rgba(0,0,0,0.88)';
+    lctx.fillRect(0, 0, W, H);
+
+    lctx.globalCompositeOperation = 'destination-out';
+
+    for (const torch of torches) {
+        const flicker = 0.7 + 0.3 * Math.sin(time * 5 + torch.flicker) * Math.sin(time * 7.3 + torch.flicker * 2.1);
+        const radius = torch.radius * cellSize * flicker;
+        const px = torch.x * cellSize + cellSize / 2;
+        const py = torch.y * cellSize + cellSize / 2;
+
+        const grad = lctx.createRadialGradient(px, py, 0, px, py, radius);
+        grad.addColorStop(0, `rgba(255,255,255,${0.6 * flicker})`);
+        grad.addColorStop(0.5, `rgba(255,255,255,${0.25 * flicker})`);
+        grad.addColorStop(1, 'rgba(255,255,255,0)');
+        lctx.fillStyle = grad;
+        lctx.beginPath();
+        lctx.arc(px, py, radius, 0, Math.PI * 2);
+        lctx.fill();
+    }
+
+    ctx.drawImage(lightCanvas, 0, 0);
+}
+
+function drawTorchFlame(x, y) {
+    const px = x * cellSize + cellSize / 2;
+    const py = y * cellSize + cellSize / 2;
+    const flicker = 0.7 + 0.3 * Math.sin(time * 5 + x * 13 + y * 7);
+
+    const r = cellSize * 0.12 * flicker;
+    const grad = ctx.createRadialGradient(px, py - r * 0.5, 0, px, py, r * 2);
+    grad.addColorStop(0, `rgba(255,220,100,${0.9 * flicker})`);
+    grad.addColorStop(0.4, `rgba(255,140,30,${0.7 * flicker})`);
+    grad.addColorStop(1, 'rgba(200,60,10,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(px, py, r * 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = `rgba(255,240,180,${0.95 * flicker})`;
+    ctx.beginPath();
+    ctx.arc(px, py - r * 0.3, r * 0.5, 0, Math.PI * 2);
+    ctx.fill();
+}
+
+function drawExplorer() {
+    if (!explorer || !dungeonActive) return;
+    const px = explorer.x * cellSize + cellSize / 2;
+    const py = explorer.y * cellSize + cellSize / 2;
+    const pulse = 0.8 + 0.2 * Math.sin(time * 3);
+    const r = cellSize * 0.25 * pulse;
+
+    const glow = ctx.createRadialGradient(px, py, 0, px, py, r * 3);
+    glow.addColorStop(0, `rgba(150,220,255,${0.5 * pulse})`);
+    glow.addColorStop(1, 'rgba(100,180,255,0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(px, py, r * 3, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = `rgba(200,240,255,${pulse})`;
+    ctx.beginPath();
+    ctx.arc(px, py, r, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = `rgba(255,255,255,${0.9 * pulse})`;
+    ctx.beginPath();
+    ctx.arc(px, py, r * 0.4, 0, Math.PI * 2);
+    ctx.fill();
+}
+
+function draw() {
+    ctx.fillStyle = '#0a0808';
+    ctx.fillRect(0, 0, W, H);
+
+    if (!dungeonActive) return;
+
+    for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+            if (revealed[y][x]) {
+                drawStoneTile(x, y, grid[y][x]);
             } else {
-                // No path? Should not happen in connected dungeon. Try again.
-                assignNextTarget();
+                drawStoneTile(x, y, WALL);
             }
         }
+    }
 
-        function findPath(sx, sy, ex, ey) {
-            let queue = [{c: sx, r: sy, path: []}];
-            let visited = new Set();
-            visited.add(`${sx},${sy}`);
-
-            while (queue.length > 0) {
-                let curr = queue.shift();
-                
-                if (curr.c === ex && curr.r === ey) {
-                    return curr.path;
-                }
-
-                const dirs = [[0,1], [0,-1], [1,0], [-1,0]];
-                for (let d of dirs) {
-                    let nc = curr.c + d[0];
-                    let nr = curr.r + d[1];
-                    
-                    if (nc >= 0 && nc < COLS && nr >= 0 && nr < ROWS && 
-                        grid[nr][nc].type === FLOOR && !visited.has(`${nc},${nr}`)) {
-                        visited.add(`${nc},${nr}`);
-                        let newPath = [...curr.path, {c: nc, r: nr}];
-                        queue.push({c: nc, r: nr, path: newPath});
-                    }
-                }
-            }
-            return [];
+    for (const torch of torches) {
+        if (torch.y >= 0 && torch.y < rows && torch.x >= 0 && torch.x < cols && revealed[torch.y][torch.x]) {
+            drawTorchFlame(torch.x, torch.y);
         }
+    }
 
-        function updateExplorer() {
-            if (phase !== 'WANDERING') return;
+    drawLighting();
+    drawExplorer();
 
-            if (explorer.path.length === 0) {
-                // Reached target
-                grid[Math.round(explorer.y)][Math.round(explorer.x)].visited = true;
-                assignNextTarget();
-                return;
-            }
+    if (fading) {
+        ctx.fillStyle = `rgba(0,0,0,${fadeAlpha})`;
+        ctx.fillRect(0, 0, W, H);
+    }
 
-            // Move towards target
-            const target = explorer.path[0];
-            const dx = target.c - explorer.x;
-            const dy = target.r - explorer.y;
-            const dist = Math.sqrt(dx*dx + dy*dy);
+    if (revealIndex < revealQueue.length) {
+        ctx.fillStyle = 'rgba(180,140,80,0.5)';
+        ctx.font = `${Math.max(11, cellSize * 0.6)}px monospace`;
+        ctx.textAlign = 'center';
+        ctx.fillText(`Carving room ${revealIndex} / ${revealQueue.length}...`, W / 2, H - 15);
+    }
+}
 
-            if (dist < EXPLORER_SPEED) {
-                // Arrived at node
-                explorer.x = target.c;
-                explorer.y = target.r;
-                explorer.path.shift();
-                grid[target.r][target.c].visited = true;
-            } else {
-                // Move
-                explorer.x += (dx / dist) * EXPLORER_SPEED;
-                explorer.y += (dy / dist) * EXPLORER_SPEED;
-            }
-        }
+let lastTime = performance.now();
+function loop(now) {
+    const dt = Math.min((now - lastTime) / 1000, 0.1);
+    lastTime = now;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+}
 
-        function draw() {
-            // Clear background
-            ctx.fillStyle = '#050505';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-            // Draw Grid
-            for (let r = 0; r < ROWS; r++) {
-                for (let c = 0; c < COLS; c++) {
-                    const tile = grid[r][c];
-                    const x = c * TILE_SIZE;
-                    const y = r * TILE_SIZE;
-
-                    if (tile.type === WALL) {
-                        // Draw stone texture
-                        ctx.fillStyle = '#111';
-                        ctx.fillRect(x, y, TILE_SIZE, TILE_SIZE);
-                        // Add subtle border
-                        ctx.strokeStyle = '#1a1a1a';
-                        ctx.strokeRect(x, y, TILE_SIZE, TILE_SIZE);
-                    } else if (tile.type === FLOOR) {
-                        // Draw floor
-                        ctx.fillStyle = '#222';
-                        ctx.fillRect(x, y, TILE_SIZE, TILE_SIZE);
-                        
-                        // Draw visited overlay
-                        if (tile.visited) {
-                            ctx.fillStyle = 'rgba(255, 255, 255, 0.05)';
-                            ctx.fillRect(x, y, TILE_SIZE, TILE_SIZE);
-                        }
-                    }
-                }
-            }
-
-            // Draw Torches
-            const time = Date.now() * 0.005;
-            ctx.globalCompositeOperation = 'lighter'; // Additive blending for light
-
-            torches.forEach(t => {
-                const tx = t.x * TILE_SIZE + TILE_SIZE/2;
-                const ty = t.y * TILE_SIZE + TILE_SIZE/2;
-                
-                // Flicker effect
-                const flicker = Math.sin(time * 10 + t.flickerOffset) * 0.2 + 
-                                Math.sin(time * 23 + t.flickerOffset) * 0.1 + 0.8;
-                
-                const radius = TILE_SIZE * 4 * flicker;
-                
-                // Create radial gradient
-                const gradient = ctx.createRadialGradient(tx, ty, 0, tx, ty, radius);
-                gradient.addColorStop(0, 'rgba(255, 160, 50, 0.8)');
-                gradient.addColorStop(0.4, 'rgba(255, 100, 20, 0.3)');
-                gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
-
-                ctx.fillStyle = gradient;
-                ctx.beginPath();
-                ctx.arc(tx, ty, radius, 0, Math.PI * 2);
-                ctx.fill();
-
-                // Draw actual torch sprite
-                ctx.fillStyle = '#333';
-                ctx.fillRect(tx - 2, ty - 2, 4, 4);
-                ctx.fillStyle = `rgb(255, ${150 + Math.random()*50}, 0)`;
-                ctx.beginPath();
-                ctx.arc(tx, ty, 3, 0, Math.PI * 2);
-                ctx.fill();
-            });
-
-            // Draw Explorer
-            if (phase === 'WANDERING' || phase === 'TRANSITIONING') {
-                const ex = explorer.x * TILE_SIZE + TILE_SIZE/2;
-                const ey = explorer.y * TILE_SIZE + TILE_SIZE/2;
-                
-                ctx.fillStyle = '#fff';
-                ctx.beginPath();
-                ctx.arc(ex, ey, 3, 0, Math.PI * 2);
-                ctx.fill();
-                
-                // Explorer glow
-                const glow = ctx.createRadialGradient(ex, ey, 0, ex, ey, TILE_SIZE * 2);
-                glow.addColorStop(0, 'rgba(255, 255, 255, 0.3)');
-                glow.addColorStop(1, 'rgba(0, 0, 0, 0)');
-                ctx.fillStyle = glow;
-                ctx.beginPath();
-                ctx.arc(ex, ey, TILE_SIZE * 2, 0, Math.PI * 2);
-                ctx.fill();
-            }
-
-            ctx.globalCompositeOperation = 'source-over';
-
-            // Transition Logic
-            if (phase === 'TRANSITIONING') {
-                ctx.fillStyle = `rgba(5, 5, 5, ${0.02})`;
-                ctx.fillRect(0, 0, canvas.width, canvas.height);
-                
-                frameCount++;
-                if (frameCount > 120) { // Wait 2 seconds
-                    init();
-                    frameCount = 0;
-                }
-            }
-        }
-
-        function loop() {
-            generateStep();
-            updateExplorer();
-            draw();
-            requestAnimationFrame(loop);
-        }
-
-        // Start
-        init();
-        loop();
-
-    </script>
+generateDungeon();
+requestAnimationFrame(loop);
+</script>
 </body>
 </html>

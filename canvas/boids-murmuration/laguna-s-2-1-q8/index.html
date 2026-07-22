@@ -1,210 +1,184 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Boids Murmuration</title>
 <style>
-html, body {
-    margin: 0;
-    padding: 0;
-    overflow: hidden;
-    background: #0d0c10;
-}
-canvas {
-    display: block;
-}
+  * { margin: 0; padding: 0; overflow: hidden; }
+  body, html { width: 100%; height: 100%; background: #000; }
+  canvas { display: block; }
 </style>
 </head>
 <body>
-<canvas id="boids"></canvas>
+<canvas id="canvas"></canvas>
 <script>
 (() => {
-    const canvas = document.getElementById('boids');
-    const ctx = canvas.getContext('2d');
-    
-    let width, height, dpr;
-    const boids = [];
-    const numBoids = 600;
-    let predator = null;
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
 
-    function init() {
-        dpr = window.devicePixelRatio || 1;
-        width = window.innerWidth;
-        height = window.innerHeight;
-        canvas.width = width * dpr;
-        canvas.height = height * dpr;
-        canvas.style.width = width + 'px';
-        canvas.style.height = height + 'px';
-        ctx.scale(dpr, dpr);
-        ctx.fillStyle = '#040306';
+  let width, height;
+  function resize() {
+    width = canvas.width = window.innerWidth;
+    height = canvas.height = window.innerHeight;
+  }
+  window.addEventListener('resize', resize);
+  resize();
 
-        for (let i = 0; i < numBoids; i++) {
-            boids.push({
-                x: Math.random() * width,
-                y: Math.random() * (height * 0.7),
-                vx: (Math.random() - 0.5) * 0.6,
-                vy: (Math.random() - 0.5) * 0.3,
-                size: 1.2 + Math.random() * 0.8
-            });
+  const NUM_BOIDS = 600;
+  const BOIDS = [];
+
+  // Dusk landscape silhouette
+  function drawLandscape() {
+    const grad = ctx.createLinearGradient(0, 0, 0, height);
+    grad.addColorStop(0, '#1a1a2e');
+    grad.addColorStop(1, '#131320');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, width, height);
+
+    // Horizon
+    const horizonY = height * 0.75;
+    ctx.fillStyle = '#0f0f1a';
+    ctx.fillRect(0, horizonY, width, height - horizonY);
+
+    // Silhouette hills
+    ctx.fillStyle = '#05050d';
+    ctx.beginPath();
+    ctx.moveTo(0, horizonY);
+    for (let x = 0; x <= width; x += 20) {
+      const y = horizonY + Math.sin(x * 0.01) * 15;
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(width, height);
+    ctx.lineTo(0, height);
+    ctx.fill();
+  }
+
+  class Boid {
+    constructor() {
+      this.reset();
+    }
+    reset() {
+      this.x = Math.random() * width;
+      this.y = Math.random() * height * 0.7;
+      this.vx = (Math.random() - 0.5) * 0.6;
+      this.vy = (Math.random() - 0.5) * 0.6;
+    }
+    update() {
+      this.x += this.vx;
+      this.y += this.vy;
+
+      // Wrap edges
+      if (this.x < -5) this.x = width + 5;
+      if (this.x > width + 5) this.x = -5;
+      if (this.y < -5) this.y = height * 0.7 + 5;
+      if (this.y > height * 0.7 + 5) this.y = -5;
+    }
+  }
+
+  function initBoids() {
+    BOIDS.length = 0;
+    for (let i = 0; i < NUM_BOIDS; i++) {
+      BOIDS.push(new Boid());
+    }
+  }
+
+  let predatorX = width / 2;
+  let predatorY = height / 2;
+  let predatorTargetX = width / 2;
+  let predatorTargetY = height / 2;
+
+  function updatePredator() {
+    predatorTargetX = width * 0.2 + Math.random() * width * 0.6;
+    predatorTargetY = height * 0.3 + Math.random() * height * 0.4;
+    predatorX += (predatorTargetX - predatorX) * 0.02;
+    predatorY += (predatorTargetY - predatorY) * 0.02;
+  }
+
+  const PERCEPTION = 40;
+  const NEIGHBORHOOD_PREDATOR = 60;
+
+  function flock(boid) {
+    let fx = 0, fy = 0;
+    let neighbors = 0;
+    let avoidance = 0;
+
+    for (let other of BOIDS) {
+      const dx = other.x - boid.x;
+      const dy = other.y - boid.y;
+      const distSq = dx * dx + dy * dy;
+
+      if (distSq < PERCEPTION * PERCEPTION && other !== boid && distSq > 0) {
+        const dist = Math.sqrt(distSq);
+        const influence = 1 / dist;
+
+        // Cohesion
+        fx += dx * influence;
+        fy += dy * influence;
+
+        // Separation + alignment (weighted toward closer boids)
+        if (dist < 15) {
+          fx += (boid.x - other.x) * 0.8;
+          fy += (boid.y - other.y) * 0.8;
         }
 
-        window.addEventListener('resize', () => {
-            dpr = window.devicePixelRatio || 1;
-            width = window.innerWidth;
-            height = window.innerHeight;
-            canvas.width = width * dpr;
-            canvas.height = height * dpr;
-            canvas.style.width = width + 'px';
-            canvas.style.height = height + 'px';
-            ctx.scale(dpr, dpr);
-        });
-
-        setInterval(spawnPredator, 8000 + Math.random() * 12000);
-        requestAnimationFrame(update);
+        neighbors++;
+      }
     }
 
-    function spawnPredator() {
-        if (Math.random() < 0.7) {
-            predator = {
-                x: Math.random() * width,
-                y: Math.random() * (height * 0.6),
-                radius: 40 + Math.random() * 30,
-                life: 120 + Math.random() * 60
-            };
-        }
+    if (neighbors > 0) {
+      boid.vx += (fx / neighbors) * 0.02;
+      boid.vy += (fy / neighbors) * 0.02;
     }
 
-    function update() {
-        ctx.fillStyle = '#040306';
-        ctx.fillRect(0, 0, width, height);
+    // Predator avoidance
+    const pdx = predatorX - boid.x;
+    const pdy = predatorY - boid.y;
+    const pdistSq = pdx * pdx + pdy * pdy;
 
-        // Draw landscape silhouette
-        ctx.fillStyle = '#020204';
-        ctx.beginPath();
-        ctx.moveTo(0, height * 0.75);
-        for (let x = 0; x < width; x += 20) {
-            const hillY = height * 0.75 + Math.sin(x * 0.01 + frameCount * 0.002) * 8;
-            ctx.lineTo(x, hillY);
-        }
-        ctx.lineTo(width, height);
-        ctx.lineTo(0, height);
-        ctx.fill();
-
-        // Update predator
-        if (predator) {
-            predator.life--;
-            if (predator.life <= 0) predator = null;
-        }
-
-        // Update boids
-        for (const b of boids) {
-            // Edges
-            if (b.x < 0) b.x = width;
-            else if (b.x > width) b.x = 0;
-            if (b.y < 0) b.y = height;
-            else if (b.y > height) b.y = 0;
-
-            let ax = 0, ay = 0;
-            let neighborCount = 0;
-            let sepX = 0, sepY = 0;
-            let alignX = 0, alignY = 0;
-            let cohX = 0, cohY = 0;
-
-            for (const other of boids) {
-                if (other === b) continue;
-                const dx = other.x - b.x;
-                const dy = other.y - b.y;
-                const distSq = dx * dx + dy * dy;
-
-                // Wrap distance
-                let rdx = dx;
-                let rdy = dy;
-                if (Math.abs(rdx) > width / 2) rdx = -Math.sign(rdx) * (width - Math.abs(rdx));
-                if (Math.abs(rdy) > height / 2) rdy = -Math.sign(rdy) * (height - Math.abs(rdy));
-
-                const realDist = Math.sqrt(rdx * rdx + rdy * rdy);
-
-                // Separation
-                if (realDist < 18 && realDist > 0.01) {
-                    const force = (18 - realDist) / 18;
-                    sepX -= (rdx / realDist) * force;
-                    sepY -= (rdy / realDist) * force;
-                }
-
-                // Alignment & Cohesion
-                if (realDist < 45) {
-                    alignX += other.vx;
-                    alignY += other.vy;
-                    cohX += other.x;
-                    cohY += other.y;
-                    neighborCount++;
-                }
-            }
-
-            // Predator avoidance
-            if (predator) {
-                const pdx = b.x - predator.x;
-                const pdy = b.y - predator.y;
-                const pdist = Math.sqrt(pdx * pdx + pdy * pdy);
-                if (pdist < predator.radius) {
-                    const force = (predator.radius - pdist) / predator.radius;
-                    ax += (pdx / pdist) * force * 2.5;
-                    ay += (pdy / pdist) * force * 2.5;
-                }
-            }
-
-            if (neighborCount > 0) {
-                ax += (alignX / neighborCount - b.vx) * 0.05;
-                ay += (alignY / neighborCount - b.vy) * 0.05;
-                ax += (cohX / neighborCount - b.x) * 0.001;
-                ay += (cohY / neighborCount - b.y) * 0.001;
-            }
-
-            ax += sepX * 0.02;
-            ay += sepY * 0.02;
-
-            // Apply forces
-            b.vx += ax;
-            b.vy += ay;
-            const speed = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
-            const maxSpeed = 1.8;
-            if (speed > maxSpeed) {
-                b.vx = (b.vx / speed) * maxSpeed;
-                b.vy = (b.vy / speed) * maxSpeed;
-            }
-
-            b.x += b.vx;
-            b.y += b.vy;
-
-            // Draw
-            drawBoid(b);
-        }
-
-        frameCount++;
-        requestAnimationFrame(update);
+    if (pdistSq < NEIGHBORHOOD_PREDATOR * NEIGHBORHOOD_PREDATOR && pdistSq > 0) {
+      const dist = Math.sqrt(pdistSq);
+      const influence = (NEIGHBORHOOD_PREDATOR - dist) / NEIGHBORHOOD_PREDATOR;
+      boid.vx += (boid.x - predatorX) * influence * 0.3;
+      boid.vy += (boid.y - predatorY) * influence * 0.3;
     }
 
-    let frameCount = 0;
-
-    function drawBoid(b) {
-        const speed = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
-        const angle = Math.atan2(b.vy, b.vx);
-        const shade = 20 + Math.min(speed * 8, 60);
-        ctx.fillStyle = `rgb(${shade},${shade},${shade})`;
-        ctx.beginPath();
-        ctx.save();
-        ctx.translate(b.x, b.y);
-        ctx.rotate(angle);
-        ctx.moveTo(0, -b.size);
-        ctx.lineTo(-b.size * 0.5, b.size);
-        ctx.lineTo(b.size * 0.5, b.size);
-        ctx.closePath();
-        ctx.fill();
-        ctx.restore();
+    // Speed limit
+    const speed = Math.sqrt(boid.vx * boid.vx + boid.vy * boid.vy);
+    const maxSpeed = 2.5;
+    if (speed > maxSpeed) {
+      boid.vx = (boid.vx / speed) * maxSpeed;
+      boid.vy = (boid.vy / speed) * maxSpeed;
     }
+  }
 
-    init();
+  let frameCount = 0;
+
+  function animate() {
+    requestAnimationFrame(animate);
+
+    drawLandscape();
+
+    // Update predator every few frames
+    if (frameCount % 120 === 0) {
+      updatePredator();
+    }
+    frameCount++;
+
+    ctx.fillStyle = '#000814';
+    for (let boid of BOIDS) {
+      flock(boid);
+      boid.update();
+
+      // Draw boid as a tiny dark speck
+      ctx.beginPath();
+      ctx.arc(boid.x, boid.y, 0.8, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  initBoids();
+  animate();
 })();
 </script>
 </body>

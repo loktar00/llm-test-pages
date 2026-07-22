@@ -1,601 +1,1011 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Castle Siege</title>
-    <style>
-        body { margin: 0; overflow: hidden; background: #111; font-family: 'Courier New', Courier, monospace; }
-        canvas { display: block; }
-        #ui {
-            position: absolute;
-            top: 20px;
-            left: 50%;
-            transform: translateX(-50%);
-            text-align: center;
-            pointer-events: none;
-            color: #fff;
-            text-shadow: 2px 2px 0 #000;
-        }
-        h1 { margin: 0; font-size: 24px; color: #ffcc00; }
-        #status { font-size: 32px; font-weight: bold; margin-top: 10px; display: none; }
-        .win { color: #4caf50; }
-        .lose { color: #f44336; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Castle Siege</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:#000}
+canvas{display:block}
+</style>
 </head>
 <body>
-    <div id="ui">
-        <h1>AUTONOMOUS SIEGE</h1>
-        <div id="status"></div>
-    </div>
-    <canvas id="gameCanvas"></canvas>
-
+<canvas id="c"></canvas>
 <script>
-/**
- * CASTLE SIEGE ENGINE
- */
-
-const canvas = document.getElementById('gameCanvas');
-const ctx = canvas.getContext('2d');
-const statusEl = document.getElementById('status');
-
-// Game Constants
-const GRAVITY = 0.4;
-const GROUND_Y_OFFSET = 50;
-let WIDTH, HEIGHT, GROUND_Y;
-
-// Game State
-let gameState = 'ATTACKING'; // ATTACKING, BREACHED, REPELLED, RESETTING
-let frame = 0;
-let entities = [];
-let particles = [];
-let projectiles = [];
-let castle = null;
-let attackers = [];
-let defenders = [];
-let shake = 0;
-
-// Resize Handling
-function resize() {
-    WIDTH = canvas.width = window.innerWidth;
-    HEIGHT = canvas.height = window.innerHeight;
-    GROUND_Y = HEIGHT - GROUND_Y_OFFSET;
-    if (castle) castle.rebuild();
-}
-window.addEventListener('resize', resize);
+const canvas=document.getElementById('c');
+const ctx=canvas.getContext('2d');
+let W,H,GROUND;
+function resize(){W=canvas.width=window.innerWidth;H=canvas.height=window.innerHeight;GROUND=H*0.78}
 resize();
+window.addEventListener('resize',resize);
 
-// --- UTILS ---
-function rand(min, max) { return Math.random() * (max - min) + min; }
-function checkRectCollide(r1, r2) {
-    return r1.x < r2.x + r2.w && r1.x + r1.w > r2.x &&
-           r1.y < r2.y + r2.h && r1.y + r1.h > r2.y;
+// Colors
+const SKY_TOP='#1a1a2e',SKY_BOT='#16213e',GROUND_C='#2d1f0e',GRASS_C='#3a2a1a';
+const WALL_C='#4a4a5a',WALL_TOP='#5a5a6a',WALL_DMG='#6a4a3a';
+const CASTLE_C='#3a3a4a',TOWER_C='#2a2a3a';
+const ATTACKER='#1a1a1a',DEFENDER='#2a2a3a';
+const WOOD='#5a3a1a',WOOD_L='#7a5a3a';
+const ARROW_C='#8a7a5a',STONE_C='#6a6a6a';
+const DEBRIS_C=['#5a5a6a','#4a4a5a','#6a6a7a','#3a3a4a'];
+const FIRE_C='#ff6a2a',FIRE_C2='#ffaa2a';
+
+// Game states
+const STATE={ATTACKING:0,BREACHED:1,REPULSED:2,CLEARING:3,REPAIRING:4};
+let gameState=STATE.ATTACKING;
+let stateTimer=0;
+let assaultWave=0;
+let score={attackers:0,defenders:0};
+
+// Wall segments
+let wallSegments=[];
+const WALL_X_RATIO=0.65;
+const WALL_HEIGHT_RATIO=0.45;
+const SEGMENT_COUNT=8;
+
+function initWall(){
+  wallSegments=[];
+  const wallX=W*WALL_X_RATIO;
+  const wallH=H*WALL_HEIGHT_RATIO;
+  const segW=wallH/SEGMENT_COUNT*0.6;
+  for(let i=0;i<SEGMENT_COUNT;i++){
+    wallSegments.push({
+      x:wallX-segW*2+i*segW*1.1,
+      y:GROUND-wallH,
+      w:segW,
+      h:wallH,
+      hp:100,
+      maxHp:100,
+      broken:false,
+      animY:0,
+      animRot:0,
+      debris:[]
+    });
+  }
 }
 
-// --- CLASSES ---
-
-class Particle {
-    constructor(x, y, color, speed, life) {
-        this.x = x;
-        this.y = y;
-        this.vx = rand(-speed, speed);
-        this.vy = rand(-speed, 0);
-        this.color = color;
-        this.life = life;
-        this.maxLife = life;
-        this.size = rand(2, 5);
-    }
-    update() {
-        this.x += this.vx;
-        this.y += this.vy;
-        this.vy += GRAVITY * 0.5;
-        this.life--;
-        if (this.y > GROUND_Y) {
-            this.y = GROUND_Y;
-            this.vx = 0;
-            this.vy = 0;
-        }
-    }
-    draw() {
-        ctx.globalAlpha = this.life / this.maxLife;
-        ctx.fillStyle = this.color;
-        ctx.fillRect(this.x, this.y, this.size, this.size);
-        ctx.globalAlpha = 1;
-    }
+// Castle tower
+let castleTower={
+  x:W*0.78,y:0,w:0,h:0,
+  hp:200,maxHp:200
+};
+function initCastle(){
+  castleTower.x=W*0.78;
+  castleTower.w=W*0.08;
+  castleTower.h=H*0.35;
+  castleTower.y=GROUND-castleTower.h;
+  castleTower.hp=castleTower.maxHp;
 }
 
-class Projectile {
-    constructor(x, y, vx, vy, type, owner) {
-        this.x = x;
-        this.y = y;
-        this.vx = vx;
-        this.vy = vy;
-        this.type = type; // 'arrow', 'stone'
-        this.owner = owner; // 'attackers', 'defenders'
-        this.active = true;
-        this.rotation = Math.atan2(vy, vx);
-    }
-    update() {
-        this.x += this.vx;
-        this.y += this.vy;
-        this.vy += GRAVITY;
-        this.rotation = Math.atan2(this.vy, this.vx);
+// Units
+let attackers=[];
+let defenders=[];
+let projectiles=[];
+let debris=[];
+let particles=[];
+let smokeParticles=[];
 
-        // Ground hit
-        if (this.y > GROUND_Y) {
-            this.active = false;
-            if (this.type === 'stone') createExplosion(this.x, GROUND_Y, '#888', 10);
-        }
-
-        // Castle Hit Logic
-        if (this.type === 'stone' && castle) {
-            if (this.x > castle.x && this.x < castle.x + castle.width && this.y > castle.y) {
-                castle.takeDamage(this);
-                this.active = false;
-                createExplosion(this.x, this.y, '#888', 15);
-                shake = 10;
-                return;
-            }
-        }
-
-        // Unit Hit Logic
-        const targets = this.owner === 'attackers' ? defenders : attackers;
-        for (let t of targets) {
-            if (t.dead) continue;
-            if (this.x > t.x && this.x < t.x + t.w && this.y > t.y && this.y < t.y + t.h) {
-                t.takeDamage(1);
-                this.active = false;
-                createExplosion(this.x, this.y, '#f00', 5);
-                return;
-            }
-        }
-    }
-    draw() {
-        ctx.save();
-        ctx.translate(this.x, this.y);
-        ctx.rotate(this.rotation);
-        if (this.type === 'arrow') {
-            ctx.fillStyle = '#fff';
-            ctx.fillRect(-10, -1, 20, 2);
-            ctx.fillStyle = '#aaa';
-            ctx.beginPath();
-            ctx.moveTo(10, -2);
-            ctx.lineTo(14, 0);
-            ctx.lineTo(10, 2);
-            ctx.fill();
-        } else {
-            ctx.fillStyle = '#555';
-            ctx.beginPath();
-            ctx.arc(0, 0, 6, 0, Math.PI*2);
-            ctx.fill();
-        }
-        ctx.restore();
-    }
-}
-
-class Entity {
-    constructor(x, y, w, h, color, team) {
-        this.x = x;
-        this.y = y;
-        this.w = w;
-        this.h = h;
-        this.color = color;
-        this.team = team;
-        this.dead = false;
-        this.hp = 100;
-        this.maxHp = 100;
-    }
-    takeDamage(amt) {
-        this.hp -= amt;
-        if (this.hp <= 0) {
-            this.dead = true;
-            createExplosion(this.x + this.w/2, this.y + this.h/2, '#900', 10);
-        }
-    }
-    drawBase() {
-        if (this.dead) return;
-        ctx.fillStyle = this.color;
-        ctx.fillRect(this.x, this.y, this.w, this.h);
-        
-        // Simple HP bar
-        if (this.hp < this.maxHp) {
-            ctx.fillStyle = 'red';
-            ctx.fillRect(this.x, this.y - 10, this.w, 4);
-            ctx.fillStyle = '#0f0';
-            ctx.fillRect(this.x, this.y - 10, this.w * (this.hp/this.maxHp), 4);
-        }
-    }
-}
-
-class Archer extends Entity {
-    constructor(x, y, team) {
-        super(x, y, 20, 40, team === 'attackers' ? '#d32f2f' : '#1976d2', team);
-        this.cooldown = 0;
-        this.maxCooldown = rand(60, 120);
-    }
-    update() {
-        if (this.cooldown > 0) this.cooldown--;
-        if (this.cooldown <= 0 && this.canShoot()) {
-            this.shoot();
-            this.cooldown = this.maxCooldown;
-        }
-    }
-    canShoot() {
-        // Check if target is visible
-        if (this.team === 'attackers') {
-            // Attackers shoot at castle or defenders
-            return castle && (this.x + 400 > castle.x || defenders.length > 0);
-        } else {
-            // Defenders shoot at attackers
-            return attackers.length > 0;
-        }
-    }
-    shoot() {
-        let tx, ty;
-        if (this.team === 'attackers') {
-            tx = castle ? castle.x + castle.width/2 : WIDTH;
-            ty = castle ? castle.y + rand(0, 100) : 0;
-        } else {
-            // Aim at nearest attacker
-            let target = attackers.reduce((prev, curr) => 
-                Math.abs(curr.x - this.x) < Math.abs(prev.x - this.x) ? curr : prev
-            );
-            if (target) {
-                tx = target.x + target.w/2;
-                ty = target.y;
-            } else {
-                tx = 0; ty = GROUND_Y;
-            }
-        }
-
-        const dx = tx - this.x;
-        const dy = ty - this.y;
-        const dist = Math.sqrt(dx*dx + dy*dy);
-        const power = rand(8, 12);
-        const angle = Math.atan2(dy, dx);
-        
-        // Adjust power based on distance for better accuracy simulation
-        const finalPower = Math.min(dist / 15, 15); 
-
-        const vx = Math.cos(angle) * finalPower;
-        const vy = Math.sin(angle) * finalPower;
-
-        projectiles.push(new Projectile(this.x + this.w/2, this.y, vx, vy, 'arrow', this.team));
-    }
-    draw() {
-        this.drawBase();
-        // Draw Bow
-        ctx.strokeStyle = '#fff';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        if (this.team === 'attackers') {
-            ctx.arc(this.x + this.w, this.y + this.h/2, 10, -Math.PI/2, Math.PI/2);
-        } else {
-            ctx.arc(this.x, this.y + this.h/2, 10, Math.PI/2, -Math.PI/2);
-        }
-        ctx.stroke();
-    }
-}
-
-class Catapult extends Entity {
-    constructor(x, y, team) {
-        super(x, y, 60, 40, team === 'attackers' ? '#b71c1c' : '#0d47a1', team);
-        this.cooldown = 0;
-        this.maxCooldown = 300;
-    }
-    update() {
-        if (this.cooldown > 0) this.cooldown--;
-        if (this.cooldown <= 0 && this.team === 'attackers') {
-            this.shoot();
-            this.cooldown = this.maxCooldown;
-        }
-    }
-    shoot() {
-        // Lob high arc over castle
-        const targetX = castle.x + rand(0, castle.width);
-        const targetY = castle.y;
-        
-        // Physics approximation for arc
-        // vx needs to be positive (moving right)
-        // vy needs to be negative (moving up)
-        
-        const dist = targetX - this.x;
-        const power = dist / 20; // Rough calc
-        const vx = rand(10, 14);
-        const vy = -rand(14, 18);
-
-        projectiles.push(new Projectile(this.x + 30, this.y, vx, vy, 'stone', this.team));
-    }
-    draw() {
-        this.drawBase();
-        // Draw Arm
-        ctx.strokeStyle = '#444';
-        ctx.lineWidth = 4;
-        ctx.beginPath();
-        ctx.moveTo(this.x + 10, this.y + 10);
-        ctx.lineTo(this.x + 50, this.y - 20);
-        ctx.stroke();
-    }
-}
-
-class SiegeTower extends Entity {
-    constructor(x) {
-        super(x, GROUND_Y - 80, 60, 80, '#5d4037', 'attackers');
-        this.speed = 0.5;
-    }
-    update() {
-        if (this.x < castle.x - 5) {
-            this.x += this.speed;
-        }
-        // Check collision with castle base
-        if (castle && checkRectCollide(this, {x: castle.x, y: castle.y, w: castle.width, h: castle.h})) {
-            castle.takeDamage(0.1); // Constant pressure
-        }
-    }
-    draw() {
-        this.drawBase();
-        // Ladder
-        ctx.fillStyle = '#3e2723';
-        ctx.fillRect(this.x + 20, this.y + 20, 20, 60);
-    }
-}
-
-class BatteringRam extends Entity {
-    constructor(x) {
-        super(x, GROUND_Y - 20, 80, 20, '#3e2723', 'attackers');
-        this.speed = 1.5;
-        this.push = 0;
-    }
-    update() {
-        let blocked = false;
-        // Move towards castle wall
-        if (this.x + this.w < castle.x) {
-            this.x += this.speed;
-        } else {
-            // Hit the wall
-            blocked = true;
-            this.push = (this.push + 1) % 40; // Animation cycle
-            if (this.push === 0) {
-                castle.takeDamage(2);
-                shake = 5;
-                // Create impact particles
-                for(let i=0; i<5; i++) particles.push(new Particle(this.x + this.w, this.y + this.h/2, '#888', 2, 20));
-            }
-        }
-    }
-    draw() {
-        this.drawBase();
-        // Ram head
-        ctx.fillStyle = '#999';
-        const offset = Math.sin(this.push * 0.2) * 5;
-        ctx.beginPath();
-        ctx.arc(this.x + this.w + offset, this.y + 10, 10, 0, Math.PI*2);
-        ctx.fill();
-    }
-}
-
-class Castle {
-    constructor() {
-        this.x = WIDTH - 200;
-        this.width = 150;
-        this.height = 250;
-        this.y = GROUND_Y - this.height;
-        this.hp = 1000;
-        this.maxHp = 1000;
-        this.breached = false;
-        this.segments = [];
-        this.rebuild();
-    }
-
-    rebuild() {
-        this.x = WIDTH - 200;
-        this.y = GROUND_Y - this.height;
-        this.segments = [];
-        // Create wall segments (visual blocks)
-        for(let i=0; i<10; i++) {
-            for(let j=0; j<5; j++) {
-                this.segments.push({
-                    x: this.x + i*15,
-                    y: this.y + j*50,
-                    w: 15,
-                    h: 50,
-                    active: true
-                });
-            }
-        }
-        // Battlements
-        for(let i=0; i<11; i++) {
-             this.segments.push({
-                x: this.x + i*15 - 2,
-                y: this.y - 10,
-                w: 10,
-                h: 10,
-                active: true
-            });
-        }
-        this.hp = this.maxHp;
-        this.breached = false;
-    }
-
-    takeDamage(amount) {
-        if (this.breached) return;
-        this.hp -= amount;
-        if (this.hp <= 0) {
-            this.breached = true;
-            endRound(true);
-        }
-        // Visual damage: remove random segments near hit or bottom
-        if (Math.random() < amount/5) {
-            // Find a segment to break
-            const idx = Math.floor(rand(0, this.segments.length));
-            if (this.segments[idx].active) {
-                this.segments[idx].active = false;
-                // Debris particles
-                for(let k=0; k<3; k++) {
-                    particles.push(new Particle(this.segments[idx].x, this.segments[idx].y, '#795548', 3, 60));
-                }
-            }
-        }
-    }
-
-    draw() {
-        ctx.fillStyle = '#795548';
-        for (let s of this.segments) {
-            if (s.active) {
-                ctx.fillRect(s.x, s.y, s.w, s.h);
-                // Mortar lines
-                ctx.strokeStyle = '#5d4037';
-                ctx.strokeRect(s.x, s.y, s.w, s.h);
-            }
-        }
-        
-        // Draw Gate (if breached, show hole)
-        ctx.fillStyle = '#3e2723';
-        ctx.fillRect(this.x + 50, GROUND_Y - 80, 50, 80);
-        
-        // HP Bar
-        ctx.fillStyle = '#333';
-        ctx.fillRect(this.x, this.y - 30, this.width, 10);
-        ctx.fillStyle = this.hp > 300 ? '#4caf50' : '#f44336';
-        ctx.fillRect(this.x, this.y - 30, this.width * (this.hp/this.maxHp), 10);
-    }
-}
-
-// --- GAME LOGIC ---
-
-function initGame() {
-    castle = new Castle();
-    resetRound();
-    loop();
-}
-
-function resetRound() {
-    entities = [];
-    projectiles = [];
-    particles = [];
-    gameState = 'ATTACKING';
-    statusEl.style.display = 'none';
+class Unit{
+  constructor(x,y,type,team){
+    this.x=x;this.y=y;this.type=type;this.team=team;
+    this.hp=type==='archer'?30:type==='ram'?80:type==='siege'?120:40;
+    this.maxHp=this.hp;
+    this.speed=type==='archer'?0.8:type==='ram'?0.5:type==='siege'?0.3:1.2;
+    this.w=type==='siege'?40:type==='ram'?35:12;
+    this.h=type==='siege'?50:type==='ram'?25:22;
+    this.vx=0;this.vy=0;
+    this.shootTimer=0;
+    this.shootInterval=type==='archer'?90:type==='def_archer'?70:0;
+    this.animFrame=0;
+    this.animTimer=0;
+    this.dead=false;
+    this.deathTimer=0;
+    this.onWall=false;
+    this.climbing=false;
+    this.climbProgress=0;
+    this.stunned=0;
+    this.targetX=x;
+  }
+  update(){
+    if(this.dead){this.deathTimer++;return this.deathTimer>30;}
+    if(this.stunned>0){this.stunned--;return false;}
+    this.animTimer++;
+    if(this.animTimer>10){this.animTimer=0;this.animFrame=(this.animFrame+1)%4;}
     
-    // Spawn Attackers
-    attackers = [];
-    defenders = [];
-
-    // Units
-    for(let i=0; i<3; i++) attackers.push(new Catapult(rand(50, 150), GROUND_Y - 40));
-    for(let i=0; i<5; i++) attackers.push(new Archer(rand(100, 250), GROUND_Y - 40));
-    attackers.push(new SiegeTower(50));
-    attackers.push(new BatteringRam(50));
-
-    // Defenders
-    castle.rebuild();
-    for(let i=0; i<4; i++) {
-        defenders.push(new Archer(castle.x + 20 + (i*30), castle.y - 10, 'defenders'));
+    if(this.team==='attacker'){
+      if(this.type==='archer'){
+        // Find optimal shooting position
+        const wallX=wallSegments.length>0?wallSegments[Math.floor(SEGMENT_COUNT/2)].x:W*WALL_X_RATIO;
+        const shootRange=W*0.15;
+        if(this.x<wallX-shootRange-20){
+          this.x+=this.speed;
+        }else if(this.x>wallX-shootRange+20){
+          this.x-=this.speed;
+        }
+        this.shootTimer++;
+        if(this.shootTimer>=this.shootInterval){
+          this.shootTimer=0;
+          this.shoot();
+        }
+      }else if(this.type==='ram'){
+        const wallX=wallSegments.length>0?wallSegments[Math.floor(SEGMENT_COUNT/2)].x:W*WALL_X_RATIO;
+        if(this.x<wallX-this.w){
+          this.x+=this.speed;
+        }else{
+          // Ram the wall
+          this.animFrame=1;
+          for(let s of wallSegments){
+            if(!s.broken&&Math.abs(s.x+s.w/2-this.x)<s.w){
+              s.hp-=2;
+              if(s.hp<=0)breakWall(s);
+            }
+          }
+          this.stunned=5;
+        }
+      }else if(this.type==='siege'){
+        const wallX=wallSegments.length>0?wallSegments[Math.floor(SEGMENT_COUNT/2)].x:W*WALL_X_RATIO;
+        if(this.x<wallX-this.w){
+          this.x+=this.speed;
+        }else if(!this.climbing){
+          this.climbing=true;
+        }
+        if(this.climbing){
+          this.climbProgress+=0.008;
+          if(this.climbProgress>=1){
+            this.climbing=false;
+            // Deploy archers from siege tower
+            for(let i=0;i<3;i++){
+              let a=new Unit(this.x+Math.random()*20,GROUND-this.h-10,'archer','attacker');
+              a.speed=1.5;
+              attackers.push(a);
+            }
+          }
+        }
+      }
+    }else{
+      // Defender
+      if(this.type==='def_archer'){
+        this.shootTimer++;
+        if(this.shootTimer>=this.shootInterval){
+          this.shootTimer=0;
+          this.shoot();
+        }
+      }else if(this.type==='catapult'){
+        this.shootTimer++;
+        if(this.shootTimer>=this.shootInterval){
+          this.shootTimer=0;
+          this.shoot();
+        }
+      }
     }
-}
-
-function createExplosion(x, y, color, count) {
-    for(let i=0; i<count; i++) {
-        particles.push(new Particle(x, y, color, 5, rand(20, 40)));
+    return false;
+  }
+  shoot(){
+    if(this.team==='attacker'){
+      // Find target
+      let tx=castleTower.x+castleTower.w/2;
+      let ty=castleTower.y+castleTower.h*0.3;
+      if(this.type==='archer'){
+        // Aim at defenders or castle
+        let closest=null,minD=Infinity;
+        for(let d of defenders){
+          if(!d.dead){
+            let dist=Math.abs(d.x-this.x);
+            if(dist<minD){minD=dist;closest=d;}
+          }
+        }
+        if(closest){tx=closest.x;ty=closest.y+closest.h/2;}
+        let vx=(tx-this.x)*0.015;
+        let vy=-Math.abs(vx)*0.6-2;
+        projectiles.push(new Projectile(this.x,this.y-15,vx,vy,'arrow',this.team));
+      }
+    }else{
+      // Defender shoots at attackers
+      let closest=null,minD=Infinity;
+      for(let a of attackers){
+        if(!a.dead){
+          let dist=Math.abs(a.x-this.x);
+          if(dist<minD){minD=dist;closest=a;}
+        }
+      }
+      if(closest){
+        let tx=closest.x;
+        let ty=closest.y+closest.h/2;
+        if(this.type==='def_archer'){
+          let vx=(tx-this.x)*0.012;
+          let vy=Math.abs(vx)*0.3-1;
+          projectiles.push(new Projectile(this.x,this.y+10,vx,vy,'arrow',this.team));
+        }else if(this.type==='catapult'){
+          let vx=(tx-this.x)*0.008;
+          let vy=-Math.abs(vx)*1.2-4;
+          projectiles.push(new Projectile(this.x,this.y,vx,vy,'stone',this.team));
+        }
+      }
     }
-}
-
-function endRound(attackersWin) {
-    if (gameState === 'RESETTING') return;
-    gameState = 'RESETTING';
-    
-    const msg = attackersWin ? "WALLS BREACHED!" : "ATTACK REPELLED!";
-    const cssClass = attackersWin ? "win" : "lose";
-    
-    statusEl.innerHTML = `<span class="${cssClass}">${msg}</span><br><small>Preparing next assault...</small>`;
-    statusEl.style.display = 'block';
-
-    setTimeout(() => {
-        resetRound();
-    }, 3000);
-}
-
-function loop() {
-    requestAnimationFrame(loop);
-    frame++;
-
-    // Screen Shake
-    let tx = 0, ty = 0;
-    if (shake > 0) {
-        tx = rand(-shake, shake);
-        ty = rand(-shake, shake);
-        shake *= 0.9;
-        if (shake < 0.5) shake = 0;
+  }
+  draw(){
+    if(this.dead){
+      ctx.globalAlpha=Math.max(0,1-this.deathTimer/30);
     }
-
     ctx.save();
-    ctx.translate(tx, ty);
-
-    // Clear
-    ctx.fillStyle = '#87CEEB'; // Sky
-    ctx.fillRect(-10, -10, WIDTH+20, HEIGHT+20);
+    ctx.translate(this.x,this.y);
     
-    // Sun/Moon
-    ctx.fillStyle = '#FFD700';
-    ctx.beginPath();
-    ctx.arc(WIDTH - 100, 100, 40, 0, Math.PI*2);
-    ctx.fill();
-
-    // Ground
-    ctx.fillStyle = '#4caf50';
-    ctx.fillRect(0, GROUND_Y, WIDTH, HEIGHT - GROUND_Y);
-    ctx.fillStyle = '#388e3c'; // Grass detail
-    ctx.fillRect(0, GROUND_Y, WIDTH, 10);
-
-    // Draw Castle
-    castle.draw();
-
-    // Update & Draw Attackers
-    for (let i = attackers.length - 1; i >= 0; i--) {
-        let u = attackers[i];
-        if (gameState === 'ATTACKING') u.update();
-        u.draw();
-        if (u.dead) {
-            attackers.splice(i, 1);
-        }
+    if(this.team==='attacker'){
+      ctx.fillStyle=ATTACKER;
+    }else{
+      ctx.fillStyle=DEFENDER;
     }
-
-    // Check Repel Condition
-    if (gameState === 'ATTACKING' && attackers.length === 0) {
-        endRound(false);
+    
+    if(this.type==='archer'||this.type==='def_archer'){
+      // Body
+      ctx.fillRect(-4,-this.h,8,this.h-8);
+      // Head
+      ctx.beginPath();
+      ctx.arc(0,-this.h-3,5,0,Math.PI*2);
+      ctx.fill();
+      // Legs animation
+      let legOff=Math.sin(this.animTimer/3*0.3)*3;
+      if(this.type!=='def_archer'||this.speed>0.5){
+        ctx.fillRect(-4,-8+legOff,3,8);
+        ctx.fillRect(1,-8-legOff,3,8);
+      }else{
+        ctx.fillRect(-4,-8,3,8);
+        ctx.fillRect(1,-8,3,8);
+      }
+      // Bow
+      ctx.strokeStyle=WOOD_L;
+      ctx.lineWidth=2;
+      ctx.beginPath();
+      if(this.team==='attacker'){
+        ctx.arc(8,-this.h+8,10,-Math.PI*0.5,Math.PI*0.5);
+      }else{
+        ctx.arc(-8,-this.h+8,10,Math.PI*0.5,-Math.PI*0.5);
+      }
+      ctx.stroke();
+      // Bowstring
+      ctx.strokeStyle='#aaa';
+      ctx.lineWidth=1;
+      ctx.beginPath();
+      if(this.team==='attacker'){
+        ctx.moveTo(18,-this.h+3);
+        ctx.lineTo(18,-this.h+13);
+      }else{
+        ctx.moveTo(-18,-this.h+3);
+        ctx.lineTo(-18,-this.h+13);
+      }
+      ctx.stroke();
+    }else if(this.type==='ram'){
+      // Ram body
+      ctx.fillStyle=WOOD;
+      ctx.fillRect(-15,-this.h,30,this.h-5);
+      // Ram head (spike)
+      ctx.fillStyle='#888';
+      ctx.beginPath();
+      ctx.moveTo(15,-this.h+5);
+      ctx.lineTo(25,-this.h/2);
+      ctx.lineTo(15,-5);
+      ctx.fill();
+      // Wheels
+      ctx.fillStyle='#333';
+      ctx.beginPath();
+      ctx.arc(-8,0,5,0,Math.PI*2);
+      ctx.arc(8,0,5,0,Math.PI*2);
+      ctx.fill();
+      // Soldiers pushing
+      for(let i=-1;i<=1;i++){
+        let sx=-10+i*10;
+        ctx.fillStyle=ATTACKER;
+        ctx.fillRect(sx-3,-this.h-12,6,12);
+        ctx.beginPath();
+        ctx.arc(sx,-this.h-15,4,0,Math.PI*2);
+        ctx.fill();
+      }
+    }else if(this.type==='siege'){
+      // Tower body
+      ctx.fillStyle=WOOD;
+      ctx.fillRect(-20,-this.h,40,this.h-5);
+      // Roof
+      ctx.beginPath();
+      ctx.moveTo(-25,-this.h);
+      ctx.lineTo(0,-this.h-15);
+      ctx.lineTo(25,-this.h);
+      ctx.fill();
+      // Window/opening
+      ctx.fillStyle='#111';
+      ctx.fillRect(-8,-this.h+10,16,12);
+      // Ladder
+      ctx.strokeStyle=WOOD_L;
+      ctx.lineWidth=1;
+      for(let i=0;i<5;i++){
+        let ly=-5-i*(this.h-10)/4;
+        ctx.beginPath();
+        ctx.moveTo(-20,ly);
+        ctx.lineTo(20,ly);
+        ctx.stroke();
+      }
+      // Wheels
+      ctx.fillStyle='#333';
+      ctx.beginPath();
+      ctx.arc(-15,0,6,0,Math.PI*2);
+      ctx.arc(15,0,6,0,Math.PI*2);
+      ctx.fill();
+      if(this.climbing){
+        ctx.globalAlpha*=this.climbProgress;
+      }
+    }else if(this.type==='catapult'){
+      // Base
+      ctx.fillStyle=WOOD;
+      ctx.fillRect(-15,-this.h,30,this.h);
+      // Arm
+      ctx.save();
+      ctx.translate(0,-this.h);
+      let angle=-Math.PI/4+Math.sin(this.shootTimer*0.05)*0.1;
+      ctx.rotate(angle);
+      ctx.fillStyle=WOOD_L;
+      ctx.fillRect(0,-3,30,6);
+      // Sling
+      ctx.fillStyle='#888';
+      ctx.beginPath();
+      ctx.arc(30,0,5,0,Math.PI*2);
+      ctx.fill();
+      ctx.restore();
+      // Wheels
+      ctx.fillStyle='#333';
+      ctx.beginPath();
+      ctx.arc(-10,0,7,0,Math.PI*2);
+      ctx.arc(10,0,7,0,Math.PI*2);
+      ctx.fill();
     }
-
-    // Update & Draw Defenders
-    for (let i = defenders.length - 1; i >= 0; i--) {
-        let u = defenders[i];
-        if (gameState === 'ATTACKING') u.update();
-        u.draw();
-        if (u.dead) {
-            defenders.splice(i, 1);
-        }
-    }
-
-    // Projectiles
-    for (let i = projectiles.length - 1; i >= 0; i--) {
-        let p = projectiles[i];
-        if (gameState === 'ATTACKING') p.update();
-        p.draw();
-        if (!p.active) projectiles.splice(i, 1);
-    }
-
-    // Particles
-    for (let i = particles.length - 1; i >= 0; i--) {
-        let p = particles[i];
-        p.update();
-        p.draw();
-        if (p.life <= 0) particles.splice(i, 1);
-    }
-
     ctx.restore();
+    ctx.globalAlpha=1;
+    
+    // Health bar
+    if(this.hp<this.maxHp&&!this.dead){
+      let bw=20;
+      ctx.fillStyle='#300';
+      ctx.fillRect(this.x-bw/2,this.y-this.h-15,bw,3);
+      ctx.fillStyle='#f44';
+      ctx.fillRect(this.x-bw/2,this.y-this.h-15,bw*(this.hp/this.maxHp),3);
+    }
+  }
+  takeDamage(dmg){
+    this.hp-=dmg;
+    if(this.hp<=0){
+      this.dead=true;
+      this.deathTimer=0;
+      // Death particles
+      for(let i=0;i<8;i++){
+        particles.push({
+          x:this.x,y:this.y-this.h/2,
+          vx:(Math.random()-0.5)*3,vy:-Math.random()*3-1,
+          life:30,maxLife:30,
+          color:this.team==='attacker'?ATTACKER:DEFENDER,
+          size:2+Math.random()*2
+        });
+      }
+    }
+  }
 }
+
+class Projectile{
+  constructor(x,y,vx,vy,type,team){
+    this.x=x;this.y=y;this.vx=vx;this.vy=vy;
+    this.type=type;this.team=team;
+    this.gravity=type==='stone'?0.12:0.08;
+    this.hp=type==='stone'?3:1;
+    this.dead=false;
+    this.trail=[];
+    this.age=0;
+  }
+  update(){
+    if(this.dead)return true;
+    this.age++;
+    this.vy+=this.gravity;
+    this.x+=this.vx;
+    this.y+=this.vy;
+    
+    this.trail.push({x:this.x,y:this.y,age:0});
+    if(this.trail.length>8)this.trail.shift();
+    for(let t of this.trail)t.age++;
+    
+    // Ground collision
+    if(this.y>GROUND){
+      this.dead=true;
+      if(this.type==='stone'){
+        // Splash damage
+        for(let a of attackers){
+          if(!a.dead&&Math.abs(a.x-this.x)<40){
+            a.takeDamage(15);
+          }
+        }
+        for(let i=0;i<12;i++){
+          particles.push({
+            x:this.x,y:GROUND,
+            vx:(Math.random()-0.5)*5,vy:-Math.random()*4-1,
+            life:40,maxLife:40,
+            color:'#888',size:2+Math.random()*3
+          });
+        }
+      }
+      return false;
+    }
+    
+    // Out of bounds
+    if(this.x<-50||this.x>W+50)return true;
+    
+    // Hit wall (attacker projectiles)
+    if(this.team==='attacker'){
+      for(let s of wallSegments){
+        if(!s.broken&&this.x>s.x&&this.x<s.x+s.w&&this.y>s.y&&this.y<s.y+s.h){
+          s.hp-=this.type==='stone'?25:5;
+          if(s.hp<=0)breakWall(s);
+          this.dead=true;
+          for(let i=0;i<4;i++){
+            particles.push({
+              x:this.x,y:this.y,
+              vx:(Math.random()-0.5)*2,vy:-Math.random()*2,
+              life:20,maxLife:20,
+              color:'#aaa',size:1+Math.random()*2
+            });
+          }
+          return false;
+        }
+      }
+      // Hit castle tower
+      if(this.x>castleTower.x&&this.x<castleTower.x+castleTower.w&&
+         this.y>castleTower.y&&this.y<castleTower.y+castleTower.h){
+        castleTower.hp-=this.type==='stone'?15:5;
+        this.dead=true;
+        return false;
+      }
+      // Hit defenders
+      for(let d of defenders){
+        if(!d.dead&&Math.abs(this.x-d.x)<15&&Math.abs(this.y-(d.y-d.h/2))<20){
+          d.takeDamage(this.type==='stone'?20:8);
+          this.dead=true;
+          return false;
+        }
+      }
+    }else{
+      // Hit attackers
+      for(let a of attackers){
+        if(!a.dead&&Math.abs(this.x-a.x)<15&&Math.abs(this.y-(a.y-a.h/2))<20){
+          a.takeDamage(this.type==='stone'?20:8);
+          this.dead=true;
+          return false;
+        }
+      }
+    }
+    return false;
+  }
+  draw(){
+    if(this.dead)return;
+    // Trail
+    for(let i=0;i<this.trail.length;i++){
+      let t=this.trail[i];
+      let alpha=1-t.age/8;
+      ctx.globalAlpha=alpha*0.5;
+      ctx.fillStyle=this.type==='stone'?'#888':'#aa9966';
+      ctx.beginPath();
+      ctx.arc(t.x,t.y,this.type==='stone'?3:1.5,0,Math.PI*2);
+      ctx.fill();
+    }
+    ctx.globalAlpha=1;
+    
+    if(this.type==='arrow'){
+      let angle=Math.atan2(this.vy,this.vx);
+      ctx.save();
+      ctx.translate(this.x,this.y);
+      ctx.rotate(angle);
+      ctx.strokeStyle=ARROW_C;
+      ctx.lineWidth=1.5;
+      ctx.beginPath();
+      ctx.moveTo(-8,0);
+      ctx.lineTo(8,0);
+      ctx.stroke();
+      // Arrowhead
+      ctx.fillStyle='#ccc';
+      ctx.beginPath();
+      ctx.moveTo(10,0);
+      ctx.lineTo(6,-3);
+      ctx.lineTo(6,3);
+      ctx.fill();
+      // Fletching
+      ctx.fillStyle='#aa8844';
+      ctx.fillRect(-10,-2,4,1);
+      ctx.fillRect(-10,1,4,1);
+      ctx.restore();
+    }else{
+      // Stone
+      ctx.fillStyle=STONE_C;
+      ctx.beginPath();
+      ctx.arc(this.x,this.y,5,0,Math.PI*2);
+      ctx.fill();
+      ctx.fillStyle='#777';
+      ctx.beginPath();
+      ctx.arc(this.x-1,this.y-1,3,0,Math.PI*2);
+      ctx.fill();
+    }
+  }
+}
+
+function breakWall(seg){
+  seg.broken=true;
+  seg.animY=0;
+  seg.animRot=0;
+  // Create debris
+  for(let i=0;i<6;i++){
+    seg.debris.push({
+      x:seg.x+Math.random()*seg.w,
+      y:seg.y+Math.random()*seg.h*0.5,
+      vx:(Math.random()-0.5)*4,
+      vy:-Math.random()*5-2,
+      w:5+Math.random()*10,
+      h:5+Math.random()*8,
+      rot:Math.random()*Math.PI*2,
+      rotV:(Math.random()-0.5)*0.2,
+      color:DEBRIS_C[Math.floor(Math.random()*DEBRIS_C.length)],
+      settled:false,
+      settleY:0
+    });
+  }
+  // Particles
+  for(let i=0;i<15;i++){
+    particles.push({
+      x:seg.x+seg.w/2,y:seg.y+seg.h*0.3,
+      vx:(Math.random()-0.5)*6,vy:-Math.random()*5-1,
+      life:50,maxLife:50,
+      color:'#999',size:1+Math.random()*3
+    });
+  }
+  // Smoke
+  for(let i=0;i<5;i++){
+    smokeParticles.push({
+      x:seg.x+seg.w/2,y:seg.y+seg.h*0.3,
+      vx:(Math.random()-0.5)*1,vy:-Math.random()*1-0.5,
+      life:60,maxLife:60,size:10+Math.random()*15
+    });
+  }
+}
+
+function spawnWave(){
+  attackers=[];
+  defenders=[];
+  projectiles=[];
+  debris=[];
+  particles=[];
+  smokeParticles=[];
+  
+  initWall();
+  initCastle();
+  
+  // Spawn attackers from left
+  let startX=W*0.05;
+  // Archers in back
+  for(let i=0;i<5;i++){
+    attackers.push(new Unit(startX+i*25,GROUND,'archer','attacker'));
+  }
+  // Ram in middle
+  attackers.push(new Unit(startX+5*25+20,GROUND,'ram','attacker'));
+  // Siege tower
+  attackers.push(new Unit(startX+5*25+60,GROUND,'siege','attacker'));
+  // More archers behind
+  for(let i=0;i<3;i++){
+    attackers.push(new Unit(startX+5*25+100+i*25,GROUND,'archer','attacker'));
+  }
+  
+  // Spawn defenders on wall
+  let wallX=wallSegments[Math.floor(SEGMENT_COUNT/2)].x;
+  let wallTop=wallSegments[Math.floor(SEGMENT_COUNT/2)].y;
+  
+  // Wall archers
+  for(let i=0;i<4;i++){
+    let d=new Unit(wallX-60+i*40,wallTop+5,'def_archer','defender');
+    d.speed=0;
+    defenders.push(d);
+  }
+  
+  // Catapult behind castle
+  let cat=new Unit(castleTower.x+castleTower.w+30,GROUND,'catapult','defender');
+  cat.speed=0;
+  cat.shootInterval=120;
+  defenders.push(cat);
+  
+  // Extra defender on tower
+  let td=new Unit(castleTower.x+castleTower.w/2,castleTower.y+10,'def_archer','defender');
+  td.speed=0;
+  defenders.push(td);
+}
+
+function drawBackground(){
+  // Sky gradient
+  let grad=ctx.createLinearGradient(0,0,0,GROUND);
+  grad.addColorStop(0,SKY_TOP);
+  grad.addColorStop(1,SKY_BOT);
+  ctx.fillStyle=grad;
+  ctx.fillRect(0,0,W,GROUND);
+  
+  // Stars
+  ctx.fillStyle='#fff';
+  for(let i=0;i<50;i++){
+    let sx=(i*137.5+assaultWave*10)%W;
+    let sy=(i*97.3)%(GROUND*0.6);
+    let twinkle=Math.sin(Date.now()*0.003+i)*0.5+0.5;
+    ctx.globalAlpha=twinkle*0.7;
+    ctx.fillRect(sx,sy,1.5,1.5);
+  }
+  ctx.globalAlpha=1;
+  
+  // Moon
+  ctx.fillStyle='#dde';
+  ctx.beginPath();
+  ctx.arc(W*0.15,H*0.12,25,0,Math.PI*2);
+  ctx.fill();
+  ctx.fillStyle=SKY_TOP;
+  ctx.beginPath();
+  ctx.arc(W*0.15+8,H*0.12-3,22,0,Math.PI*2);
+  ctx.fill();
+  
+  // Mountains
+  ctx.fillStyle='#1a1a2a';
+  ctx.beginPath();
+  ctx.moveTo(0,GROUND);
+  for(let x=0;x<=W;x+=60){
+    ctx.lineTo(x,GROUND-40-Math.sin(x*0.008)*50-Math.sin(x*0.015)*25);
+  }
+  ctx.lineTo(W,GROUND);
+  ctx.fill();
+  
+  // Ground
+  ctx.fillStyle=GROUND_C;
+  ctx.fillRect(0,GROUND,W,H-GROUND);
+  
+  // Grass line
+  ctx.fillStyle=GRASS_C;
+  ctx.fillRect(0,GROUND-2,W,4);
+  
+  // Ground detail
+  ctx.fillStyle='#3a2a18';
+  for(let i=0;i<30;i++){
+    let gx=(i*W/30+20)%W;
+    ctx.fillRect(gx,GROUND+5,3,2);
+  }
+}
+
+function drawCastle(){
+  // Castle tower
+  if(castleTower.hp>0){
+    ctx.fillStyle=CASTLE_C;
+    ctx.fillRect(castleTower.x,castleTower.y,castleTower.w,castleTower.h);
+    
+    // Battlements
+    let bw=castleTower.w/5;
+    for(let i=0;i<5;i++){
+      if(i%2===0){
+        ctx.fillRect(castleTower.x+i*bw,castleTower.y-10,bw,10);
+      }
+    }
+    
+    // Window
+    ctx.fillStyle='#111';
+    ctx.fillRect(castleTower.x+castleTower.w*0.3,castleTower.y+castleTower.h*0.3,
+                 castleTower.w*0.4,castleTower.h*0.2);
+    
+    // Door
+    ctx.fillStyle='#222';
+    ctx.beginPath();
+    ctx.moveTo(castleTower.x+castleTower.w*0.2,GROUND);
+    ctx.lineTo(castleTower.x+castleTower.w*0.2,GROUND-castleTower.h*0.25);
+    ctx.arc(castleTower.x+castleTower.w*0.5,GROUND-castleTower.h*0.25,castleTower.w*0.3,Math.PI,0);
+    ctx.lineTo(castleTower.x+castleTower.w*0.8,GROUND);
+    ctx.fill();
+    
+    // Damage cracks
+    if(castleTower.hp<castleTower.maxHp*0.7){
+      ctx.strokeStyle='#222';
+      ctx.lineWidth=1;
+      ctx.beginPath();
+      ctx.moveTo(castleTower.x+10,castleTower.y+20);
+      ctx.lineTo(castleTower.x+25,castleTower.y+50);
+      ctx.lineTo(castleTower.x+15,castleTower.y+80);
+      ctx.stroke();
+    }
+  }
+}
+
+function drawWall(){
+  for(let s of wallSegments){
+    if(s.broken){
+      // Draw debris
+      for(let d of s.debris){
+        if(d.settled){
+          ctx.fillStyle=d.color;
+          ctx.save();
+          ctx.translate(d.x,d.y);
+          ctx.rotate(d.rot);
+          ctx.fillRect(-d.w/2,-d.h/2,d.w,d.h);
+          ctx.restore();
+        }else{
+          ctx.fillStyle=d.color;
+          ctx.save();
+          ctx.translate(d.x,d.y);
+          ctx.rotate(d.rot);
+          ctx.fillRect(-d.w/2,-d.h/2,d.w,d.h);
+          ctx.restore();
+        }
+      }
+    }else{
+      // Wall segment
+      let dmgRatio=1-s.hp/s.maxHp;
+      let r=Math.floor(74+dmgRatio*30);
+      let g=Math.floor(74-dmgRatio*20);
+      let b=Math.floor(90-dmgRatio*30);
+      ctx.fillStyle=`rgb(${r},${g},${b})`;
+      ctx.fillRect(s.x,s.y,s.w,s.h);
+      
+      // Top edge
+      ctx.fillStyle=WALL_TOP;
+      ctx.fillRect(s.x-2,s.y,s.w+4,4);
+      
+      // Crenellations
+      let cw=s.w/3;
+      for(let i=0;i<3;i++){
+        if(i%2===0){
+          ctx.fillStyle=`rgb(${r},${g},${b})`;
+          ctx.fillRect(s.x+i*cw,s.y-8,cw,8);
+        }
+      }
+      
+      // Damage cracks
+      if(dmgRatio>0.3){
+        ctx.strokeStyle=`rgba(0,0,0,${dmgRatio})`;
+        ctx.lineWidth=1;
+        ctx.beginPath();
+        ctx.moveTo(s.x+s.w*0.3,s.y+s.h*0.2);
+        ctx.lineTo(s.x+s.w*0.5,s.y+s.h*0.4);
+        ctx.lineTo(s.x+s.w*0.4,s.y+s.h*0.6);
+        ctx.stroke();
+      }
+      if(dmgRatio>0.6){
+        ctx.beginPath();
+        ctx.moveTo(s.x+s.w*0.7,s.y+s.h*0.1);
+        ctx.lineTo(s.x+s.w*0.6,s.y+s.h*0.35);
+        ctx.stroke();
+      }
+    }
+  }
+}
+
+function drawParticles(){
+  for(let p of particles){
+    let alpha=p.life/p.maxLife;
+    ctx.globalAlpha=alpha;
+    ctx.fillStyle=p.color;
+    ctx.fillRect(p.x-p.size/2,p.y-p.size/2,p.size,p.size);
+  }
+  ctx.globalAlpha=1;
+  
+  for(let s of smokeParticles){
+    let alpha=s.life/s.maxLife*0.3;
+    ctx.globalAlpha=alpha;
+    ctx.fillStyle='#888';
+    ctx.beginPath();
+    ctx.arc(s.x,s.y,s.size*(1-s.life/s.maxLife*0.5),0,Math.PI*2);
+    ctx.fill();
+  }
+  ctx.globalAlpha=1;
+}
+
+function drawUI(){
+  // Assault counter
+  ctx.fillStyle='rgba(0,0,0,0.5)';
+  ctx.fillRect(10,10,180,30);
+  ctx.fillStyle='#ddd';
+  ctx.font='14px monospace';
+  ctx.fillText(`Assault #${assaultWave+1}`,20,30);
+  
+  // State indicator
+  let stateText='';
+  if(gameState===STATE.ATTACKING)stateText='⚔ BATTLE';
+  else if(gameState===STATE.BREACHED)stateText='🏰 BREACHED!';
+  else if(gameState===STATE.REPULSED)stateText='🛡 REPULSED!';
+  else if(gameState===STATE.CLEARING)stateText='Clearing field...';
+  else if(gameState===STATE.REPAIRING)stateText='Repairing walls...';
+  
+  ctx.fillStyle='rgba(0,0,0,0.5)';
+  ctx.fillRect(W-200,10,190,30);
+  ctx.fillStyle=gameState===STATE.BREACHED?'#f44':gameState===STATE.REPULSED?'#4f4':'#ddd';
+  ctx.font='14px monospace';
+  ctx.fillText(stateText,W-190,30);
+  
+  // Wall health bar
+  let totalHp=0,maxHp=0;
+  for(let s of wallSegments){totalHp+=s.hp;maxHp+=s.maxHp;}
+  let wallPct=totalHp/maxHp;
+  ctx.fillStyle='rgba(0,0,0,0.5)';
+  ctx.fillRect(W/2-100,10,200,20);
+  ctx.fillStyle='#333';
+  ctx.fillRect(W/2-98,12,196,16);
+  ctx.fillStyle=wallPct>0.5?'#4a4':wallPct>0.25?'#aa4':'#a44';
+  ctx.fillRect(W/2-98,12,196*wallPct,16);
+  ctx.fillStyle='#ddd';
+  ctx.font='11px monospace';
+  ctx.fillText('WALL INTEGRITY',W/2-50,24);
+}
+
+function update(){
+  // Update projectiles
+  for(let i=projectiles.length-1;i>=0;i--){
+    if(projectiles[i].update()){
+      projectiles.splice(i,1);
+    }
+  }
+  
+  // Update units
+  for(let i=attackers.length-1;i>=0;i--){
+    if(attackers[i].update()){
+      attackers.splice(i,1);
+    }
+  }
+  for(let i=defenders.length-1;i>=0;i--){
+    if(defenders[i].update()){
+      defenders.splice(i,1);
+    }
+  }
+  
+  // Update debris
+  for(let s of wallSegments){
+    if(s.broken){
+      for(let d of s.debris){
+        if(!d.settled){
+          d.vy+=0.2;
+          d.x+=d.vx;
+          d.y+=d.vy;
+          d.rot+=d.rotV;
+          if(d.y>=GROUND-d.h/2){
+            d.y=GROUND-d.h/2;
+            d.settled=true;
+            d.vx=0;
+            d.vy=0;
+          }
+        }
+      }
+    }
+  }
+  
+  // Update particles
+  for(let i=particles.length-1;i>=0;i--){
+    let p=particles[i];
+    p.vy+=0.15;
+    p.x+=p.vx;
+    p.y+=p.vy;
+    p.life--;
+    if(p.life<=0)particles.splice(i,1);
+  }
+  for(let i=smokeParticles.length-1;i>=0;i--){
+    let s=smokeParticles[i];
+    s.x+=s.vx;
+    s.y+=s.vy;
+    s.life--;
+    if(s.life<=0)smokeParticles.splice(i,1);
+  }
+  
+  // Check game state transitions
+  if(gameState===STATE.ATTACKING){
+    let allWallBroken=wallSegments.every(s=>s.broken);
+    let allAttackersDead=attackers.every(a=>a.dead);
+    let allDefendersDead=defenders.every(d=>a=>a.dead);
+    
+    if(allWallBroken||castleTower.hp<=0){
+      gameState=STATE.BREACHED;
+      stateTimer=0;
+      score.attackers++;
+    }else if(allAttackersDead){
+      gameState=STATE.REPULSED;
+      stateTimer=0;
+      score.defenders++;
+    }
+  }else if(gameState===STATE.BREACHED){
+    stateTimer++;
+    if(stateTimer>120){
+      gameState=STATE.CLEARING;
+      stateTimer=0;
+    }
+  }else if(gameState===STATE.REPULSED){
+    stateTimer++;
+    if(stateTimer>120){
+      gameState=STATE.CLEARING;
+      stateTimer=0;
+    }
+  }else if(gameState===STATE.CLEARING){
+    stateTimer++;
+    // Fade out units
+    if(stateTimer>60){
+      gameState=STATE.REPAIRING;
+      stateTimer=0;
+      spawnWave();
+    }
+  }else if(gameState===STATE.REPAIRING){
+    stateTimer++;
+    if(stateTimer>90){
+      gameState=STATE.ATTACKING;
+      assaultWave++;
+    }
+  }
+}
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  drawBackground();
+  drawCastle();
+  drawWall();
+  
+  // Draw siege tower climbing effect
+  for(let a of attackers){
+    if(a.type==='siege'&&a.climbing){
+      ctx.globalAlpha=1-a.climbProgress;
+    }
+  }
+  
+  // Draw defenders
+  for(let d of defenders)d.draw();
+  
+  // Draw attackers
+  for(let a of attackers)a.draw();
+  
+  // Draw projectiles
+  for(let p of projectiles)p.draw();
+  
+  drawParticles();
+  
+  // State effects
+  if(gameState===STATE.BREACHED){
+    ctx.fillStyle=`rgba(255,50,50,${0.1+Math.sin(Date.now()*0.01)*0.05})`;
+    ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#f44';
+    ctx.font='bold 36px monospace';
+    ctx.textAlign='center';
+    ctx.fillText('⚔ WALL BREACHED! ⚔',W/2,H/2);
+    ctx.textAlign='left';
+  }else if(gameState===STATE.REPULSED){
+    ctx.fillStyle=`rgba(50,100,255,${0.1+Math.sin(Date.now()*0.01)*0.05})`;
+    ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#4af';
+    ctx.font='bold 36px monospace';
+    ctx.textAlign='center';
+    ctx.fillText('🛡 ATTACK REPULSED! 🛡',W/2,H/2);
+    ctx.textAlign='left';
+  }else if(gameState===STATE.CLEARING){
+    let alpha=Math.max(0,1-stateTimer/60);
+    ctx.fillStyle=`rgba(0,0,0,${alpha*0.5})`;
+    ctx.fillRect(0,0,W,H);
+  }else if(gameState===STATE.REPAIRING){
+    let progress=stateTimer/90;
+    ctx.fillStyle='rgba(0,0,0,0.3)';
+    ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#aaa';
+    ctx.font='20px monospace';
+    ctx.textAlign='center';
+    ctx.fillText(`Repairing... ${Math.floor(progress*100)}%`,W/2,H/2);
+    ctx.textAlign='left';
+  }
+  
+  drawUI();
+}
+
+function gameLoop(){
+  update();
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+// Fix the allDefendersDead check
+// (inline function reference issue)
+// Let me fix this in the update by using a proper check
 
 // Start
-initGame();
-
+spawnWave();
+gameLoop();
 </script>
 </body>
 </html>

@@ -1,453 +1,836 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Harbor at Dusk</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background-color: #000;
-        }
-        canvas {
-            display: block;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Harbor at Dusk</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; width: 100%; height: 100%; }
+</style>
 </head>
 <body>
-    <canvas id="scene"></canvas>
-    <script>
-        const canvas = document.getElementById('scene');
-        const ctx = canvas.getContext('2d');
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H, waterLine;
 
-        let width, height;
-        let time = 0;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  waterLine = H * 0.52;
+}
+resize();
+window.addEventListener('resize', resize);
 
-        // Configuration
-        const config = {
-            waterLevel: 0.65, // 65% down the screen
-            cycleDuration: 60, // seconds for full sunset loop
-            waveSpeed: 0.02,
-            waveAmplitude: 4,
-            lighthouseSpeed: 0.015,
-            ferrySpeed: 0.0003,
-            ferryWakes: []
-        };
+// --- Color Palettes for sky phases ---
+const skyPhases = [
+  { top: [255, 140, 66], mid: [255, 100, 50], bot: [255, 180, 100], horizon: [255, 220, 160] },
+  { top: [180, 80, 120], mid: [220, 100, 80], bot: [255, 150, 80], horizon: [255, 200, 130] },
+  { top: [60, 30, 90], mid: [120, 50, 80], bot: [200, 100, 60], horizon: [255, 170, 100] },
+  { top: [25, 15, 50], mid: [50, 25, 60], bot: [100, 50, 60], horizon: [180, 100, 60] },
+  { top: [10, 8, 30], mid: [20, 12, 40], bot: [40, 20, 45], horizon: [80, 40, 50] },
+  { top: [5, 5, 20], mid: [10, 8, 30], bot: [20, 10, 35], horizon: [40, 20, 35] },
+];
 
-        // Resize handling
-        function resize() {
-            width = canvas.width = window.innerWidth;
-            height = canvas.height = window.innerHeight;
-        }
-        window.addEventListener('resize', resize);
-        resize();
+function lerpColor(a, b, t) {
+  return [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t];
+}
 
-        // --- Color Palettes ---
-        // Interpolate between sunset colors and night colors
-        const sunsetColors = {
-            top: '#2b1055',
-            mid: '#7597de',
-            bot: '#fea468',
-            sun: '#ffcc33'
-        };
+function getSkyColors(t) {
+  const cycle = 60; // seconds for full cycle
+  const phase = ((t % cycle) / cycle) * skyPhases.length;
+  const idx = Math.floor(phase) % skyPhases.length;
+  const next = (idx + 1) % skyPhases.length;
+  const frac = phase - Math.floor(phase);
+  const sf = frac * frac * (3 - 2 * frac); // smoothstep
+  const s1 = skyPhases[idx], s2 = skyPhases[next];
+  return {
+    top: lerpColor(s1.top, s2.top, sf),
+    mid: lerpColor(s1.mid, s2.mid, sf),
+    bot: lerpColor(s1.bot, s2.bot, sf),
+    horizon: lerpColor(s1.horizon, s2.horizon, sf),
+  };
+}
 
-        const nightColors = {
-            top: '#020111',
-            mid: '#141852',
-            bot: '#24336b',
-            sun: '#ff5733'
-        };
+function rgb(c) { return `rgb(${c[0]|0},${c[1]|0},${c[2]|0})`; }
+function rgba(c, a) { return `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`; }
 
-        function getSkyColors(t) {
-            // t goes 0 to 1. 0 = Sunset, 1 = Night
-            const lerp = (a, b, k) => a * (1 - k) + b * k;
-            
-            const top = `rgb(${lerp(43, 2, t)}, ${lerp(16, 1, t)}, ${lerp(85, 17, t)})`;
-            const mid = `rgb(${lerp(117, 20, t)}, ${lerp(151, 24, t)}, ${lerp(222, 82, t)})`;
-            const bot = `rgb(${lerp(254, 36, t)}, ${lerp(164, 51, t)}, ${lerp(104, 107, t)})`;
-            const sun = `rgb(${lerp(255, 255, t)}, ${lerp(204, 87, t)}, ${lerp(51, 51, t)})`;
+// --- Stars ---
+const stars = [];
+for (let i = 0; i < 200; i++) {
+  stars.push({ x: Math.random(), y: Math.random() * 0.45, size: Math.random() * 1.8 + 0.3, twinkle: Math.random() * Math.PI * 2 });
+}
 
-            return { top, mid, bot, sun };
-        }
+function drawSky(t) {
+  const colors = getSkyColors(t);
+  const grad = ctx.createLinearGradient(0, 0, 0, waterLine);
+  grad.addColorStop(0, rgb(colors.top));
+  grad.addColorStop(0.3, rgb(colors.mid));
+  grad.addColorStop(0.7, rgb(colors.bot));
+  grad.addColorStop(1, rgb(colors.horizon));
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, waterLine);
 
-        // --- Entities ---
+  // Stars
+  const cycle = 60;
+  const phase = ((t % cycle) / cycle) * skyPhases.length;
+  const starAlpha = Math.max(0, Math.min(1, (phase - 2.5) / 1.5));
+  if (starAlpha > 0) {
+    stars.forEach(s => {
+      const twinkle = 0.5 + 0.5 * Math.sin(t * 2 + s.twinkle);
+      ctx.fillStyle = `rgba(255,255,240,${starAlpha * twinkle * 0.8})`;
+      ctx.beginPath();
+      ctx.arc(s.x * W, s.y * H, s.size, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  }
 
-        class Lighthouse {
-            constructor() {
-                this.x = width * 0.85;
-                this.y = height * config.waterLevel - 50;
-                this.angle = 0;
-                this.beamWidth = 0.3;
-            }
+  // Sun/moon glow
+  const sunY = waterLine * 0.3 + Math.sin(t * 0.05) * waterLine * 0.15;
+  const sunGrad = ctx.createRadialGradient(W * 0.7, sunY, 0, W * 0.7, sunY, 120);
+  sunGrad.addColorStop(0, `rgba(255,200,100,${0.3 + starAlpha * 0.1})`);
+  sunGrad.addColorStop(0.5, `rgba(255,150,80,${0.1 + starAlpha * 0.05})`);
+  sunGrad.addColorStop(1, 'rgba(255,100,50,0)');
+  ctx.fillStyle = sunGrad;
+  ctx.fillRect(W * 0.3, sunY - 120, W * 0.4, 240);
+}
 
-            update() {
-                this.angle += config.lighthouseSpeed;
-                if (this.angle > Math.PI * 2) this.angle -= Math.PI * 2;
-            }
+// --- Water ---
+function drawWater(t) {
+  const colors = getSkyColors(t);
+  const waterTop = rgb(lerpColor(colors.horizon, [20, 30, 50], 0.6));
+  const waterBot = rgb(lerpColor(colors.horizon, [5, 10, 25], 0.9));
+  const grad = ctx.createLinearGradient(0, waterLine, 0, H);
+  grad.addColorStop(0, waterTop);
+  grad.addColorStop(1, waterBot);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, waterLine, W, H - waterLine);
 
-            draw(ctx, skyColors) {
-                // Tower
-                ctx.fillStyle = '#1a1a1a';
-                ctx.beginPath();
-                ctx.moveTo(this.x - 15, this.y + 100);
-                ctx.lineTo(this.x + 15, this.y + 100);
-                ctx.lineTo(this.x + 5, this.y);
-                ctx.lineTo(this.x - 5, this.y);
-                ctx.fill();
+  // Layered waves
+  const waveLayers = [
+    { amp: 3, freq: 0.008, speed: 0.4, alpha: 0.15, yOff: 0 },
+    { amp: 2, freq: 0.012, speed: 0.6, alpha: 0.1, yOff: 15 },
+    { amp: 1.5, freq: 0.018, speed: 0.3, alpha: 0.08, yOff: 30 },
+    { amp: 4, freq: 0.005, speed: 0.2, alpha: 0.12, yOff: 5 },
+  ];
 
-                // Stripes
-                ctx.fillStyle = '#cc3333';
-                ctx.beginPath();
-                ctx.moveTo(this.x - 12, this.y + 60);
-                ctx.lineTo(this.x + 12, this.y + 60);
-                ctx.lineTo(this.x + 8, this.y + 30);
-                ctx.lineTo(this.x - 8, this.y + 30);
-                ctx.fill();
+  waveLayers.forEach(layer => {
+    ctx.beginPath();
+    ctx.moveTo(0, waterLine + layer.yOff);
+    for (let x = 0; x <= W; x += 2) {
+      const y = waterLine + layer.yOff +
+        Math.sin(x * layer.freq + t * layer.speed) * layer.amp +
+        Math.sin(x * layer.freq * 1.5 + t * layer.speed * 0.7) * layer.amp * 0.5 +
+        Math.sin(x * layer.freq * 0.5 + t * layer.speed * 1.3) * layer.amp * 0.3;
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(W, H);
+    ctx.lineTo(0, H);
+    ctx.closePath();
+    ctx.fillStyle = rgba(lerpColor(colors.horizon, [30, 50, 80], 0.4), layer.alpha);
+    ctx.fill();
+  });
 
-                // Light source
-                ctx.fillStyle = '#fff';
-                ctx.beginPath();
-                ctx.arc(this.x, this.y, 4, 0, Math.PI * 2);
-                ctx.fill();
+  // Specular glints along light path
+  const specCount = 40;
+  for (let i = 0; i < specCount; i++) {
+    const sx = (Math.sin(t * 0.3 + i * 7.3) * 0.5 + 0.5) * W;
+    const sy = waterLine + 10 + Math.abs(Math.sin(t * 0.5 + i * 3.1)) * (H - waterLine - 20);
+    const spark = 0.5 + 0.5 * Math.sin(t * 3 + i * 2.7);
+    const specAlpha = spark * 0.6;
+    if (specAlpha > 0.1) {
+      const specGrad = ctx.createRadialGradient(sx, sy, 0, sx, sy, 3 + spark * 2);
+      specGrad.addColorStop(0, `rgba(255,220,150,${specAlpha})`);
+      specGrad.addColorStop(1, 'rgba(255,200,100,0)');
+      ctx.fillStyle = specGrad;
+      ctx.fillRect(sx - 5, sy - 5, 10, 10);
+    }
+  }
+}
 
-                // Volumetric Beam
-                const lightX = this.x;
-                const lightY = this.y;
-                
-                ctx.save();
-                ctx.translate(lightX, lightY);
-                ctx.rotate(this.angle);
+// --- Reflections ---
+function drawReflections(t) {
+  const colors = getSkyColors(t);
+  // Sky reflection on water
+  const refGrad = ctx.createLinearGradient(0, waterLine, 0, waterLine + 80);
+  refGrad.addColorStop(0, rgba(colors.horizon, 0.2));
+  refGrad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = refGrad;
+  ctx.fillRect(0, waterLine, W, 80);
 
-                // Create gradient for beam
-                const grad = ctx.createLinearGradient(0, 0, width * 1.5, 0);
-                grad.addColorStop(0, 'rgba(255, 255, 200, 0.8)');
-                grad.addColorStop(0.1, 'rgba(255, 255, 200, 0.4)');
-                grad.addColorStop(1, 'rgba(255, 255, 200, 0)');
+  // Lighthouse reflection
+  const lhX = W * 0.85;
+  for (let y = waterLine; y < waterLine + 120; y += 2) {
+    const wobble = Math.sin(y * 0.1 + t * 2) * 3;
+    const alpha = 0.15 * (1 - (y - waterLine) / 120);
+    ctx.fillStyle = `rgba(255,230,150,${alpha})`;
+    ctx.fillRect(lhX + wobble - 2, y, 4, 2);
+  }
+}
 
-                ctx.fillStyle = grad;
-                ctx.beginPath();
-                ctx.moveTo(0, 0);
-                ctx.lineTo(width * 1.5, -height * 0.2);
-                ctx.lineTo(width * 1.5, height * 0.2);
-                ctx.fill();
+// --- Lighthouse ---
+const lighthouse = { x: 0, y: 0, height: 0, beamAngle: 0 };
 
-                ctx.restore();
-            }
-        }
+function initLighthouse() {
+  lighthouse.x = W * 0.85;
+  lighthouse.y = waterLine - 5;
+  lighthouse.height = Math.min(160, H * 0.2);
+}
 
-        class Boat {
-            constructor(x, scale, type) {
-                this.x = x;
-                this.baseY = height * config.waterLevel;
-                this.scale = scale;
-                this.type = type;
-                this.phase = Math.random() * Math.PI * 2;
-                this.drift = 0;
-            }
+function drawLighthouse(t) {
+  const lx = lighthouse.x;
+  const ly = lighthouse.y;
+  const lh = lighthouse.height;
+  const baseW = 22;
+  const topW = 14;
 
-            draw(ctx, waterY) {
-                const waveOffset = Math.sin(time * config.waveSpeed + this.phase) * 10;
-                const tilt = Math.cos(time * config.waveSpeed + this.phase) * 0.1;
-                
-                // Bobbing logic
-                this.y = waterY + waveOffset;
-                
-                ctx.save();
-                ctx.translate(this.x, this.y);
-                ctx.rotate(tilt);
-                ctx.scale(this.scale, this.scale);
+  // Tower
+  ctx.beginPath();
+  ctx.moveTo(lx - baseW, ly);
+  ctx.lineTo(lx - topW, ly - lh);
+  ctx.lineTo(lx + topW, ly - lh);
+  ctx.lineTo(lx + baseW, ly);
+  ctx.closePath();
 
-                // Hull
-                ctx.fillStyle = this.type === 'fishing' ? '#4a3b32' : '#2c3e50';
-                ctx.beginPath();
-                ctx.moveTo(-40, 0);
-                ctx.quadraticCurveTo(0, 30, 40, 0);
-                ctx.lineTo(30, -10);
-                ctx.lineTo(-30, -10);
-                ctx.fill();
+  const towerGrad = ctx.createLinearGradient(lx - baseW, 0, lx + baseW, 0);
+  towerGrad.addColorStop(0, '#8B0000');
+  towerGrad.addColorStop(0.3, '#CC3333');
+  towerGrad.addColorStop(0.5, '#DD4444');
+  towerGrad.addColorStop(0.7, '#CC3333');
+  towerGrad.addColorStop(1, '#6B0000');
+  ctx.fillStyle = towerGrad;
+  ctx.fill();
 
-                // Cabin
-                ctx.fillStyle = '#eee';
-                ctx.fillRect(-15, -25, 30, 15);
+  // White stripes
+  for (let i = 0; i < 4; i++) {
+    const sy = ly - lh * 0.15 - i * lh * 0.2;
+    const sh = lh * 0.08;
+    const wAtY = baseW - (baseW - topW) * ((ly - sy) / lh);
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.fillRect(lx - wAtY, sy, wAtY * 2, sh);
+  }
 
-                // Mast
-                ctx.strokeStyle = '#000';
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.moveTo(0, -10);
-                ctx.lineTo(0, -50);
-                ctx.stroke();
+  // Lantern room
+  const lanternY = ly - lh;
+  ctx.fillStyle = '#333';
+  ctx.fillRect(lx - topW - 3, lanternY - 12, (topW + 3) * 2, 14);
+  ctx.fillStyle = '#FFD700';
+  ctx.fillRect(lx - topW - 1, lanternY - 10, (topW + 1) * 2, 10);
 
-                // Flag
-                ctx.fillStyle = 'red';
-                ctx.beginPath();
-                ctx.moveTo(0, -50);
-                ctx.lineTo(10, -45);
-                ctx.lineTo(0, -40);
-                ctx.fill();
+  // Dome
+  ctx.beginPath();
+  ctx.arc(lx, lanternY - 12, topW + 3, Math.PI, 0);
+  ctx.fillStyle = '#444';
+  ctx.fill();
 
-                ctx.restore();
-            }
-        }
+  // Beam
+  lighthouse.beamAngle += 0.015;
+  const beamAngle = lighthouse.beamAngle;
+  const beamLen = Math.max(W, H) * 1.2;
 
-        class Gull {
-            constructor() {
-                this.reset();
-            }
+  ctx.save();
+  ctx.translate(lx, lanternY - 7);
+  ctx.rotate(beamAngle);
 
-            reset() {
-                this.x = Math.random() * width;
-                this.y = Math.random() * (height * 0.4);
-                this.vx = (Math.random() - 0.5) * 2;
-                this.vy = (Math.random() - 0.5) * 0.5;
-                this.wingPhase = Math.random() * Math.PI * 2;
-                this.state = 'flying'; // flying, landing, resting
-            }
+  // Volumetric beam
+  const beamGrad = ctx.createLinearGradient(0, 0, beamLen, 0);
+  beamGrad.addColorStop(0, 'rgba(255,240,180,0.35)');
+  beamGrad.addColorStop(0.3, 'rgba(255,230,150,0.15)');
+  beamGrad.addColorStop(1, 'rgba(255,220,120,0)');
 
-            update() {
-                this.wingPhase += 0.1;
-                
-                if (this.state === 'flying') {
-                    this.x += this.vx;
-                    this.y += this.vy + Math.sin(this.wingPhase) * 0.5;
-                    
-                    // Boundary wrap
-                    if (this.x > width + 50) this.x = -50;
-                    if (this.x < -50) this.x = width + 50;
-                    if (this.y < 0) this.y = 0;
-                    if (this.y > height * config.waterLevel - 50) this.y = height * config.waterLevel - 50;
+  ctx.beginPath();
+  ctx.moveTo(0, -3);
+  ctx.lineTo(beamLen, -beamLen * 0.06);
+  ctx.lineTo(beamLen, beamLen * 0.06);
+  ctx.lineTo(0, 3);
+  ctx.closePath();
+  ctx.fillStyle = beamGrad;
+  ctx.fill();
 
-                    // Random landing trigger
-                    if (Math.random() < 0.005) this.state = 'landing';
-                } else if (this.state === 'landing') {
-                    // Simple move towards a random post
-                    const postX = width * 0.2 + Math.random() * width * 0.6;
-                    const postY = height * config.waterLevel - 20;
-                    
-                    const dx = postX - this.x;
-                    const dy = postY - this.y;
-                    this.x += dx * 0.05;
-                    this.y += dy * 0.05;
+  // Inner bright core
+  const coreGrad = ctx.createLinearGradient(0, 0, beamLen * 0.7, 0);
+  coreGrad.addColorStop(0, 'rgba(255,255,220,0.25)');
+  coreGrad.addColorStop(0.5, 'rgba(255,255,200,0.08)');
+  coreGrad.addColorStop(1, 'rgba(255,255,180,0)');
+  ctx.beginPath();
+  ctx.moveTo(0, -1);
+  ctx.lineTo(beamLen * 0.7, -beamLen * 0.02);
+  ctx.lineTo(beamLen * 0.7, beamLen * 0.02);
+  ctx.lineTo(0, 1);
+  ctx.closePath();
+  ctx.fillStyle = coreGrad;
+  ctx.fill();
 
-                    if (Math.abs(dx) < 5 && Math.abs(dy) < 5) {
-                        this.state = 'resting';
-                        this.x = postX;
-                        this.y = postY;
-                        this.vx = 0;
-                        this.vy = 0;
-                    }
-                } else if (this.state === 'resting') {
-                    this.wingPhase = 0;
-                    if (Math.random() < 0.01) {
-                        this.state = 'flying';
-                        this.vx = (Math.random() - 0.5) * 2;
-                        this.vy = -1;
-                    }
-                }
-            }
+  ctx.restore();
 
-            draw(ctx) {
-                ctx.strokeStyle = '#fff';
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                
-                if (this.state === 'resting') {
-                    // Just a dot or simple V
-                    ctx.moveTo(this.x - 3, this.y - 2);
-                    ctx.lineTo(this.x + 3, this.y - 2);
-                } else {
-                    // Wings flapping
-                    const wingY = Math.sin(this.wingPhase) * 5;
-                    ctx.moveTo(this.x - 10, this.y + wingY);
-                    ctx.quadraticCurveTo(this.x, this.y - 5, this.x + 10, this.y + wingY);
-                }
-                ctx.stroke();
-            }
-        }
+  // Glow around lantern
+  const glowGrad = ctx.createRadialGradient(lx, lanternY - 7, 0, lx, lanternY - 7, 40);
+  glowGrad.addColorStop(0, 'rgba(255,230,150,0.6)');
+  glowGrad.addColorStop(0.5, 'rgba(255,200,100,0.2)');
+  glowGrad.addColorStop(1, 'rgba(255,180,80,0)');
+  ctx.fillStyle = glowGrad;
+  ctx.beginPath();
+  ctx.arc(lx, lanternY - 7, 40, 0, Math.PI * 2);
+  ctx.fill();
 
-        class Ferry {
-            constructor() {
-                this.x = -100;
-                this.y = height * config.waterLevel + 20;
-                this.active = false;
-                this.timer = 0;
-            }
+  // Second beam (opposite)
+  ctx.save();
+  ctx.translate(lx, lanternY - 7);
+  ctx.rotate(beamAngle + Math.PI);
+  ctx.beginPath();
+  ctx.moveTo(0, -3);
+  ctx.lineTo(beamLen, -beamLen * 0.06);
+  ctx.lineTo(beamLen, beamLen * 0.06);
+  ctx.lineTo(0, 3);
+  ctx.closePath();
+  ctx.fillStyle = beamGrad;
+  ctx.fill();
+  ctx.restore();
+}
 
-            update() {
-                if (!this.active) {
-                    this.timer++;
-                    if (this.timer > 300) { // Start every ~5 seconds
-                        this.active = true;
-                        this.x = -100;
-                    }
-                } else {
-                    this.x += width * config.ferrySpeed;
-                    
-                    // Add wake particles
-                    if (Math.floor(time) % 5 === 0) {
-                        config.ferryWakes.push({
-                            x: this.x - 40,
-                            y: this.y + 10,
-                            size: 2,
-                            alpha: 0.6
-                        });
-                    }
+// --- Boats ---
+const boats = [];
+function initBoats() {
+  boats.length = 0;
+  const boatConfigs = [
+    { x: W * 0.15, size: 1, color: '#5B3A1A', sailColor: '#D4C4A0' },
+    { x: W * 0.3, size: 0.85, color: '#4A3020', sailColor: '#C8B898' },
+    { x: W * 0.45, size: 1.1, color: '#3A2818', sailColor: '#BFA888' },
+    { x: W * 0.6, size: 0.9, color: '#6B4A2A', sailColor: '#D8C8A8' },
+    { x: W * 0.72, size: 0.75, color: '#4E3420', sailColor: '#C0A880' },
+  ];
+  boatConfigs.forEach((cfg, i) => {
+    boats.push({
+      x: cfg.x,
+      baseY: waterLine + 5 + i * 8,
+      size: cfg.size,
+      color: cfg.color,
+      sailColor: cfg.sailColor,
+      phase: i * 1.7,
+      bobSpeed: 0.6 + Math.random() * 0.3,
+      tiltPhase: i * 2.3,
+    });
+  });
+}
 
-                    if (this.x > width + 100) {
-                        this.active = false;
-                        this.timer = 0;
-                    }
-                }
-            }
+function drawBoat(boat, t) {
+  const s = boat.size;
+  const bob = Math.sin(t * boat.bobSpeed + boat.phase) * 4;
+  const tilt = Math.sin(t * boat.bobSpeed * 0.7 + boat.tiltPhase) * 0.08;
+  const y = boat.baseY + bob;
+  const x = boat.x + Math.sin(t * boat.bobSpeed * 0.5 + boat.phase) * 2;
 
-            draw(ctx) {
-                if (!this.active) return;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(tilt);
+  ctx.scale(s, s);
 
-                ctx.fillStyle = '#333';
-                // Hull
-                ctx.fillRect(this.x - 30, this.y - 5, 60, 15);
-                // Cabin
-                ctx.fillStyle = '#fff';
-                ctx.fillRect(this.x - 20, this.y - 15, 40, 10);
-                // Windows
-                ctx.fillStyle = '#ffeb3b';
-                ctx.fillRect(this.x - 15, this.y - 12, 5, 5);
-                ctx.fillRect(this.x - 5, this.y - 12, 5, 5);
-                ctx.fillRect(this.x + 5, this.y - 12, 5, 5);
-            }
-        }
+  // Hull
+  ctx.beginPath();
+  ctx.moveTo(-35, 0);
+  ctx.quadraticCurveTo(-38, 18, -25, 22);
+  ctx.lineTo(30, 22);
+  ctx.quadraticCurveTo(42, 18, 45, 5);
+  ctx.quadraticCurveTo(40, 0, 35, -2);
+  ctx.lineTo(-35, 0);
+  ctx.closePath();
 
-        // --- Initialization ---
-        const lighthouse = new Lighthouse();
-        const boats = [
-            new Boat(width * 0.2, 0.8, 'fishing'),
-            new Boat(width * 0.45, 1.0, 'fishing'),
-            new Boat(width * 0.7, 0.7, 'fishing')
-        ];
-        const gulls = Array.from({ length: 10 }, () => new Gull());
-        const ferry = new Ferry();
+  const hullGrad = ctx.createLinearGradient(0, 0, 0, 22);
+  hullGrad.addColorStop(0, boat.color);
+  hullGrad.addColorStop(1, '#2A1808');
+  ctx.fillStyle = hullGrad;
+  ctx.fill();
+  ctx.strokeStyle = '#1A0A00';
+  ctx.lineWidth = 1;
+  ctx.stroke();
 
-        // --- Main Loop ---
-        function animate() {
-            time++;
-            const cycleT = (time % (config.cycleDuration * 60)) / (config.cycleDuration * 60);
-            // Ease the cycle to linger on sunset
-            const easedT = cycleT < 0.5 ? cycleT * 2 : 2 - cycleT * 2; 
-            const skyColors = getSkyColors(easedT);
+  // Waterline stripe
+  ctx.beginPath();
+  ctx.moveTo(-34, 14);
+  ctx.quadraticCurveTo(0, 16, 44, 10);
+  ctx.strokeStyle = '#CC3333';
+  ctx.lineWidth = 2;
+  ctx.stroke();
 
-            // 1. Sky
-            const grad = ctx.createLinearGradient(0, 0, 0, height);
-            grad.addColorStop(0, skyColors.top);
-            grad.addColorStop(0.5, skyColors.mid);
-            grad.addColorStop(1, skyColors.bot);
-            ctx.fillStyle = grad;
-            ctx.fillRect(0, 0, width, height);
+  // Mast
+  ctx.beginPath();
+  ctx.moveTo(0, -2);
+  ctx.lineTo(0, -55);
+  ctx.strokeStyle = '#3A2A1A';
+  ctx.lineWidth = 2;
+  ctx.stroke();
 
-            // Sun/Moon
-            const sunY = height * 0.4 + Math.sin(cycleT * Math.PI) * height * 0.2;
-            const sunX = width * 0.5;
-            
-            ctx.fillStyle = skyColors.sun;
-            ctx.beginPath();
-            ctx.arc(sunX, sunY, 40, 0, Math.PI * 2);
-            ctx.fill();
-            
-            // Sun Glow
-            ctx.shadowBlur = 50;
-            ctx.shadowColor = skyColors.sun;
-            ctx.fill();
-            ctx.shadowBlur = 0;
+  // Sail
+  ctx.beginPath();
+  ctx.moveTo(0, -52);
+  ctx.quadraticCurveTo(20 + Math.sin(t * 0.5 + boat.phase) * 3, -35, 5, -8);
+  ctx.lineTo(0, -8);
+  ctx.closePath();
+  ctx.fillStyle = boat.sailColor;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+  ctx.lineWidth = 0.5;
+  ctx.stroke();
 
-            // 2. Water Base
-            const waterY = height * config.waterLevel;
-            ctx.fillStyle = '#1a2a3a'; // Dark water base
-            ctx.fillRect(0, waterY, width, height - waterY);
+  // Small sail
+  ctx.beginPath();
+  ctx.moveTo(0, -48);
+  ctx.quadraticCurveTo(-15 + Math.sin(t * 0.4 + boat.phase) * 2, -30, -3, -10);
+  ctx.lineTo(0, -10);
+  ctx.closePath();
+  ctx.fillStyle = boat.sailColor;
+  ctx.globalAlpha = 0.85;
+  ctx.fill();
+  ctx.globalAlpha = 1;
 
-            // 3. Ferry
-            ferry.update();
-            ferry.draw(ctx);
+  // Cabin
+  ctx.fillStyle = '#5A4030';
+  ctx.fillRect(-12, -8, 10, 10);
+  ctx.fillStyle = '#FFD700';
+  ctx.fillRect(-10, -6, 3, 3);
 
-            // 4. Lighthouse
-            lighthouse.update();
-            lighthouse.draw(ctx, skyColors);
+  ctx.restore();
 
-            // 5. Waves & Reflections
-            // We draw waves as horizontal lines or curves
-            ctx.save();
-            ctx.beginPath();
-            ctx.rect(0, waterY, width, height - waterY);
-            ctx.clip();
+  // Boat reflection in water
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(s, s);
+  ctx.globalAlpha = 0.15;
+  ctx.beginPath();
+  ctx.moveTo(-35, 0);
+  ctx.quadraticCurveTo(-38, 18, -25, 22);
+  ctx.lineTo(30, 22);
+  ctx.quadraticCurveTo(42, 18, 45, 5);
+  ctx.quadraticCurveTo(40, 0, 35, -2);
+  ctx.lineTo(-35, 0);
+  ctx.closePath();
+  const refGrad = ctx.createLinearGradient(0, 0, 0, 20);
+  refGrad.addColorStop(0, 'rgba(255,200,100,0.3)');
+  refGrad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = refGrad;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
 
-            // Draw reflections of sky
-            const waterGrad = ctx.createLinearGradient(0, waterY, 0, height);
-            waterGrad.addColorStop(0, skyColors.bot);
-            waterGrad.addColorStop(1, '#000');
-            ctx.fillStyle = waterGrad;
-            ctx.fillRect(0, waterY, width, height - waterY);
+// --- Dock posts ---
+function drawDockPosts(t) {
+  const posts = [
+    { x: W * 0.12, y: waterLine + 2 },
+    { x: W * 0.28, y: waterLine + 4 },
+    { x: W * 0.55, y: waterLine + 3 },
+    { x: W * 0.7, y: waterLine + 5 },
+  ];
 
-            // Dynamic Wave Layers
-            for (let i = 0; i < 5; i++) {
-                const y = waterY + i * 20;
-                const alpha = 0.1 - (i * 0.015);
-                
-                ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                
-                for (let x = 0; x <= width; x += 10) {
-                    // Combine sine waves for organic look
-                    const wave = Math.sin(x * 0.01 + time * 0.05 + i) * 5 +
-                                 Math.sin(x * 0.03 + time * 0.02) * 3;
-                    if (x === 0) ctx.moveTo(x, y + wave);
-                    else ctx.lineTo(x, y + wave);
-                }
-                ctx.stroke();
-            }
+  posts.forEach(p => {
+    ctx.fillStyle = '#3A2A1A';
+    ctx.fillRect(p.x - 2, p.y - 25, 4, 30);
+    ctx.fillStyle = '#5A4A3A';
+    ctx.fillRect(p.x - 3, p.y - 27, 6, 4);
+  });
+}
 
-            // Specular Glints (Sun reflection path)
-            ctx.fillStyle = 'rgba(255, 255, 200, 0.3)';
-            for(let i=0; i<20; i++) {
-                const gx = width * 0.5 + (Math.random() - 0.5) * 200;
-                const gy = waterY + 20 + Math.random() * (height - waterY - 40);
-                const gw = Math.random() * 30 + 10;
-                ctx.fillRect(gx, gy, gw, 2);
-            }
+// --- Gulls ---
+const gulls = [];
+function initGulls() {
+  gulls.length = 0;
+  for (let i = 0; i < 8; i++) {
+    gulls.push({
+      x: Math.random() * W,
+      y: waterLine * 0.2 + Math.random() * waterLine * 0.3,
+      speed: 0.5 + Math.random() * 1.5,
+      wingPhase: Math.random() * Math.PI * 2,
+      wingSpeed: 3 + Math.random() * 2,
+      size: 4 + Math.random() * 4,
+      state: 'flying', // flying, landing, landed, takingOff
+      targetX: 0, targetY: 0,
+      landedPost: -1,
+      landTimer: 0,
+      angle: Math.random() * Math.PI * 2,
+    });
+  }
+}
 
-            ctx.restore(); // End Clip
+function drawGull(g, t) {
+  const wing = Math.sin(t * g.wingSpeed + g.wingPhase) * 0.6;
+  const s = g.size;
 
-            // 6. Boats
-            boats.forEach(boat => boat.draw(ctx, waterY));
+  ctx.save();
+  ctx.translate(g.x, g.y);
 
-            // 7. Gulls
-            gulls.forEach(g => {
-                g.update();
-                g.draw(ctx);
-            });
+  if (g.state === 'landed' || g.state === 'landing') {
+    // Perched gull
+    ctx.fillStyle = '#E8E0D0';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, s * 0.8, s * 0.3, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Head
+    ctx.beginPath();
+    ctx.arc(s * 0.6, -s * 0.2, s * 0.25, 0, Math.PI * 2);
+    ctx.fill();
+    // Beak
+    ctx.fillStyle = '#CC8800';
+    ctx.beginPath();
+    ctx.moveTo(s * 0.85, -s * 0.2);
+    ctx.lineTo(s * 1.2, -s * 0.15);
+    ctx.lineTo(s * 0.85, -s * 0.1);
+    ctx.closePath();
+    ctx.fill();
+    // Tail
+    ctx.fillStyle = '#D0C8B8';
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.7, 0);
+    ctx.lineTo(-s * 1.1, -s * 0.15);
+    ctx.lineTo(-s * 1.1, s * 0.1);
+    ctx.closePath();
+    ctx.fill();
+  } else {
+    // Flying gull
+    ctx.strokeStyle = '#E0D8C8';
+    ctx.lineWidth = s * 0.15;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(-s * wing, s * wing * 0.5);
+    ctx.quadraticCurveTo(-s * 0.3, -s * 0.2, 0, 0);
+    ctx.quadraticCurveTo(s * 0.3, -s * 0.2, s * wing, s * wing * 0.5);
+    ctx.stroke();
 
-            // 8. Ferry Wake
-            for (let i = config.ferryWakes.length - 1; i >= 0; i--) {
-                const w = config.ferryWakes[i];
-                w.x -= 1; // Move left with water flow illusion
-                w.size += 0.2;
-                w.alpha -= 0.005;
-                
-                ctx.fillStyle = `rgba(255, 255, 255, ${w.alpha})`;
-                ctx.beginPath();
-                ctx.ellipse(w.x, w.y, w.size * 3, w.size, 0, 0, Math.PI * 2);
-                ctx.fill();
+    // Body
+    ctx.fillStyle = '#E8E0D0';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, s * 0.3, s * 0.12, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
 
-                if (w.alpha <= 0) config.ferryWakes.splice(i, 1);
-            }
+  ctx.restore();
+}
 
-            requestAnimationFrame(animate);
-        }
+function updateGulls(t) {
+  const posts = [
+    { x: W * 0.12, y: waterLine - 23 },
+    { x: W * 0.28, y: waterLine - 23 },
+    { x: W * 0.55, y: waterLine - 25 },
+    { x: W * 0.7, y: waterLine - 28 },
+  ];
 
-        animate();
+  gulls.forEach(g => {
+    if (g.state === 'landed') {
+      g.landedPost++; // just stay
+      g.landTimer--;
+      if (g.landTimer <= 0 && Math.random() < 0.005) {
+        g.state = 'takingOff';
+        g.landTimer = 30;
+      }
+    } else if (g.state === 'takingOff') {
+      g.y -= 1.5;
+      g.x += Math.sin(t * 3) * 2;
+      if (g.y < waterLine * 0.2) {
+        g.state = 'flying';
+        g.angle = Math.random() * Math.PI * 2;
+      }
+    } else if (g.state === 'landing') {
+      const dx = g.targetX - g.x;
+      const dy = g.targetY - g.y;
+      g.x += dx * 0.05;
+      g.y += dy * 0.05;
+      if (Math.abs(dx) < 3 && Math.abs(dy) < 3) {
+        g.state = 'landed';
+        g.y = g.targetY;
+        g.x = g.targetX;
+        g.landTimer = 120 + Math.random() * 300;
+      }
+    } else {
+      // Flying
+      g.x += Math.cos(g.angle) * g.speed;
+      g.y += Math.sin(g.angle * 0.3) * 0.5;
 
-    </script>
+      // Circle around
+      g.angle += (Math.random() - 0.5) * 0.05;
+
+      // Occasionally land
+      if (Math.random() < 0.003) {
+        const post = posts[Math.floor(Math.random() * posts.length)];
+        // Fly toward post from above
+        g.targetX = post.x;
+        g.targetY = post.y - 10;
+        g.state = 'landing';
+      }
+
+      // Wrap around
+      if (g.x > W + 50) { g.x = -50; g.y = waterLine * 0.2 + Math.random() * waterLine * 0.3; }
+      if (g.x < -50) { g.x = W + 50; g.y = waterLine * 0.2 + Math.random() * waterLine * 0.3; }
+      if (g.y < waterLine * 0.05) g.angle = Math.abs(g.angle) % (Math.PI * 2);
+      if (g.y > waterLine * 0.6) g.angle = Math.PI - g.angle;
+    }
+  });
+}
+
+// --- Ferry ---
+const ferry = { x: -100, speed: 0.4, direction: 1, wakeParticles: [] };
+
+function drawFerry(t) {
+  // Ferry crossing
+  const cycleTime = 25;
+  const progress = (t % cycleTime) / cycleTime;
+
+  if (progress < 0.15) {
+    // Entering from left
+    ferry.x = -80 + progress / 0.15 * (W * 0.2 + 80);
+    ferry.direction = 1;
+  } else if (progress < 0.85) {
+    // Crossing
+    const crossProgress = (progress - 0.15) / 0.7;
+    ferry.x = W * 0.2 + crossProgress * (W * 0.6);
+    ferry.direction = 1;
+  } else {
+    // Exiting right
+    const exitProgress = (progress - 0.85) / 0.15;
+    ferry.x = W * 0.8 + exitProgress * 80;
+    ferry.direction = 1;
+  }
+
+  const fy = waterLine - 3;
+  const fs = 1.3;
+
+  // Hull
+  ctx.save();
+  ctx.translate(ferry.x, fy);
+  ctx.scale(fs, fs);
+
+  ctx.beginPath();
+  ctx.moveTo(-40, 0);
+  ctx.lineTo(-45, 12);
+  ctx.lineTo(45, 12);
+  ctx.lineTo(50, 0);
+  ctx.lineTo(40, -5);
+  ctx.lineTo(-35, -5);
+  ctx.closePath();
+
+  const ferryGrad = ctx.createLinearGradient(0, -5, 0, 12);
+  ferryGrad.addColorStop(0, '#E8E0D0');
+  ferryGrad.addColorStop(0.3, '#C8C0B0');
+  ferryGrad.addColorStop(1, '#606060');
+  ctx.fillStyle = ferryGrad;
+  ctx.fill();
+  ctx.strokeStyle = '#444';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Windows
+  for (let i = -2; i <= 2; i++) {
+    ctx.fillStyle = '#FFD700';
+    ctx.fillRect(i * 12 - 4, -3, 6, 5);
+  }
+
+  // Upper deck
+  ctx.fillStyle = '#D0C8B8';
+  ctx.fillRect(-25, -12, 40, 8);
+  ctx.fillStyle = '#E8E0D0';
+  ctx.fillRect(-20, -15, 30, 4);
+
+  // Bridge
+  ctx.fillStyle = '#B0A898';
+  ctx.fillRect(10, -18, 15, 12);
+  ctx.fillStyle = '#88CCFF';
+  ctx.fillRect(12, -16, 11, 5);
+
+  // Smokestack
+  ctx.fillStyle = '#555';
+  ctx.fillRect(-5, -22, 8, 8);
+  ctx.fillStyle = '#CC3333';
+  ctx.fillRect(-5, -22, 8, 3);
+
+  // Smoke
+  for (let i = 0; i < 5; i++) {
+    const smokeX = -5 + 4 + Math.sin(t * 2 + i) * (5 + i * 8);
+    const smokeY = -22 - i * 6 - Math.abs(Math.sin(t + i * 0.5)) * 5;
+    const smokeAlpha = 0.3 * (1 - i / 5);
+    ctx.fillStyle = `rgba(180,180,180,${smokeAlpha})`;
+    ctx.beginPath();
+    ctx.arc(smokeX, smokeY, 3 + i * 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+
+  // Wake
+  if (ferry.x > -50 && ferry.x < W + 50) {
+    // V-shaped wake
+    ctx.save();
+    ctx.translate(ferry.x, fy);
+
+    // Wake lines
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.lineWidth = 1.5;
+    const wakeLen = 60;
+    ctx.beginPath();
+    ctx.moveTo(50, 2);
+    ctx.lineTo(50 + wakeLen, 15 + Math.sin(t * 3) * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(50, -2);
+    ctx.lineTo(50 + wakeLen, -15 - Math.sin(t * 3 + 1) * 2);
+    ctx.stroke();
+
+    // Wake foam particles
+    for (let i = 0; i < 15; i++) {
+      const px = 50 + i * 4 + Math.sin(t * 2 + i) * 3;
+      const py = 12 + i * 1.5 + Math.sin(t * 2.5 + i * 0.7) * 2;
+      const alpha = 0.2 * (1 - i / 15);
+      ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+      ctx.beginPath();
+      ctx.arc(px, py, 1.5 + Math.random(), 0, Math.PI * 2);
+      ctx.fill();
+
+      const py2 = -12 - i * 1.5 - Math.sin(t * 2.5 + i * 0.7) * 2;
+      ctx.beginPath();
+      ctx.arc(px, py2, 1.5 + Math.random(), 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+}
+
+// --- Distant land/mountains ---
+function drawDistantLand(t) {
+  const colors = getSkyColors(t);
+  const landColor = lerpColor(colors.horizon, [20, 15, 30], 0.7);
+
+  // Far mountains
+  ctx.beginPath();
+  ctx.moveTo(0, waterLine);
+  const points = [
+    [0, 0.08], [W * 0.05, 0.05], [W * 0.1, 0.12], [W * 0.15, 0.06],
+    [W * 0.2, 0.1], [W * 0.25, 0.04], [W * 0.3, 0.09], [W * 0.35, 0.03],
+    [W * 0.4, 0.07], [W * 0.45, 0.02], [W * 0.5, 0.08], [W * 0.55, 0.04],
+    [W * 0.6, 0.1], [W * 0.65, 0.03], [W * 0.7, 0.07], [W * 0.75, 0.02],
+    [W * 0.8, 0.06], [W * 0.85, 0.04], [W * 0.9, 0.09], [W * 0.95, 0.03],
+    [W, 0.05], [W, waterLine]
+  ];
+
+  ctx.moveTo(0, waterLine);
+  points.forEach(p => ctx.lineTo(p[0], waterLine - p[1] * H * 0.15));
+  ctx.lineTo(W, waterLine);
+  ctx.closePath();
+  ctx.fillStyle = rgb(lerpColor(landColor, [15, 10, 20], 0.5));
+  ctx.fill();
+
+  // Closer hills
+  ctx.beginPath();
+  ctx.moveTo(0, waterLine);
+  const hills = [
+    [0, 0.02], [W * 0.08, 0.01], [W * 0.15, 0.025], [W * 0.22, 0.015],
+    [W * 0.3, 0.02], [W * 0.38, 0.008], [W * 0.45, 0.018], [W * 0.52, 0.01],
+    [W * 0.6, 0.022], [W * 0.68, 0.012], [W * 0.75, 0.018], [W * 0.82, 0.008],
+    [W * 0.9, 0.015], [W * 0.95, 0.01], [W, 0.02]
+  ];
+  ctx.moveTo(0, waterLine);
+  hills.forEach(p => ctx.lineTo(p[0], waterLine - p[1] * H));
+  ctx.lineTo(W, waterLine);
+  ctx.closePath();
+  ctx.fillStyle = rgb(lerpColor(landColor, [10, 8, 15], 0.3));
+  ctx.fill();
+}
+
+// --- Dock structure ---
+function drawDock(t) {
+  ctx.fillStyle = '#3A2A1A';
+  // Main dock
+  ctx.fillRect(W * 0.08, waterLine - 3, W * 0.06, 8);
+  ctx.fillRect(W * 0.52, waterLine - 3, W * 0.08, 8);
+
+  // Dock planks
+  ctx.strokeStyle = '#2A1A0A';
+  ctx.lineWidth = 0.5;
+  for (let x = W * 0.08; x < W * 0.08 + W * 0.06; x += 4) {
+    ctx.beginPath();
+    ctx.moveTo(x, waterLine - 3);
+    ctx.lineTo(x, waterLine + 5);
+    ctx.stroke();
+  }
+  for (let x = W * 0.52; x < W * 0.52 + W * 0.08; x += 4) {
+    ctx.beginPath();
+    ctx.moveTo(x, waterLine - 3);
+    ctx.lineTo(x, waterLine + 5);
+    ctx.stroke();
+  }
+
+  // Dock lights
+  const dockLights = [W * 0.11, W * 0.14, W * 0.55, W * 0.58, W * 0.61];
+  dockLights.forEach(dx => {
+    const glowGrad = ctx.createRadialGradient(dx, waterLine - 8, 0, dx, waterLine - 8, 12);
+    glowGrad.addColorStop(0, 'rgba(255,200,100,0.5)');
+    glowGrad.addColorStop(1, 'rgba(255,180,80,0)');
+    ctx.fillStyle = glowGrad;
+    ctx.beginPath();
+    ctx.arc(dx, waterLine - 8, 12, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#FFD700';
+    ctx.beginPath();
+    ctx.arc(dx, waterLine - 8, 2, 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+
+// --- Main loop ---
+let startTime = null;
+
+function init() {
+  initLighthouse();
+  initBoats();
+  initGulls();
+}
+
+function frame(timestamp) {
+  if (!startTime) startTime = timestamp;
+  const t = (timestamp - startTime) / 1000;
+
+  ctx.clearRect(0, 0, W, H);
+
+  drawSky(t);
+  drawDistantLand(t);
+  drawDock(t);
+  drawDockPosts(t);
+  drawWater(t);
+  drawReflections(t);
+  drawLighthouse(t);
+
+  // Draw boats behind ferry
+  boats.forEach(b => drawBoat(b, t));
+
+  drawFerry(t);
+
+  // Gulls
+  updateGulls(t);
+  gulls.forEach(g => drawGull(g, t));
+
+  // Foreground water shimmer
+  const shimmerCount = 20;
+  for (let i = 0; i < shimmerCount; i++) {
+    const sx = (Math.sin(t * 0.7 + i * 11.3) * 0.5 + 0.5) * W;
+    const sy = waterLine + 20 + Math.abs(Math.sin(t * 0.4 + i * 5.7)) * (H - waterLine - 40);
+    const shimmer = 0.5 + 0.5 * Math.sin(t * 4 + i * 3.1);
+    ctx.fillStyle = `rgba(255,220,140,${shimmer * 0.15})`;
+    ctx.fillRect(sx, sy, 2 + shimmer * 3, 1);
+  }
+
+  requestAnimationFrame(frame);
+}
+
+init();
+requestAnimationFrame(frame);
+
+// Handle resize
+window.addEventListener('resize', () => {
+  resize();
+  initLighthouse();
+  initBoats();
+});
+</script>
 </body>
 </html>

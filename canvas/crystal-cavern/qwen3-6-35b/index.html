@@ -1,447 +1,751 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Crystal Cavern Screensaver</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background-color: #050505;
-        }
-        canvas {
-            display: block;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Crystal Cavern</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; width: 100%; height: 100%; }
+</style>
 </head>
 <body>
-    <canvas id="cave"></canvas>
-    <script>
-        const canvas = document.getElementById('cave');
-        const ctx = canvas.getContext('2d');
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
 
-        let width, height;
-        let crystals = [];
-        let drips = [];
-        let ripples = [];
-        let cameraShake = 0;
-        let flashIntensity = 0;
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', () => { resize(); init(); });
 
-        // Configuration
-        const MAX_CRYSTALS = 60;
-        const GROWTH_THRESHOLD = 0.6; // When to trigger tremor
-        const CRYSTAL_TYPES = [
-            { color: '#00ffff', type: 'diamond' },
-            { color: '#ff00ff', type: 'ruby' },
-            { color: '#00ff00', type: 'emerald' },
-            { color: '#ffff00', type: 'topaz' },
-            { color: '#ffffff', type: 'quartz' }
-        ];
+// --- Cave geometry ---
+let caveCeiling = [], caveFloor = [];
+const CAVE_SEGMENTS = 80;
 
-        // Light Source
-        const light = { x: 0, y: 0, vx: 2, vy: 1.5, radius: 300 };
+function generateCave() {
+    caveCeiling = [];
+    caveFloor = [];
+    const baseCeil = H * 0.25;
+    const baseFloor = H * 0.75;
+    for (let i = 0; i <= CAVE_SEGMENTS; i++) {
+        const t = i / CAVE_SEGMENTS;
+        const x = t * W;
+        const cx = baseCeil + Math.sin(t * 8 + 1.3) * 40 + Math.sin(t * 13 + 0.7) * 25 + Math.sin(t * 3.1) * 60;
+        const fx = baseFloor + Math.sin(t * 6 + 2.1) * 35 + Math.sin(t * 11 + 1.2) * 20 + Math.sin(t * 2.3) * 50;
+        caveCeiling.push({ x, y: cx });
+        caveFloor.push({ x, y: fx });
+    }
+}
 
-        function resize() {
-            width = canvas.width = window.innerWidth;
-            height = canvas.height = window.innerHeight;
-            light.x = width * 0.3;
-            light.y = height * 0.3;
+// --- Crystal colors ---
+const CRYSTAL_COLORS = [
+    { r: 140, g: 200, b: 255 },  // ice blue
+    { r: 180, g: 140, b: 255 },  // amethyst
+    { r: 100, g: 220, b: 200 },  // aquamarine
+    { r: 255, g: 180, b: 140 },  // rose quartz
+    { r: 160, g: 255, b: 180 },  // emerald tint
+    { r: 255, g: 220, b: 100 },  // citrine
+    { r: 200, g: 160, b: 255 },  // lavender
+    { r: 100, g: 180, b: 255 },  // sapphire
+];
+
+// --- Crystal class ---
+class Crystal {
+    constructor(x, y, angle, isCeiling) {
+        this.originX = x;
+        this.originY = y;
+        this.angle = angle;
+        this.isCeiling = isCeiling;
+        this.color = CRYSTAL_COLORS[Math.floor(Math.random() * CRYSTAL_COLORS.length)];
+        this.branches = [];
+        this.growthStage = 0;
+        this.maxStage = 8 + Math.floor(Math.random() * 6);
+        this.currentStage = 0;
+        this.growthTimer = 0;
+        this.growthInterval = 0.4 + Math.random() * 0.6;
+        this.alive = true;
+        this.opacity = 1;
+        this.shimmerPhase = Math.random() * Math.PI * 2;
+        this.facetData = [];
+        this.generateFacets();
+        this.totalArea = 0;
+        this.grow();
+    }
+
+    generateFacets() {
+        this.facets = [];
+        const numFacets = 5 + Math.floor(Math.random() * 4);
+        for (let i = 0; i < numFacets; i++) {
+            this.facets.push({
+                angleOff: (Math.random() - 0.5) * 0.6,
+                width: 0.3 + Math.random() * 0.4,
+                depth: 0.5 + Math.random() * 0.5,
+                brightness: 0.3 + Math.random() * 0.7
+            });
+        }
+    }
+
+    grow() {
+        const branch = {
+            x: this.originX,
+            y: this.originY,
+            angle: this.angle,
+            length: 30 + Math.random() * 50,
+            width: 4 + Math.random() * 6,
+            depth: 0,
+            children: [],
+            stage: this.currentStage,
+            hasGrown: false
+        };
+        this.branches.push(branch);
+        this.branches[0].hasGrown = true;
+    }
+
+    growBranch(branch) {
+        if (this.currentStage >= this.maxStage) return;
+        const numChildren = 1 + Math.floor(Math.random() * 2);
+        for (let i = 0; i < numChildren; i++) {
+            const childAngle = branch.angle + (Math.random() - 0.5) * 1.2;
+            const childLen = branch.length * (0.5 + Math.random() * 0.3);
+            const childWidth = branch.width * (0.4 + Math.random() * 0.3);
+            const endX = branch.x + Math.cos(branch.angle) * branch.length;
+            const endY = branch.y + Math.sin(branch.angle) * branch.length;
+            const child = {
+                x: endX,
+                y: endY,
+                angle: childAngle,
+                length: childLen,
+                width: childWidth,
+                depth: branch.depth + 1,
+                children: [],
+                stage: this.currentStage,
+                hasGrown: false
+            };
+            branch.children.push(child);
+            this.branches.push(child);
+        }
+        branch.hasGrown = true;
+    }
+
+    update(dt) {
+        if (!this.alive) return;
+        this.growthTimer += dt;
+        this.shimmerPhase += dt * 2;
+
+        if (this.growthTimer >= this.growthInterval && this.currentStage < this.maxStage) {
+            this.growthTimer = 0;
+            this.currentStage++;
+            // Grow new branches from existing tips
+            const tips = this.branches.filter(b => !b.hasGrown && b.depth <= this.currentStage);
+            for (const tip of tips) {
+                this.growBranch(tip);
+            }
+            // Also grow from origin occasionally
+            if (Math.random() < 0.3 && this.currentStage < this.maxStage) {
+                this.grow();
+            }
         }
 
-        window.addEventListener('resize', resize);
-        resize();
+        // Calculate total area
+        this.totalArea = this.branches.reduce((sum, b) => sum + b.length * b.width, 0);
+    }
 
-        class Crystal {
-            constructor(x, y, angle, depth, parent) {
-                this.x = x;
-                this.y = y;
-                this.angle = angle;
-                this.depth = depth;
-                this.parent = parent;
-                this.growth = 0;
-                this.maxGrowth = 20 + Math.random() * 40;
-                this.speed = 0.2 + Math.random() * 0.3;
-                this.color = CRYSTAL_TYPES[Math.floor(Math.random() * CRYSTAL_TYPES.length)];
-                this.width = (10 - depth * 2) * (0.8 + Math.random() * 0.4);
-                this.age = Date.now();
-                this.dead = false;
-                
-                // Facet parameters
-                this.turn = (Math.random() - 0.5) * 0.2;
-            }
+    draw(ctx, lightX, lightY, time) {
+        if (!this.alive) return;
 
-            update() {
-                if (this.growth < this.maxGrowth) {
-                    this.growth += this.speed;
-                    
-                    // Branching logic
-                    if (this.growth > 10 && Math.random() < 0.02 && this.depth < 3) {
-                        this.branch();
-                    }
-                }
-            }
+        const cr = this.color.r, cg = this.color.g, cb = this.color.b;
+        const shimmer = Math.sin(this.shimmerPhase) * 0.15 + 0.85;
 
-            branch() {
-                const newAngle = this.angle + (Math.random() > 0.5 ? 0.6 : -0.6);
-                const newX = this.x + Math.cos(this.angle) * this.growth * 0.7;
-                const newY = this.y + Math.sin(this.angle) * this.growth * 0.7;
-                
-                const newCrystal = new Crystal(newX, newY, newAngle, this.depth + 1, this);
-                crystals.push(newCrystal);
-            }
+        for (const branch of this.branches) {
+            if (!branch.hasGrown && branch !== this.branches[0]) continue;
 
-            draw(ctx, lightX, lightY) {
-                const rad = this.angle;
-                const len = this.growth;
-                const w = this.width;
+            const endX = branch.x + Math.cos(branch.angle) * branch.length;
+            const endY = branch.y + Math.sin(branch.angle) * branch.length;
 
-                ctx.save();
-                ctx.translate(this.x, this.y);
-                ctx.rotate(rad);
+            // Calculate light interaction
+            const dx = (branch.x + endX) / 2 - lightX;
+            const dy = (branch.y + endY) / 2 - lightY;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            const lightFactor = Math.max(0, 1 - dist / (W * 0.6));
+            const glint = Math.sin(this.shimmerPhase + branch.depth * 0.5) * 0.3 + 0.7;
 
-                // Draw Facets
+            // Draw crystal facets
+            const facets = 3;
+            for (let f = 0; f < facets; f++) {
+                const t = f / (facets - 1);
+                const offset = (t - 0.5) * branch.width * 2;
+                const perpAngle = branch.angle + Math.PI / 2;
+                const fx = (branch.x + endX) / 2 + Math.cos(perpAngle) * offset * (0.5 + branch.depth * 0.1);
+                const fy = (branch.y + endY) / 2 + Math.sin(perpAngle) * offset * (0.5 + branch.depth * 0.1);
+
+                const alpha = (0.15 + lightFactor * 0.35) * shimmer * glint * (1 - branch.depth * 0.05);
+                const brightness = (cr + lightFactor * 120) / 255;
+                const g = (cg + lightFactor * 100) / 255;
+                const b = (cb + lightFactor * 140) / 255;
+
                 ctx.beginPath();
-                ctx.moveTo(0, -w);
-                ctx.lineTo(len, 0);
-                ctx.lineTo(0, w);
+                ctx.moveTo(branch.x + Math.cos(perpAngle) * offset * 0.5,
+                           branch.y + Math.sin(perpAngle) * offset * 0.5);
+                ctx.lineTo(fx, fy);
+                ctx.lineTo(endX + Math.cos(perpAngle) * offset * 0.5,
+                           endY + Math.sin(perpAngle) * offset * 0.5);
                 ctx.closePath();
-                
-                // Shading based on light position
-                const angleToLight = Math.atan2(lightY - this.y, lightX - this.x);
-                const diffAngle = angleToLight - rad;
-                const lightFactor = (Math.cos(diffAngle) + 1) / 2; // 0 to 1
-                
-                const baseColor = this.hexToRgb(this.color.color);
-                const r = Math.floor(baseColor.r * (0.3 + 0.7 * lightFactor));
-                const g = Math.floor(baseColor.g * (0.3 + 0.7 * lightFactor));
-                const b = Math.floor(baseColor.b * (0.3 + 0.7 * lightFactor));
 
-                // Glimmer
-                const glimmer = Math.sin(Date.now() * 0.005 + this.x) * 0.2 + 0.8;
-
-                ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${glimmer})`;
-                ctx.strokeStyle = `rgba(255, 255, 255, 0.4)`;
-                ctx.lineWidth = 1;
-                ctx.fill();
-                ctx.stroke();
-
-                // Draw inner shine line
-                ctx.beginPath();
-                ctx.moveTo(0, -w/3);
-                ctx.lineTo(len * 0.8, 0);
-                ctx.lineTo(0, w/3);
-                ctx.strokeStyle = `rgba(255, 255, 255, ${0.1 * glimmer})`;
-                ctx.stroke();
-
-                ctx.restore();
-            }
-
-            hexToRgb(hex) {
-                const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-                return result ? {
-                    r: parseInt(result[1], 16),
-                    g: parseInt(result[2], 16),
-                    b: parseInt(result[3], 16)
-                } : { r: 0, g: 0, b: 0 };
-            }
-
-            destroy() {
-                this.dead = true;
-                // Create shards
-                for(let i=0; i<3; i++) {
-                    drips.push(new FallingShard(this.x, this.y, this.angle, this.color.color));
-                }
-            }
-        }
-
-        class FallingShard {
-            constructor(x, y, angle, color) {
-                this.x = x;
-                this.y = y;
-                this.angle = angle + Math.PI / 2 + (Math.random() - 0.5);
-                this.speed = Math.random() * 5;
-                this.size = Math.random() * 5 + 2;
-                this.color = color;
-                this.life = 1.0;
-            }
-
-            update() {
-                this.x += Math.cos(this.angle) * this.speed;
-                this.y += Math.sin(this.angle) * this.speed;
-                this.speed += 0.2; // Gravity
-                this.life -= 0.01;
-            }
-
-            draw(ctx) {
-                ctx.save();
-                ctx.translate(this.x, this.y);
-                ctx.rotate(this.angle);
-                ctx.fillStyle = this.color;
-                ctx.globalAlpha = Math.max(0, this.life);
-                ctx.fillRect(-this.size, -this.size/2, this.size*2, this.size);
-                ctx.restore();
-            }
-        }
-
-        class Drip {
-            constructor(x, y) {
-                this.x = x;
-                this.y = y;
-                this.z = 0; // falling distance
-                this.speed = 0;
-                this.active = true;
-            }
-
-            update() {
-                if (this.z < height * 0.6) {
-                    this.speed += 0.5;
-                    this.z += this.speed;
-                } else {
-                    this.active = false;
-                    createRipple(this.x, this.y);
-                }
-            }
-            
-            draw(ctx) {
-                if(!this.active) return;
-                ctx.fillStyle = "rgba(150, 255, 255, 0.8)";
-                ctx.beginPath();
-                ctx.arc(this.x, this.y + this.z, 2, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(${Math.floor(brightness * 255)},${Math.floor(g * 255)},${Math.floor(b * 255)},${alpha})`;
                 ctx.fill();
             }
-        }
 
-        class Ripple {
-            constructor(x, y) {
-                this.x = x;
-                this.y = y;
-                this.radius = 1;
-                this.alpha = 1;
-            }
-
-            update() {
-                this.radius += 2;
-                this.alpha -= 0.02;
-            }
-
-            draw(ctx) {
-                if (this.alpha <= 0) return;
-                ctx.strokeStyle = `rgba(100, 255, 255, ${this.alpha})`;
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.ellipse(this.x, this.y, this.radius, this.radius * 0.3, 0, 0, Math.PI * 2);
-                ctx.stroke();
-            }
-        }
-
-        function createRipple(x, y) {
-            ripples.push(new Ripple(x, y));
-        }
-
-        function spawnCrystals() {
-            if (crystals.length < MAX_CRYSTALS) {
-                // Ceiling growth
-                if (Math.random() > 0.5) {
-                    const x = Math.random() * width;
-                    crystals.push(new Crystal(x, 0, Math.PI / 2, 0, null));
-                }
-                // Floor growth
-                if (Math.random() > 0.7) {
-                    const x = Math.random() * width;
-                    crystals.push(new Crystal(x, height, -Math.PI / 2, 0, null));
-                }
-                
-                // Spawn drips from ceiling crystals
-                if (Math.random() < 0.05) {
-                    const ceilingCrystals = crystals.filter(c => c.y < 20);
-                    if (ceilingCrystals.length > 0) {
-                        const c = ceilingCrystals[Math.floor(Math.random() * ceilingCrystals.length)];
-                        drips.push(new Drip(c.x, c.y));
-                    }
-                }
-            }
-        }
-
-        function triggerTremor() {
-            cameraShake = 20;
-            flashIntensity = 1.0;
-            
-            // Shatter oldest crystals
-            let shattered = 0;
-            crystals.forEach(c => {
-                if (c.age < Date.now() - 10000 && shattered < 10) {
-                    c.destroy();
-                    shattered++;
-                }
-            });
-
-            // If not enough shattered, just pick random old ones
-            if (shattered < 5) {
-                 crystals.sort((a,b) => a.age - b.age);
-                 for(let i=0; i<5; i++) {
-                     crystals[i].destroy();
-                 }
-            }
-        }
-
-        function drawCaveEnvironment() {
-            // Background Gradient
-            const grad = ctx.createRadialGradient(width/2, height/2, 100, width/2, height/2, height);
-            grad.addColorStop(0, '#1a1a2e');
-            grad.addColorStop(1, '#000000');
-            ctx.fillStyle = grad;
-            ctx.fillRect(0, 0, width, height);
-
-            // Cave Floor and Ceiling (Abstract shapes)
-            ctx.fillStyle = '#08080a';
+            // Core of crystal (brighter)
+            const coreAlpha = (0.2 + lightFactor * 0.4) * shimmer;
             ctx.beginPath();
-            ctx.moveTo(0, 0);
-            for(let i=0; i<=width; i+=50) {
-                ctx.lineTo(i, 50 + Math.sin(i * 0.01) * 30);
-            }
-            ctx.lineTo(width, height);
-            ctx.lineTo(0, height);
-            ctx.fill();
+            ctx.moveTo(branch.x, branch.y);
+            ctx.lineTo(endX, endY);
+            ctx.strokeStyle = `rgba(${Math.min(255, cr + 80)},${Math.min(255, cg + 80)},${Math.min(255, cb + 80)},${coreAlpha})`;
+            ctx.lineWidth = branch.width * 0.6;
+            ctx.lineCap = 'round';
+            ctx.stroke();
+
+            // Faceted edge highlights
+            const perpAngle = branch.angle + Math.PI / 2;
+            const edgeAlpha = (0.1 + lightFactor * 0.25) * shimmer;
+            ctx.beginPath();
+            ctx.moveTo(branch.x + Math.cos(perpAngle) * branch.width * 0.5,
+                       branch.y + Math.sin(perpAngle) * branch.width * 0.5);
+            ctx.lineTo(endX + Math.cos(perpAngle) * branch.width * 0.5,
+                       endY + Math.sin(perpAngle) * branch.width * 0.5);
+            ctx.strokeStyle = `rgba(${Math.min(255, cr + 100)},${Math.min(255, cg + 100)},${Math.min(255, cb + 100)},${edgeAlpha})`;
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
 
             ctx.beginPath();
-            ctx.moveTo(0, height);
-            for(let i=0; i<=width; i+=50) {
-                ctx.lineTo(i, height - 50 + Math.cos(i * 0.02) * 40);
-            }
-            ctx.lineTo(width, 0);
-            ctx.lineTo(0, 0);
-            ctx.fill();
+            ctx.moveTo(branch.x - Math.cos(perpAngle) * branch.width * 0.5,
+                       branch.y - Math.sin(perpAngle) * branch.width * 0.5);
+            ctx.lineTo(endX - Math.cos(perpAngle) * branch.width * 0.5,
+                       endY - Math.sin(perpAngle) * branch.width * 0.5);
+            ctx.stroke();
         }
+    }
 
-        function drawLightSource() {
-            // Animate light
-            light.x += light.vx;
-            light.y += light.vy;
-            
-            if (light.x > width - 100 || light.x < 100) light.vx *= -1;
-            if (light.y > height - 100 || light.y < 100) light.vy *= -1;
+    getArea() {
+        return this.totalArea;
+    }
 
-            // Draw light glow
-            const gradient = ctx.createRadialGradient(light.x, light.y, 10, light.x, light.y, light.radius);
-            gradient.addColorStop(0, 'rgba(255, 255, 255, 0.8)');
-            gradient.addColorStop(0.1, 'rgba(200, 240, 255, 0.2)');
-            gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
-            
-            ctx.globalCompositeOperation = 'screen';
-            ctx.fillStyle = gradient;
-            ctx.fillRect(0, 0, width, height);
-            ctx.globalCompositeOperation = 'source-over';
+    isDead() {
+        return !this.alive;
+    }
+}
+
+// --- Shatter shard ---
+class Shard {
+    constructor(x, y, angle, color) {
+        this.x = x;
+        this.y = y;
+        this.vx = (Math.random() - 0.5) * 120;
+        this.vy = Math.random() * 80 + 40;
+        this.size = 2 + Math.random() * 6;
+        this.angle = angle;
+        this.rotSpeed = (Math.random() - 0.5) * 8;
+        this.color = color;
+        this.life = 1;
+        this.decay = 0.15 + Math.random() * 0.2;
+        this.points = [];
+        // Generate shard shape
+        const sides = 3 + Math.floor(Math.random() * 3);
+        for (let i = 0; i < sides; i++) {
+            const a = (i / sides) * Math.PI * 2 + Math.random() * 0.3;
+            const r = this.size * (0.5 + Math.random() * 0.5);
+            this.points.push({ x: Math.cos(a) * r, y: Math.sin(a) * r });
         }
+    }
 
-        function drawCaustics() {
-            ctx.save();
-            ctx.globalCompositeOperation = 'screen';
-            
-            // Pseudo-caustics based on crystal positions
-            crystals.forEach(c => {
-                const angleToLight = Math.atan2(light.y - c.y, light.x - c.x);
-                // Refract light "down" or "across"
-                const refractX = c.x + Math.cos(angleToLight + 0.5) * 100;
-                const refractY = c.y + Math.sin(angleToLight + 0.5) * 100;
-                
-                // Draw light splash on floor
-                const splash = ctx.createRadialGradient(refractX, refractY, 0, refractX, refractY, 50);
-                splash.addColorStop(0, c.color.color);
-                splash.addColorStop(1, 'transparent');
-                
-                ctx.fillStyle = splash;
-                ctx.globalAlpha = 0.3;
-                ctx.fillRect(refractX - 50, refractY - 50, 100, 100);
-            });
-            
-            ctx.restore();
+    update(dt) {
+        this.vy += 150 * dt;
+        this.x += this.vx * dt;
+        this.y += this.vy * dt;
+        this.angle += this.rotSpeed * dt;
+        this.life -= this.decay * dt;
+    }
+
+    draw(ctx) {
+        if (this.life <= 0) return;
+        const { r, g, b } = this.color;
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.angle);
+        ctx.globalAlpha = this.life * 0.8;
+        ctx.beginPath();
+        ctx.moveTo(this.points[0].x, this.points[0].y);
+        for (let i = 1; i < this.points.length; i++) {
+            ctx.lineTo(this.points[i].x, this.points[i].y);
         }
+        ctx.closePath();
+        ctx.fillStyle = `rgb(${r},${g},${b})`;
+        ctx.fill();
+        ctx.strokeStyle = `rgba(${Math.min(255, r + 80)},${Math.min(255, g + 80)},${Math.min(255, b + 80)},${this.life * 0.6})`;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.restore();
+    }
+}
 
-        function loop() {
-            // Shake effect
-            let shakeX = 0;
-            let shakeY = 0;
-            if (cameraShake > 0) {
-                shakeX = (Math.random() - 0.5) * cameraShake;
-                shakeY = (Math.random() - 0.5) * cameraShake;
-                cameraShake *= 0.9;
-                if (cameraShake < 0.5) cameraShake = 0;
+// --- Drip and ripple ---
+class Drip {
+    constructor(x, y) {
+        this.x = x;
+        this.y = y;
+        this.vy = 0;
+        this.growing = true;
+        this.dripping = false;
+        this.size = 2;
+        this.maxSize = 4 + Math.random() * 3;
+        this.dropY = 0;
+        this.dropped = false;
+    }
+
+    update(dt) {
+        if (this.growing && !this.dripping) {
+            this.size += dt * 3;
+            if (this.size >= this.maxSize) {
+                this.growing = false;
+                this.dripping = true;
+                this.vy = 20;
             }
-
-            ctx.save();
-            ctx.translate(shakeX, shakeY);
-
-            drawCaveEnvironment();
-            
-            // Caustics
-            drawCaustics();
-
-            // Update and Draw Crystals
-            spawnCrystals();
-            
-            // Check threshold
-            const fillRatio = crystals.length / MAX_CRYSTALS;
-            if (fillRatio > GROWTH_THRESHOLD) {
-                triggerTremor();
+        } else if (this.dripping) {
+            this.vy += 200 * dt;
+            this.dropY += this.vy * dt;
+            if (this.dropY > H * 0.15) {
+                this.dropped = true;
+                ripples.push(new Ripple(this.x, this.y + this.dropY));
+                this.size = 0;
+                this.dripping = false;
+                this.growing = true;
+                this.dropY = 0;
+                this.vy = 0;
             }
-
-            crystals = crystals.filter(c => !c.dead);
-            crystals.forEach(c => {
-                c.update();
-                c.draw(ctx, light.x, light.y);
-            });
-
-            // Drips and Ripples
-            drips = drips.filter(d => d.active);
-            drips.forEach(d => {
-                d.update();
-                d.draw(ctx);
-            });
-
-            ripples = ripples.filter(r => r.alpha > 0);
-            ripples.forEach(r => {
-                r.update();
-                r.draw(ctx);
-            });
-
-            // Falling shards
-            drips.filter(d => !d.active && d instanceof FallingShard); // Hacky filter, just redraw logic
-            // We need to separate FallingShards from Drips visually in array or just check type
-            // For simplicity in this single file, let's filter the main array for shards
-            // Actually, let's just keep them in drips array but check type
-            
-            // Update shards (they are in the drips array but marked dead logic is different)
-            // Let's refine the Drip/Shard separation
-            for(let i=drips.length-1; i>=0; i--) {
-                if(drips[i] instanceof FallingShard) {
-                    drips[i].update();
-                    drips[i].draw(ctx);
-                    if(drips[i].life <= 0) drips.splice(i, 1);
-                }
-            }
-
-            // Light Source (draw last for bright overlay)
-            drawLightSource();
-            
-            // Screen Flash
-            if (flashIntensity > 0) {
-                ctx.fillStyle = `rgba(255, 255, 255, ${flashIntensity})`;
-                ctx.fillRect(0, 0, width, height);
-                flashIntensity *= 0.9;
-                if(flashIntensity < 0.01) flashIntensity = 0;
-            }
-
-            ctx.restore();
-            requestAnimationFrame(loop);
         }
+    }
 
-        // Start
-        loop();
+    draw(ctx) {
+        if (this.size <= 0) return;
+        const dropletY = this.y + this.dropY;
+        ctx.beginPath();
+        ctx.arc(this.x, dropletY, this.size, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(180, 210, 255, 0.6)';
+        ctx.fill();
+        // Drip line
+        if (this.dripping) {
+            ctx.beginPath();
+            ctx.moveTo(this.x, this.y);
+            ctx.lineTo(this.x, dropletY);
+            ctx.strokeStyle = 'rgba(180, 210, 255, 0.3)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+    }
+}
 
-    </script>
+class Ripple {
+    constructor(x, y) {
+        this.x = x;
+        this.y = y;
+        this.radius = 2;
+        this.maxRadius = 20 + Math.random() * 20;
+        this.life = 1;
+        this.speed = 15 + Math.random() * 10;
+    }
+
+    update(dt) {
+        this.radius += this.speed * dt;
+        this.life = 1 - (this.radius / this.maxRadius);
+        if (this.life <= 0) return false;
+        return true;
+    }
+
+    draw(ctx) {
+        if (this.life <= 0) return;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(150, 200, 255, ${this.life * 0.4})`;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        // Inner ring
+        if (this.radius > 5) {
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.radius * 0.6, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(150, 200, 255, ${this.life * 0.2})`;
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+    }
+}
+
+// --- Caustics ---
+let causticPoints = [];
+function generateCaustics() {
+    causticPoints = [];
+    for (let i = 0; i < 30; i++) {
+        causticPoints.push({
+            x: Math.random() * W,
+            y: Math.random() * H,
+            phase: Math.random() * Math.PI * 2,
+            speed: 0.3 + Math.random() * 0.5,
+            size: 30 + Math.random() * 60,
+            hue: Math.random() * 60 + 180 // blue-cyan range
+        });
+    }
+}
+
+function drawCaustics(ctx, time, lightX, lightY) {
+    for (const cp of causticPoints) {
+        const px = cp.x + Math.sin(time * cp.speed + cp.phase) * 40;
+        const py = cp.y + Math.cos(time * cp.speed * 0.7 + cp.phase) * 30;
+        const dx = px - lightX;
+        const dy = py - lightY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const intensity = Math.max(0, 1 - dist / (W * 0.5)) * 0.08;
+
+        const grad = ctx.createRadialGradient(px, py, 0, px, py, cp.size);
+        grad.addColorStop(0, `hsla(${cp.hue + Math.sin(time + cp.phase) * 20}, 80%, 70%, ${intensity})`);
+        grad.addColorStop(1, `hsla(${cp.hue}, 80%, 50%, 0)`);
+        ctx.fillStyle = grad;
+        ctx.fillRect(px - cp.size, py - cp.size, cp.size * 2, cp.size * 2);
+    }
+}
+
+// --- Cave drawing ---
+function drawCave(ctx) {
+    // Background gradient
+    const bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+    bgGrad.addColorStop(0, '#0a0810');
+    bgGrad.addColorStop(0.5, '#0d0a15');
+    bgGrad.addColorStop(1, '#080610');
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, W, H);
+
+    // Ceiling
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(caveCeiling[0].x, caveCeiling[0].y);
+    for (let i = 1; i < caveCeiling.length; i++) {
+        const prev = caveCeiling[i - 1];
+        const curr = caveCeiling[i];
+        const cpx = (prev.x + curr.x) / 2;
+        const cpy = (prev.y + curr.y) / 2;
+        ctx.quadraticCurveTo(prev.x, prev.y, cpx, cpy);
+    }
+    ctx.lineTo(W, caveCeiling[caveCeiling.length - 1].y);
+    ctx.lineTo(W, 0);
+    ctx.closePath();
+
+    const ceilGrad = ctx.createLinearGradient(0, 0, 0, H * 0.35);
+    ceilGrad.addColorStop(0, '#0e0b14');
+    ceilGrad.addColorStop(1, '#15101e');
+    ctx.fillStyle = ceilGrad;
+    ctx.fill();
+
+    // Ceiling texture lines
+    ctx.strokeStyle = 'rgba(40, 30, 60, 0.3)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < caveCeiling.length; i += 3) {
+        const c = caveCeiling[i];
+        ctx.beginPath();
+        ctx.moveTo(c.x, c.y);
+        ctx.lineTo(c.x + 10, c.y + 15 + Math.sin(i) * 10);
+        ctx.stroke();
+    }
+
+    // Floor
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    ctx.lineTo(caveFloor[0].x, caveFloor[0].y);
+    for (let i = 1; i < caveFloor.length; i++) {
+        const prev = caveFloor[i - 1];
+        const curr = caveFloor[i];
+        const cpx = (prev.x + curr.x) / 2;
+        const cpy = (prev.y + curr.y) / 2;
+        ctx.quadraticCurveTo(prev.x, prev.y, cpx, cpy);
+    }
+    ctx.lineTo(W, caveFloor[caveFloor.length - 1].y);
+    ctx.lineTo(W, H);
+    ctx.closePath();
+
+    const floorGrad = ctx.createLinearGradient(0, H * 0.65, 0, H);
+    floorGrad.addColorStop(0, '#15101e');
+    floorGrad.addColorStop(1, '#0e0b14');
+    ctx.fillStyle = floorGrad;
+    ctx.fill();
+
+    // Floor texture
+    ctx.strokeStyle = 'rgba(40, 30, 60, 0.3)';
+    for (let i = 0; i < caveFloor.length; i += 3) {
+        const c = caveFloor[i];
+        ctx.beginPath();
+        ctx.moveTo(c.x, c.y);
+        ctx.lineTo(c.x + 10, c.y - 15 - Math.sin(i) * 10);
+        ctx.stroke();
+    }
+
+    // Rock wall details - subtle noise lines
+    ctx.strokeStyle = 'rgba(30, 22, 45, 0.4)';
+    ctx.lineWidth = 0.5;
+    for (let i = 0; i < 50; i++) {
+        const x = Math.random() * W;
+        const y = Math.random() * H;
+        const len = 5 + Math.random() * 20;
+        const angle = Math.random() * Math.PI;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + Math.cos(angle) * len, y + Math.sin(angle) * len);
+        ctx.stroke();
+    }
+}
+
+// --- Light source ---
+function drawLight(ctx, time, lightX, lightY) {
+    // Light glow
+    const glowSize = 120 + Math.sin(time * 0.5) * 20;
+    const grad = ctx.createRadialGradient(lightX, lightY, 0, lightX, lightY, glowSize);
+    grad.addColorStop(0, 'rgba(200, 220, 255, 0.15)');
+    grad.addColorStop(0.3, 'rgba(150, 180, 255, 0.06)');
+    grad.addColorStop(1, 'rgba(100, 140, 200, 0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(lightX - glowSize, lightY - glowSize, glowSize * 2, glowSize * 2);
+
+    // Light core
+    const coreGrad = ctx.createRadialGradient(lightX, lightY, 0, lightX, lightY, 15);
+    coreGrad.addColorStop(0, 'rgba(255, 255, 255, 0.3)');
+    coreGrad.addColorStop(1, 'rgba(200, 220, 255, 0)');
+    ctx.fillStyle = coreGrad;
+    ctx.beginPath();
+    ctx.arc(lightX, lightY, 15, 0, Math.PI * 2);
+    ctx.fill();
+}
+
+// --- Main state ---
+let crystals = [];
+let shards = [];
+let drips = [];
+let ripples = [];
+let lightX = W * 0.5, lightY = H * 0.5;
+let lightAngle = 0;
+let tremorActive = false;
+let tremorTimer = 0;
+let tremorDuration = 0.5;
+let fillThreshold = 0;
+let totalCrystalArea = 0;
+let time = 0;
+let lastTime = 0;
+let dripTimer = 0;
+let dripInterval = 1.5;
+
+function init() {
+    generateCave();
+    generateCaustics();
+    crystals = [];
+    shards = [];
+    drips = [];
+    ripples = [];
+    time = 0;
+    tremorActive = false;
+    tremorTimer = 0;
+
+    // Create initial crystals
+    const numCrystals = 8 + Math.floor(Math.random() * 6);
+    for (let i = 0; i < numCrystals; i++) {
+        const t = Math.random();
+        const x = t * W;
+        // Check if closer to ceiling or floor
+        const ceilY = getCaveYAt(x, caveCeiling);
+        const floorY = getCaveYAt(x, caveFloor);
+        const midY = (ceilY + floorY) / 2;
+
+        if (Math.random() < 0.5) {
+            // From ceiling
+            const angle = Math.PI * 0.15 + Math.random() * Math.PI * 0.3;
+            const crystal = new Crystal(x, ceilY, angle, true);
+            crystals.push(crystal);
+        } else {
+            // From floor
+            const angle = -Math.PI * 0.15 - Math.random() * Math.PI * 0.3;
+            const crystal = new Crystal(x, floorY, angle, false);
+            crystals.push(crystal);
+        }
+    }
+
+    // Create drips from stalactites
+    for (let i = 0; i < 5; i++) {
+        const t = 0.1 + Math.random() * 0.8;
+        const x = t * W;
+        const y = getCaveYAt(x, caveCeiling);
+        drips.push(new Drip(x, y));
+    }
+}
+
+function getCaveYAt(x, cave) {
+    for (let i = 0; i < cave.length - 1; i++) {
+        if (x >= cave[i].x && x <= cave[i + 1].x) {
+            const t = (x - cave[i].x) / (cave[i + 1].x - cave[i].x);
+            return cave[i].y + t * (cave[i + 1].y - cave[i].y);
+        }
+    }
+    return cave[cave.length - 1].y;
+}
+
+function getTotalArea() {
+    return crystals.reduce((sum, c) => sum + c.getArea(), 0);
+}
+
+function triggerTremor() {
+    tremorActive = true;
+    tremorTimer = 0;
+    // Shatter oldest crystals (first 40% by creation time)
+    const numToShatter = Math.max(2, Math.floor(crystals.length * 0.4));
+    const toShatter = crystals.slice(0, numToShatter);
+
+    for (const crystal of toShatter) {
+        // Create shards from each branch
+        for (const branch of crystal.branches) {
+            const numShards = 2 + Math.floor(Math.random() * 3);
+            for (let s = 0; s < numShards; s++) {
+                const sx = branch.x + Math.cos(branch.angle) * branch.length * Math.random();
+                const sy = branch.y + Math.sin(branch.angle) * branch.length * Math.random();
+                shards.push(new Shard(sx, sy, branch.angle, crystal.color));
+            }
+        }
+        crystal.alive = false;
+    }
+
+    // Remove shatter crystals after a delay
+    setTimeout(() => {
+        crystals = crystals.filter(c => c.alive);
+    }, 2000);
+}
+
+function update(dt) {
+    time += dt;
+
+    // Move light source
+    lightAngle += dt * 0.15;
+    lightX = W * 0.5 + Math.sin(lightAngle * 0.7) * W * 0.35 + Math.cos(lightAngle * 1.3) * W * 0.15;
+    lightY = H * 0.5 + Math.cos(lightAngle * 0.5) * H * 0.25 + Math.sin(lightAngle * 0.9) * H * 0.1;
+
+    // Update crystals
+    for (const crystal of crystals) {
+        crystal.update(dt);
+    }
+
+    // Check fill threshold
+    totalCrystalArea = getTotalArea();
+    const maxArea = W * H * 0.15;
+    if (totalCrystalArea > maxArea && !tremorActive) {
+        triggerTremor();
+    }
+
+    // Shards
+    for (const shard of shards) {
+        shard.update(dt);
+    }
+    shards = shards.filter(s => s.life > 0);
+
+    // Drips
+    dripTimer += dt;
+    if (dripTimer >= dripInterval && drips.length < 10) {
+        dripTimer = 0;
+        // Pick a random stalactite position
+        const t = Math.random();
+        const x = t * W;
+        const y = getCaveYAt(x, caveCeiling);
+        drips.push(new Drip(x, y));
+    }
+
+    for (const drip of drips) {
+        drip.update(dt);
+    }
+    drips = drips.filter(d => d.growing || d.dripping);
+
+    // Ripples
+    ripples = ripples.filter(r => r.update(dt));
+
+    // Tremor effect
+    if (tremorActive) {
+        tremorTimer += dt;
+        if (tremorTimer >= tremorDuration) {
+            tremorActive = false;
+        }
+    }
+}
+
+function draw(ctx) {
+    ctx.clearRect(0, 0, W, H);
+
+    // Apply tremor offset
+    ctx.save();
+    if (tremorActive) {
+        const tremorIntensity = Math.sin(tremorTimer / tremorDuration * Math.PI) * 3;
+        ctx.translate(
+            (Math.random() - 0.5) * tremorIntensity * 2,
+            (Math.random() - 0.5) * tremorIntensity * 2
+        );
+    }
+
+    drawCave(ctx);
+
+    // Caustics
+    drawCaustics(ctx, time, lightX, lightY);
+
+    // Light
+    drawLight(ctx, time, lightX, lightY);
+
+    // Crystals (sorted by depth for layering)
+    const sortedCrystals = [...crystals].sort((a, b) => a.originY - b.originY);
+    for (const crystal of sortedCrystals) {
+        crystal.draw(ctx, lightX, lightY, time);
+    }
+
+    // Shards
+    for (const shard of shards) {
+        shard.draw(ctx);
+    }
+
+    // Drips
+    for (const drip of drips) {
+        drip.draw(ctx);
+    }
+
+    // Ripples
+    for (const ripple of ripples) {
+        ripple.draw(ctx);
+    }
+
+    // Vignette
+    const vigGrad = ctx.createRadialGradient(W / 2, H / 2, W * 0.25, W / 2, H / 2, W * 0.75);
+    vigGrad.addColorStop(0, 'rgba(0,0,0,0)');
+    vigGrad.addColorStop(1, 'rgba(0,0,0,0.5)');
+    ctx.fillStyle = vigGrad;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.restore();
+}
+
+function loop(timestamp) {
+    if (!lastTime) lastTime = timestamp;
+    const dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+    lastTime = timestamp;
+
+    update(dt);
+    draw(ctx);
+
+    requestAnimationFrame(loop);
+}
+
+init();
+requestAnimationFrame(loop);
+</script>
 </body>
 </html>

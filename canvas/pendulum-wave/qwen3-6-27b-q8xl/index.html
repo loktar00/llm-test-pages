@@ -1,267 +1,187 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pendulum Wave</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            background-color: #050505;
-            overflow: hidden;
-            font-family: sans-serif;
-        }
-        canvas {
-            display: block;
-        }
-        #ui-layer {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            pointer-events: none;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            opacity: 0;
-            transition: opacity 0.5s ease-out;
-            background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, rgba(0,0,0,0) 70%);
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pendulum Wave</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:#08080e}
+canvas{display:block}
+</style>
 </head>
 <body>
-
-    <div id="ui-layer"></div>
-    <canvas id="canvas"></canvas>
-
+<canvas id="c"></canvas>
 <script>
-/**
- * Pendulum Wave Simulation
- * 
- * Physics:
- * To create a wave that repeats every 60 seconds (T_cycle),
- * we use the harmonic series.
- * The frequency of the nth pendulum f_n = f_base + n * f_drift.
- * 
- * Let's set the total cycle time to 60 seconds.
- * Let the slowest pendulum (n=0) have a frequency of 2 Hz (just for visual speed).
- * To return to phase at 60s, the frequency difference between adjacent pendulums
- * must be 1/60 Hz.
- * 
- * Length L = g / (2 * PI * f)^2
- */
+const C=document.getElementById('c'),X=C.getContext('2d');
+let W,H;
+const onResize=()=>{W=C.width=innerWidth;H=C.height=innerHeight};
+onResize();addEventListener('resize',onResize);
 
-const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d', { alpha: false });
-const uiLayer = document.getElementById('ui-layer');
+const N=24,CYCLE=60,BASE=24,AMP=0.5;
+const TRAIL=90,SW=14;
+const trails=Array.from({length:N},()=>[]);
+const seismo=Array.from({length:N},()=>[]);
+let t0=performance.now(),flash=0,lastFlash=0;
 
-// Configuration
-const CONFIG = {
-    numPendulums: 24,
-    cycleTime: 60, // seconds for full reset
-    baseFreq: 1.8, // Hz of the slowest pendulum
-    gravity: 9.81,
-    trailStrength: 0.15, // 0 to 1 (lower is longer trail)
-    chartOpacity: 0.02,
-    bobRadius: 4,
-    colors: {
-        bg: '#050505',
-        pivot: '#333',
-        rod: '#555',
-        bob: '#fff',
-        chart: 'rgba(0, 255, 200, 0.1)'
-    }
-};
+function freq(i){return(BASE+i)/CYCLE}
+function ang(i,t){return AMP*Math.cos(2*Math.PI*freq(i)*t)}
+function bob(i,t,px,py,L){const a=ang(i,t);return{x:px+L*Math.sin(a),y:py+L*Math.cos(a),a}}
+function hue(i){return(200+i/N*160)%360}
+function col(i,a){return`hsla(${hue(i)},75%,60%,${a!=null?a:1})`}
 
-// State
-let width, height;
-let pendulums = [];
-let time = 0;
-let lastTime = 0;
-let chartYStart;
+function draw(t){
+  const topZ=H*0.52;
+  const py=topZ*0.12;
+  const mL=topZ*0.78;
+  const sp=W/(N+1);
 
-class Pendulum {
-    constructor(index, total) {
-        this.index = index;
-        
-        // Physics setup
-        // Frequency of this pendulum
-        // We want them to drift by 1 cycle over the total cycle time
-        const freqDiff = 1 / CONFIG.cycleTime; 
-        this.frequency = CONFIG.baseFreq + (index * freqDiff);
-        
-        // Calculate length based on frequency: f = (1/2pi) * sqrt(g/L) => L = g / (4 * pi^2 * f^2)
-        this.length = CONFIG.gravity / (4 * Math.PI * Math.PI * this.frequency * this.frequency);
-        
-        // Scale length to fit screen nicely later
-        this.scaledLength = 0; 
-        
-        this.angle = 0;
-        this.angleVelocity = 0;
-        this.maxAmplitude = Math.PI / 4; // 45 degrees
-        this.phaseOffset = 0; // All start together
-        
-        // Chart data
-        this.xHistory = [];
-        this.maxHistory = 200; // How many points to keep
+  const periods=Array.from({length:N},(_,i)=>CYCLE/(BASE+i));
+  const pMin=periods[0],pMax=periods[N-1];
+  const vL=periods.map(p=>mL*(0.35+0.65*((p-pMin)/(pMax-pMin))));
+
+  X.fillStyle='#08080e';
+  X.fillRect(0,0,W,H);
+
+  X.strokeStyle='rgba(40,40,70,0.05)';
+  X.lineWidth=1;
+  for(let x=0;x<W;x+=50){X.beginPath();X.moveTo(x,0);X.lineTo(x,topZ);X.stroke()}
+  for(let y=0;y<topZ;y+=50){X.beginPath();X.moveTo(0,y);X.lineTo(W,y);X.stroke()}
+
+  X.fillStyle='rgba(70,70,110,0.25)';
+  X.fillRect(sp*0.5,py-2,sp*(N+1)-sp,3);
+
+  for(let i=0;i<N;i++){
+    const px=sp*(i+1);
+    const b=bob(i,t,px,py,vL[i]);
+
+    trails[i].push({x:b.x,y:b.y});
+    if(trails[i].length>TRAIL)trails[i].shift();
+
+    for(let j=1;j<trails[i].length;j++){
+      const a=j/trails[i].length*0.3;
+      X.beginPath();
+      X.moveTo(trails[i][j-1].x,trails[i][j-1].y);
+      X.lineTo(trails[i][j].x,trails[i][j].y);
+      X.strokeStyle=col(i,a);
+      X.lineWidth=1.5;
+      X.stroke();
     }
 
-    update(dt) {
-        // Simple Harmonic Motion approximation for small angles
-        // theta(t) = A * cos(2 * PI * f * t)
-        // We use the exact formula for visual smoothness rather than integration
-        // to ensure perfect synchronization.
-        
-        const omega = 2 * Math.PI * this.frequency;
-        this.angle = this.maxAmplitude * Math.cos(omega * time + this.phaseOffset);
-        
-        // Calculate position
-        // We need to map the physical length to screen pixels
-        // The length calculated is in meters (approx 0.2m to 0.3m)
-        // We want the pendulums to take up about 40% of the screen height
-        
-        const scale = (height * 0.45) / CONFIG.gravity; // Rough scaling factor
-        this.scaledLength = this.length * scale * 10; // Multiply by 10 to make it visible
-        
-        this.x = width / 2 + (this.index - (CONFIG.numPendulums - 1) / 2) * (width / CONFIG.numPendulums);
-        
-        // Pivot point is at top 15% of screen
-        const pivotY = height * 0.15;
-        this.y = pivotY + this.scaledLength * Math.cos(this.angle);
-        this.x += this.scaledLength * Math.sin(this.angle);
-        
-        // Update history for chart
-        // We sample every few frames to save memory/perf
-        if (Math.floor(time * 60) % 2 === 0) {
-            this.xHistory.push(this.x);
-            if (this.xHistory.length > this.maxHistory) {
-                this.xHistory.shift();
-            }
-        }
+    X.beginPath();
+    X.moveTo(px,py);
+    X.lineTo(b.x,b.y);
+    X.strokeStyle='rgba(170,170,200,0.18)';
+    X.lineWidth=1;
+    X.stroke();
+
+    X.beginPath();
+    X.arc(px,py,2,0,Math.PI*2);
+    X.fillStyle='rgba(140,140,170,0.35)';
+    X.fill();
+
+    X.beginPath();
+    X.arc(b.x,b.y,4.5,0,Math.PI*2);
+    X.fillStyle=col(i);
+    X.shadowColor=col(i,0.7);
+    X.shadowBlur=12;
+    X.fill();
+    X.shadowBlur=0;
+  }
+
+  const sTop=topZ+10;
+  const sH=H-sTop-10;
+  const rowH=sH/N;
+
+  X.fillStyle='rgba(6,6,12,0.92)';
+  X.fillRect(0,sTop,W,sH);
+  X.strokeStyle='rgba(60,60,100,0.12)';
+  X.lineWidth=1;
+  X.strokeRect(0,sTop,W,sH);
+
+  X.beginPath();
+  X.moveTo(0,topZ);
+  X.lineTo(W,topZ);
+  X.strokeStyle='rgba(80,80,130,0.18)';
+  X.stroke();
+
+  for(let i=0;i<N;i++){
+    const a=ang(i,t);
+    const xn=a/AMP;
+
+    seismo[i].push({t,x:xn});
+    while(seismo[i].length>0&&seismo[i][0].t<t-SW)seismo[i].shift();
+    if(seismo[i].length>SW*120)seismo[i].splice(0,seismo[i].length-SW*60);
+
+    const baseY=sTop+rowH*(i+0.5);
+    const amp=rowH*0.38;
+
+    X.beginPath();
+    X.moveTo(0,baseY);
+    X.lineTo(W,baseY);
+    X.strokeStyle='rgba(45,45,75,0.07)';
+    X.lineWidth=1;
+    X.stroke();
+
+    if(seismo[i].length>1){
+      X.beginPath();
+      for(let j=0;j<seismo[i].length;j++){
+        const d=seismo[i][j];
+        const px=((d.t-(t-SW))/SW)*W;
+        const py=baseY+d.x*amp;
+        if(j===0)X.moveTo(px,py);
+        else X.lineTo(px,py);
+      }
+      X.strokeStyle=col(i,0.45);
+      X.lineWidth=1;
+      X.stroke();
     }
 
-    draw(ctx) {
-        const pivotY = height * 0.15;
-        
-        // Draw Rod
-        ctx.beginPath();
-        ctx.strokeStyle = CONFIG.colors.rod;
-        ctx.lineWidth = 1;
-        ctx.moveTo(this.x - this.scaledLength * Math.sin(this.angle), pivotY);
-        ctx.lineTo(this.x, this.y);
-        ctx.stroke();
+    const tip=seismo[i][seismo[i].length-1];
+    const curX=((t-(t-SW))/SW)*W;
+    X.beginPath();
+    X.arc(curX,baseY+tip.x*amp,2,0,Math.PI*2);
+    X.fillStyle=col(i,0.7);
+    X.fill();
+  }
 
-        // Draw Bob
-        ctx.beginPath();
-        ctx.fillStyle = CONFIG.colors.bob;
-        ctx.arc(this.x, this.y, CONFIG.bobRadius, 0, Math.PI * 2);
-        ctx.fill();
-    }
-    
-    drawChart(ctx) {
-        if (this.xHistory.length < 2) return;
+  X.fillStyle='rgba(110,110,160,0.22)';
+  X.font='9px monospace';
+  for(let s=0;s<=SW;s+=3){
+    const px=(s/SW)*W;
+    X.fillText(-SW+s+'s',px+2,sTop+sH-3);
+    X.beginPath();
+    X.moveTo(px,sTop);
+    X.lineTo(px,sTop+sH);
+    X.strokeStyle='rgba(55,55,90,0.05)';
+    X.stroke();
+  }
 
-        ctx.beginPath();
-        ctx.strokeStyle = CONFIG.colors.chart;
-        ctx.lineWidth = 1;
-        
-        // Draw the trace
-        for (let i = 0; i < this.xHistory.length - 1; i++) {
-            const x1 = this.xHistory[i];
-            const x2 = this.xHistory[i+1];
-            // Y position moves down over time
-            const y1 = chartYStart + (this.maxHistory - 1 - i) * (height * 0.3 / this.maxHistory);
-            const y2 = chartYStart + (this.maxHistory - 1 - (i+1)) * (height * 0.3 / this.maxHistory);
-            
-            if (i === 0) ctx.moveTo(x1, y1);
-            else ctx.lineTo(x1, y1);
-            ctx.lineTo(x2, y2);
-        }
-        ctx.stroke();
-    }
+  const ct=t%CYCLE;
+  if((ct<0.25||ct>CYCLE-0.25)&&t-lastFlash>0.3){flash=1;lastFlash=t}
+  if(flash>0){
+    X.fillStyle=`rgba(180,190,240,${flash*0.07})`;
+    X.fillRect(0,0,W,H);
+    X.fillStyle=`rgba(255,255,255,${flash*0.12})`;
+    X.font='bold 13px monospace';
+    X.textAlign='center';
+    X.fillText('◆ ALIGNMENT ◆',W/2,topZ+14);
+    X.textAlign='start';
+    flash*=0.93;
+    if(flash<0.005)flash=0;
+  }
+
+  X.fillStyle='rgba(120,120,170,0.3)';
+  X.font='11px monospace';
+  X.fillText(`PENDULUM WAVE  ${N} pendulums  ${CYCLE}s cycle  t=${t.toFixed(1)}s`,10,topZ+14);
 }
 
-function init() {
-    resize();
-    window.addEventListener('resize', resize);
-    
-    // Create pendulums
-    for (let i = 0; i < CONFIG.numPendulums; i++) {
-        pendulums.push(new Pendulum(i, CONFIG.numPendulums));
-    }
-    
-    lastTime = performance.now();
-    requestAnimationFrame(loop);
-}
-
-function resize() {
-    width = window.innerWidth;
-    height = window.innerHeight;
-    canvas.width = width;
-    canvas.height = height;
-    
-    // Chart starts at 70% down the screen
-    chartYStart = height * 0.7;
-}
-
-function flashMarker() {
-    uiLayer.style.opacity = '1';
-    setTimeout(() => {
-        uiLayer.style.opacity = '0';
-    }, 300);
-}
-
-function loop(timestamp) {
-    const dt = (timestamp - lastTime) / 1000;
-    lastTime = timestamp;
-    
-    // Update time
-    time += dt;
-    
-    // Check for reset (modulo cycle time)
-    // We use a small threshold to catch the moment it aligns
-    const progress = time % CONFIG.cycleTime;
-    if (progress < dt) {
-        flashMarker();
-        // Clear history to avoid visual clutter buildup over infinite time
-        pendulums.forEach(p => p.xHistory = []);
-    }
-
-    // 1. Draw Background (with trails)
-    // Instead of clearing, we draw a semi-transparent rect to create trails
-    ctx.fillStyle = `rgba(5, 5, 5, ${CONFIG.trailStrength})`;
-    ctx.fillRect(0, 0, width, height);
-
-    // 2. Draw Chart Area Background (subtle grid or background)
-    ctx.fillStyle = '#020202';
-    ctx.fillRect(0, chartYStart, width, height * 0.35);
-
-    // 3. Update and Draw Pendulums
-    pendulums.forEach(p => {
-        p.update(dt);
-        p.draw(ctx);
-        p.drawChart(ctx);
-    });
-    
-    // 4. Draw Pivot Line
-    ctx.beginPath();
-    ctx.strokeStyle = '#444';
-    ctx.lineWidth = 2;
-    const pivotY = height * 0.15;
-    ctx.moveTo(0, pivotY);
-    ctx.lineTo(width, pivotY);
-    ctx.stroke();
-
-    requestAnimationFrame(loop);
-}
-
-// Start
-init();
-
+(function loop(){
+  const now=performance.now();
+  const t=(now-t0)/1000;
+  draw(t);
+  requestAnimationFrame(loop);
+})();
 </script>
 </body>
 </html>

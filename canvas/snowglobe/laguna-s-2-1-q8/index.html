@@ -1,282 +1,320 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<title>Snow Globe</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Snow Globe Screensaver</title>
 <style>
-  html, body { margin:0; padding:0; overflow:hidden; background:#000; height:100%; }
-  canvas { display:block; }
+  * { margin: 0; padding: 0; overflow: hidden; }
+  body, html { width: 100%; height: 100%; background: #000; }
+  canvas { display: block; }
 </style>
 </head>
 <body>
-<canvas id="g"></canvas>
+<canvas id="globe"></canvas>
 <script>
 (() => {
-  const canvas = document.getElementById('g');
+  const canvas = document.getElementById('globe');
   const ctx = canvas.getContext('2d');
-  let W, H, dpr;
-  const resize = () => {
-    dpr = window.devicePixelRatio || 1;
-    W = canvas.width = window.innerWidth * dpr;
-    H = canvas.height = window.innerHeight * dpr;
-    ctx.scale(dpr, dpr);
-  };
+  
+  // Fullscreen setup
+  function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
   window.addEventListener('resize', resize);
   resize();
 
-  const globeR = Math.min(W, H) * 0.42;
-  const centerX = W / 2;
-  const baseY = H * 0.78;
-  const topY = baseY - globeR * 2;
+  // Scene parameters
+  const GROUND_Y = canvas.height * 0.75;
+  const SPHERE_RADIUS = Math.min(canvas.width, canvas.height) * 0.4;
+  const SPHERE_CENTER_X = canvas.width / 2;
+  const SPHERE_CENTER_Y = GROUND_Y - SPHERE_RADIUS * 0.2;
 
-  // Pine tree
-  function drawPine(ctx, x, y, scale, lit) {
-    const h = 60 * scale;
-    const w = 30 * scale;
-    ctx.fillStyle = lit ? '#2e8b57' : '#228b22';
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-    ctx.lineTo(x - w, y + h * 0.6);
-    ctx.lineTo(x + w, y + h * 0.6);
-    ctx.closePath();
-    ctx.fill();
+  // Snow particle system
+  const particles = [];
+  const MAX_PARTICLES = 2000;
 
-    ctx.fillStyle = lit ? '#006400' : '#006400';
-    for (let i = 0; i < 4; i++) {
-      const ty = y + h * 0.2 + i * h * 0.18;
+  class Particle {
+    constructor() {
+      this.reset();
+    }
+    reset() {
+      this.x = SPHERE_CENTER_X + (Math.random() - 0.5) * SPHERE_RADIUS * 1.8;
+      this.y = SPHERE_CENTER_Y - SPHERE_RADIUS + Math.random() * SPHERE_RADIUS * 0.5;
+      this.z = Math.random(); // depth for parallax
+      this.size = 1 + Math.random() * 2;
+      this.speedX = 0;
+      this.speedY = 0;
+      this.accumulated = false;
+    }
+    update(dt, shake) {
+      if (shake.intensity > 0.01) {
+        // Turbulent motion during shake
+        const turbulence = shake.intensity * 3;
+        this.speedX += (Math.random() - 0.5) * turbulence;
+        this.speedY += (Math.random() - 0.5) * turbulence + 0.1;
+        this.speedX *= 0.95;
+        this.speedY *= 0.95;
+        this.x += this.speedX;
+        this.y += this.speedY;
+        
+        // Refract at glass edge (wrap around with distortion)
+        const dx = this.x - SPHERE_CENTER_X;
+        const dy = this.y - SPHERE_CENTER_Y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        if (dist > SPHERE_RADIUS * 0.95) {
+          // Bounce off with refraction effect
+          const angle = Math.atan2(dy, dx);
+          const penetration = dist - SPHERE_RADIUS * 0.95;
+          this.x -= Math.cos(angle) * penetration * 1.2;
+          this.y -= Math.sin(angle) * penetration * 1.2;
+          this.speedX *= -0.6;
+          this.speedY *= -0.6;
+        }
+      } else {
+        // Settle onto surfaces when not shaking
+        if (!this.accumulated) {
+          const dx = this.x - SPHERE_CENTER_X;
+          const dy = this.y - SPHERE_CENTER_Y;
+          if (dy > 0 && dy < SPHERE_RADIUS * 0.3) {
+            // Accumulate on ground/roofs within sphere
+            const baseX = this.x;
+            const baseY = GROUND_Y - SPHERE_RADIUS * 0.1 + Math.sin(baseX * 0.02) * 2;
+            if (this.y > baseY - 2) {
+              this.accumulated = true;
+              this.y = baseY;
+              this.x = baseX;
+            }
+          } else {
+            this.x += this.speedX;
+            this.y += this.speedY;
+            this.speedY += 0.02; // gravity
+          }
+        }
+      }
+    }
+    draw(ctx, shake) {
+      const scale = 0.5 + this.z * 0.5;
+      ctx.save();
+      ctx.translate(this.x, this.y);
+      ctx.scale(scale, scale);
+      ctx.fillStyle = '#FFFFFF';
+      ctx.globalAlpha = 0.7 + this.z * 0.3;
       ctx.beginPath();
-      ctx.moveTo(x, ty);
-      ctx.lineTo(x - w * (1 - i * 0.15), ty + h * 0.2);
-      ctx.lineTo(x + w * (1 - i * 0.15), ty + h * 0.2);
+      ctx.arc(0, 0, this.size, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  // Initialize particles
+  for (let i = 0; i < MAX_PARTICLES; i++) {
+    particles.push(new Particle());
+  }
+
+  // Cabin village
+  function drawVillage(ctx) {
+    const baseY = GROUND_Y + SPHERE_RADIUS * 0.3;
+    const villageWidth = SPHERE_RADIUS * 1.5;
+    const startX = SPHERE_CENTER_X - villageWidth / 2;
+    const spacing = villageWidth / 6;
+
+    for (let i = 0; i < 5; i++) {
+      const x = startX + spacing * i + spacing / 2;
+      const houseWidth = 15 + Math.sin(performance.now() * 0.001 + i) * 2;
+      const houseHeight = 20;
+      const roofHeight = 8;
+
+      // House body
+      ctx.fillStyle = '#8B4513';
+      ctx.fillRect(x - houseWidth / 2, baseY - houseHeight, houseWidth, houseHeight);
+
+      // Roof
+      ctx.fillStyle = '#654321';
+      ctx.beginPath();
+      ctx.moveTo(x - houseWidth / 2, baseY - houseHeight);
+      ctx.lineTo(x, baseY - houseHeight - roofHeight);
+      ctx.lineTo(x + houseWidth / 2, baseY - houseHeight);
       ctx.closePath();
       ctx.fill();
-    }
 
-    ctx.fillStyle = '#8b4513';
-    ctx.fillRect(x - w * 0.2, y + h * 0.6, w * 0.4, h * 0.4);
+      // Windows with flickering lights
+      const flicker = 0.7 + Math.random() * 0.3;
+      ctx.fillStyle = `rgba(255, 200, 100, ${flicker})`;
+      const windowSize = 4;
+      ctx.fillRect(x - houseWidth / 2 + 3, baseY - houseHeight + 3, windowSize, windowSize);
+      ctx.fillRect(x + houseWidth / 2 - 3 - windowSize, baseY - houseHeight + 3, windowSize, windowSize);
+
+      // Pine trees
+      if (i % 2 === 0) {
+        const treeX = x + houseWidth / 2 + 10;
+        const treeHeight = 25;
+        ctx.fillStyle = '#228B22';
+        ctx.beginPath();
+        ctx.moveTo(treeX, baseY - houseHeight);
+        ctx.lineTo(treeX - treeHeight * 0.4, baseY - houseHeight + treeHeight * 0.6);
+        ctx.lineTo(treeX + treeHeight * 0.4, baseY - houseHeight + treeHeight * 0.6);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.moveTo(treeX, baseY - houseHeight + treeHeight * 0.3);
+        ctx.lineTo(treeX - treeHeight * 0.6, baseY - houseHeight + treeHeight * 0.9);
+        ctx.lineTo(treeX + treeHeight * 0.6, baseY - houseHeight + treeHeight * 0.9);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.fillStyle = '#8B4513';
+        ctx.fillRect(treeX - 2, baseY - houseHeight + treeHeight * 0.9, 4, treeHeight * 0.3);
+      }
+    }
   }
 
-  // Cabin
-  function drawCabin(ctx, x, y, scale, lit) {
-    const w = 40 * scale;
-    const h = 35 * scale;
-    ctx.fillStyle = '#8b4513';
-    ctx.fillRect(x, y, w, h);
+  // Draw glass sphere with reflection
+  function drawSphere(ctx, shake) {
+    const gradient = ctx.createRadialGradient(
+      SPHERE_CENTER_X - SPHERE_RADIUS / 3,
+      SPHERE_CENTER_Y - SPHERE_RADIUS / 3,
+      SPHERE_RADIUS * 0.2,
+      SPHERE_CENTER_X,
+      SPHERE_CENTER_Y,
+      SPHERE_RADIUS
+    );
+    gradient.addColorStop(0, 'rgba(173, 216, 230, 0.2)');
+    gradient.addColorStop(0.5, 'rgba(173, 216, 230, 0.1)');
+    gradient.addColorStop(1, 'rgba(100, 150, 200, 0.3)');
 
-    // Roof
-    ctx.fillStyle = '#5d2906';
+    ctx.save();
+    // Add subtle shake jitter to glass
+    if (shake.intensity > 0.01) {
+      ctx.translate((Math.random() - 0.5) * shake.intensity * 4, (Math.random() - 0.5) * shake.intensity * 4);
+    }
+    
+    // Environment reflection
     ctx.beginPath();
-    ctx.moveTo(x, y);
-    ctx.lineTo(x + w / 2, y - h * 0.4);
-    ctx.lineTo(x + w, y);
-    ctx.closePath();
+    ctx.arc(SPHERE_CENTER_X, SPHERE_CENTER_Y, SPHERE_RADIUS, 0, Math.PI * 2);
+    ctx.fillStyle = gradient;
     ctx.fill();
 
-    // Window
-    if (lit) {
-      ctx.fillStyle = '#ffff99';
-      ctx.fillRect(x + w * 0.15, y + h * 0.2, w * 0.25, h * 0.25);
-      ctx.fillRect(x + w * 0.6, y + h * 0.2, w * 0.25, h * 0.25);
-    } else {
-      ctx.fillStyle = '#333';
-      ctx.fillRect(x + w * 0.15, y + h * 0.2, w * 0.25, h * 0.25);
-      ctx.fillRect(x + w * 0.6, y + h * 0.2, w * 0.25, h * 0.25);
-    }
-  }
-
-  // Scene layout
-  const scene = [];
-  function buildScene() {
-    scene.length = 0;
-    const r = globeR * 0.9;
-    const cx = centerX;
-    const cy = (topY + baseY) / 2;
-    const treeCount = 8;
-    const cabinCount = 4;
-    for (let i = 0; i < treeCount; i++) {
-      const angle = (i / treeCount) * Math.PI;
-      const radius = r * 0.7;
-      const x = cx + Math.cos(angle) * radius;
-      const y = cy + Math.sin(angle) * radius * 0.5;
-      scene.push({ type: 'tree', x, y, scale: 0.7 + Math.random() * 0.3 });
-    }
-    for (let i = 0; i < cabinCount; i++) {
-      const angle = ((i + 0.5) / cabinCount) * Math.PI;
-      const radius = r * 0.85;
-      const x = cx + Math.cos(angle) * radius;
-      const y = cy + Math.sin(angle) * radius * 0.4 + globeR * 0.3;
-      scene.push({ type: 'cabin', x, y, scale: 0.7 + Math.random() * 0.3 });
-    }
-  }
-  buildScene();
-
-  // Snow particles
-  const snow = [];
-  const particleCount = 1200;
-  for (let i = 0; i < particleCount; i++) {
-    snow.push({
-      x: Math.random(),
-      y: Math.random(),
-      vx: 0,
-      vy: 0,
-      r: 1 + Math.random() * 2,
-      settled: false,
-      ox: 0, oy: 0
-    });
-  }
-
-  let shakeTimer = 0;
-  let isShaking = false;
-  let shakeTime = 0;
-
-  function shakeGlobe() {
-    isShaking = true;
-    shakeTime = 0;
-    for (const p of snow) {
-      p.settled = false;
-      const angle = Math.random() * Math.PI * 2;
-      const speed = 2 + Math.random() * 3;
-      p.vx = Math.cos(angle) * speed;
-      p.vy = Math.sin(angle) * speed;
-    }
-  }
-
-  // Lighting timer
-  let flickerTimer = 0;
-
-  function insideSphere(x, y) {
-    const cx = centerX;
-    const cy = (topY + baseY) / 2;
-    const dx = x - cx;
-    const dy = y - cy;
-    return dx * dx + dy * dy <= globeR * globeR;
-  }
-
-  function animate() {
-    requestAnimationFrame(animate);
-    ctx.clearRect(0, 0, W, H);
-
-    // Clear with black
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, W, H);
-
-    // Sky / environment reflection gradient inside globe
-    const grad = ctx.createRadialGradient(centerX, topY + globeR * 0.5, globeR * 0.1, centerX, baseY, globeR);
-    grad.addColorStop(0, '#2a52be');
-    grad.addColorStop(1, '#0a2a66');
-    ctx.fillStyle = grad;
-    ctx.save();
-    ctx.globalCompositeOperation = 'source-atop';
-    ctx.fillRect(centerX - globeR, topY, globeR * 2, globeR * 2);
-    ctx.restore();
-
-    // Draw glass sphere
-    ctx.save();
-    ctx.translate(centerX, 0);
-    ctx.scale(1, 1);
-    ctx.beginPath();
-    ctx.arc(0, topY + globeR, globeR, 0, Math.PI * 2);
-    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
-    ctx.lineWidth = 4;
+    // Glass highlight
+    ctx.strokeStyle = 'rgba(200, 230, 255, 0.4)';
+    ctx.lineWidth = 2;
     ctx.stroke();
+
+    // Top highlight
+    ctx.beginPath();
+    ctx.arc(SPHERE_CENTER_X - SPHERE_RADIUS / 3, SPHERE_CENTER_Y - SPHERE_RADIUS / 3, SPHERE_RADIUS * 0.25, 0, Math.PI * 2);
+    const highlightGrad = ctx.createRadialGradient(
+      SPHERE_CENTER_X - SPHERE_RADIUS / 3,
+      SPHERE_CENTER_Y - SPHERE_RADIUS / 3,
+      0,
+      SPHERE_CENTER_X - SPHERE_RADIUS / 3,
+      SPHERE_CENTER_Y - SPHERE_RADIUS / 3,
+      SPHERE_RADIUS * 0.3
+    );
+    highlightGrad.addColorStop(0, 'rgba(255, 255, 255, 0.5)');
+    highlightGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    ctx.fillStyle = highlightGrad;
+    ctx.fill();
+
     ctx.restore();
-
-    // Draw scene items (trees and cabins)
-    for (const item of scene) {
-      const lit = Math.random() > 0.5; // flicker
-      if (item.type === 'tree') drawPine(ctx, item.x, item.y, item.scale, lit);
-      else drawCabin(ctx, item.x, item.y, item.scale, lit);
-    }
-
-    // Update shake timer
-    shakeTimer += 1 / 60;
-    if (shakeTimer >= 20 && !isShaking) {
-      shakeGlobe();
-      shakeTimer = 0;
-    }
-
-    if (isShaking) {
-      shakeTime += 1 / 60;
-      if (shakeTime >= 2.5) {
-        isShaking = false;
-      }
-    }
-
-    // Update and draw snow
-    const gravity = 0.3;
-    const globeCX = centerX;
-    const globeCY = (topY + baseY) / 2;
-
-    for (const p of snow) {
-      if (p.settled) continue;
-
-      if (isShaking) {
-        // Swirling motion during shake
-        const swirlAngle = shakeTime * 4;
-        const radius = 5 + Math.sin(shakeTime) * 3;
-        p.vx += Math.cos(swirlAngle) * 0.1;
-        p.vy += Math.sin(swirlAngle) * 0.1;
-      } else {
-        // Apply gravity toward bottom-center
-        p.vx += (p.x - (centerX + Math.sin(shakeTimer) * 2)) * 0.0005;
-        p.vy += gravity;
-      }
-
-      p.vx *= 0.95;
-      p.vy *= 0.95;
-
-      p.x += p.vx;
-      p.y += p.vy;
-
-      // Refract / wrap around glass edge
-      const dx = p.x - globeCX;
-      const dy = p.y - globeCY;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist > globeR - p.r) {
-        // Reflect inward slightly
-        const nx = dx / dist;
-        const ny = dy / dist;
-        const dot = p.vx * nx + p.vy * ny;
-        if (dot > 0) {
-          p.vx -= dot * nx * 1.2;
-          p.vy -= dot * ny * 1.2;
-        }
-        // Keep inside
-        p.x = globeCX + nx * (globeR - p.r);
-        p.y = globeCY + ny * (globeR - p.r);
-      }
-
-      // Settle if near bottom
-      if (!isShaking && p.vy < 0.5 && p.y > baseY - globeR * 0.6) {
-        const settleSpeed = Math.abs(p.vx) + Math.abs(p.vy);
-        if (settleSpeed < 2.5) {
-          // Raycast down to find surface
-          let foundY = baseY;
-          for (const item of scene) {
-            if (Math.abs(p.x - item.x) < 30 * item.scale) {
-              foundY = Math.min(foundY, item.y + 10 * item.scale);
-            }
-          }
-          p.y = foundY - p.r;
-          p.vx *= 0.5;
-          p.vy *= 0.5;
-          if (Math.abs(p.vx) < 0.1) {
-            p.settled = true;
-          }
-        }
-      }
-    }
-
-    // Draw snow
-    ctx.fillStyle = '#ffffff';
-    for (const p of snow) {
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-      ctx.fill();
-    }
   }
 
-  animate();
+  // Shake controller
+  const shake = {
+    intensity: 0,
+    lastShake: 0,
+    shakeInterval: 20000, // 20 seconds
+    shakeDuration: 3000, // 3 second shake
+    isShaking: false
+  };
+
+  // Animation loop
+  let lastTime = 0;
+  function animate(time) {
+    const dt = (time - lastTime) / 1000;
+    lastTime = time;
+
+    // Check for shake trigger
+    const timeSinceShake = time - shake.lastShake;
+    if (timeSinceShake > shake.shakeInterval + (Math.random() * 5000 - 2500)) {
+      shake.lastShake = time;
+      shake.isShaking = true;
+    }
+
+    if (shake.isShaking) {
+      const shakeElapsed = time - shake.lastShake;
+      if (shakeElapsed < shake.shakeDuration) {
+        // Turbulent shake with varying intensity
+        const shakePhase = shakeElapsed / shake.shakeDuration;
+        shake.intensity = Math.sin(shakePhase * Math.PI) * (0.5 + Math.sin(time * 0.02) * 0.2);
+      } else {
+        shake.isShaking = false;
+        shake.intensity = 0;
+        // Reset particle accumulation when settling completes
+        particles.forEach(p => {
+          if (Math.random() < 0.1) p.reset();
+        });
+      }
+    } else {
+      // Gradually reduce intensity
+      shake.intensity *= 0.95;
+    }
+
+    // Clear canvas
+    ctx.fillStyle = '#0a0a2a';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Draw base ground
+    ctx.fillStyle = '#1a1a3a';
+    ctx.fillRect(0, GROUND_Y, canvas.width, canvas.height - GROUND_Y);
+
+    // Draw snow accumulation on ground (within sphere base)
+    const groundAccum = ctx.createRadialGradient(
+      SPHERE_CENTER_X, GROUND_Y, SPHERE_RADIUS * 0.3,
+      SPHERE_CENTER_X, GROUND_Y, SPHERE_RADIUS * 0.8
+    );
+    groundAccum.addColorStop(0, '#f0f0f0');
+    groundAccum.addColorStop(1, '#d0d0d0');
+    ctx.fillStyle = groundAccum;
+    ctx.beginPath();
+    ctx.ellipse(SPHERE_CENTER_X, GROUND_Y + 5, SPHERE_RADIUS * 0.9, SPHERE_RADIUS * 0.2, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Draw particles
+    ctx.save();
+    // Clip to sphere interior for snow
+    ctx.beginPath();
+    ctx.arc(SPHERE_CENTER_X, SPHERE_CENTER_Y, SPHERE_RADIUS * 0.92, 0, Math.PI * 2);
+    ctx.clip();
+
+    particles.forEach(p => {
+      p.update(dt, shake);
+      p.draw(ctx, shake);
+    });
+    ctx.restore();
+
+    // Draw village
+    drawVillage(ctx);
+
+    // Draw sphere
+    drawSphere(ctx, shake);
+
+    // Add atmospheric fog
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.03)';
+    for (let i = 0; i < 50; i++) {
+      const x = Math.random() * canvas.width;
+      const y = Math.random() * canvas.height;
+      const size = Math.random() * 3 + 1;
+      ctx.globalAlpha = 0.1 + Math.sin(time * 0.001 + i) * 0.05;
+      ctx.fillRect(x, y, size, size);
+    }
+
+    requestAnimationFrame(animate);
+  }
+
+  requestAnimationFrame(animate);
 })();
 </script>
 </body>

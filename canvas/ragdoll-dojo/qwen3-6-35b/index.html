@@ -1,549 +1,907 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ragdoll Dojo</title>
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            overflow: hidden;
-            background-color: #1a1a1a;
-            font-family: 'Courier New', Courier, monospace;
-        }
-        canvas {
-            display: block;
-        }
-        #ui {
-            position: absolute;
-            top: 10px;
-            left: 10px;
-            color: rgba(255, 255, 255, 0.5);
-            pointer-events: none;
-            font-size: 12px;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ragdoll Dojo</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #1a1a2e; }
+canvas { display: block; }
+</style>
 </head>
 <body>
-    <div id="ui">RAGDOLL DOJO // AUTO-PHYSICS // NO INPUT</div>
-    <canvas id="dojo"></canvas>
-    <script>
-        /**
-         * RAGDOLL DOJO
-         * A Verlet Integration Physics Engine
-         */
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
 
-        const canvas = document.getElementById('dojo');
-        const ctx = canvas.getContext('2d');
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
 
-        let width, height;
-        let particles = [];
-        let constraints = [];
-        let obstacles = [];
-        let particlesToDissolve = []; // Particles that have settled and are fading out
+// Physics constants
+const GRAVITY = 0.4;
+const DAMPING = 0.99;
+const CONSTRAINT_ITERATIONS = 12;
+const JOINT_ITERATIONS = 8;
+const DT = 1;
+const SLOW_MO_FACTOR = 0.2;
+const SLOW_MO_DURATION = 120;
 
-        // Physics Configuration
-        const GRAVITY = 0.5;
-        const FRICTION = 0.99;
-        const BOUNCE = 0.7;
-        const GROUND_Y_OFFSET = 50;
-        const ITERATIONS = 5; // Constraint solver iterations
-        
-        // Visual Configuration
-        const LINE_WIDTH = 4;
-        const JOINT_RADIUS = 4;
-        const PALE_COLOR = '#e0e0e0';
-        const DISSOLVE_COLOR = 'rgba(255, 255, 255, 0)';
-        const TRAMPOLINE_COLOR = '#ff4757';
-        const WOOD_COLOR = '#8d6e63';
-        
-        // State
-        let lastTime = 0;
-        let slowMotionFactor = 1.0;
-        let nextDropTime = 0;
-        let collisionEvents = []; // {x, y, intensity}
+let timeScale = 1;
+let slowMoTimer = 0;
+let slowMoIntensity = 0;
 
-        // Resize Handler
-        function resize() {
-            width = canvas.width = window.innerWidth;
-            height = canvas.height = window.innerHeight;
-            generateObstacles();
+// Particles
+class Particle {
+    constructor(x, y, mass = 1, pinned = false) {
+        this.x = x; this.y = y;
+        this.px = x; this.py = y;
+        this.mass = mass;
+        this.pinned = pinned;
+        this.radius = mass === 10 ? 6 : 4;
+        this.color = mass === 10 ? '#e8c170' : '#f0d0a0';
+        this.inAir = true;
+        this.settled = false;
+        this.settleTimer = 0;
+        this.dissolving = false;
+        this.dissolveAlpha = 1;
+        this.age = 0;
+    }
+    update() {
+        if (this.pinned) return;
+        let vx = (this.x - this.px) * DAMPING;
+        let vy = (this.y - this.py) * DAMPING;
+        this.px = this.x;
+        this.py = this.y;
+        this.x += vx * timeScale;
+        this.y += (vy + GRAVITY * timeScale) * timeScale;
+        this.age += timeScale;
+    }
+}
+
+// Constraints
+class Constraint {
+    constructor(p1, p2, length, stiffness = 1, joint = false) {
+        this.p1 = p1;
+        this.p2 = p2;
+        this.length = length || Math.hypot(p1.x - p2.x, p1.y - p2.y);
+        this.stiffness = stiffness;
+        this.joint = joint;
+        this.maxAngle = joint ? 120 * Math.PI / 180 : Infinity;
+        this.broken = false;
+    }
+    solve() {
+        if (this.broken) return;
+        let dx = this.p2.x - this.p1.x;
+        let dy = this.p2.y - this.p1.y;
+        let dist = Math.hypot(dx, dy);
+        if (dist === 0) dist = 0.001;
+        let diff = (this.length - dist) / dist * 0.5 * this.stiffness;
+        let ox = dx * diff;
+        let oy = dy * diff;
+        if (!this.p1.pinned) { this.p1.x -= ox; this.p1.y -= oy; }
+        if (!this.p2.pinned) { this.p2.x += ox; this.p2.y += oy; }
+    }
+    solveJoint() {
+        if (this.broken || this.maxAngle === Infinity) return;
+        let dx = this.p2.x - this.p1.x;
+        let dy = this.p2.y - this.p1.y;
+        let dist = Math.hypot(dx, dy);
+        if (dist === 0) return;
+        let angle = Math.atan2(dy, dx);
+        let prevAngle = Math.atan2(this.p2.py - this.p1.py, this.p2.px - this.p1.px);
+        let angleDiff = angle - prevAngle;
+        if (Math.abs(angleDiff) > this.maxAngle) {
+            let correction = Math.sign(angleDiff) * (Math.abs(angleDiff) - this.maxAngle);
+            let cos = Math.cos(correction);
+            let sin = Math.sin(correction);
+            let nx = dx * cos - dy * sin;
+            let ny = dx * sin + dy * cos;
+            if (!this.p1.pinned) { this.p1.x -= (nx - dx) * 0.5; this.p1.y -= (ny - dy) * 0.5; }
+            if (!this.p2.pinned) { this.p2.x += (nx - dx) * 0.5; this.p2.y += (ny - dy) * 0.5; }
         }
-        window.addEventListener('resize', resize);
+    }
+}
 
-        // --- Vector Math Helpers ---
-        const Vec2 = {
-            add: (v1, v2) => ({ x: v1.x + v2.x, y: v1.y + v2.y }),
-            sub: (v1, v2) => ({ x: v1.x - v2.x, y: v1.y - v2.y }),
-            mul: (v, s) => ({ x: v.x * s, y: v.y * s }),
-            len: (v) => Math.sqrt(v.x * v.x + v.y * v.y),
-            norm: (v) => {
-                const l = Math.sqrt(v.x * v.x + v.y * v.y);
-                return l === 0 ? { x: 0, y: 0 } : { x: v.x / l, y: v.y / l };
-            },
-            dist: (v1, v2) => Math.sqrt((v1.x - v2.x) ** 2 + (v1.y - v2.y) ** 2)
-        };
-
-        // --- Classes ---
-
-        class Particle {
-            constructor(x, y, mass = 1, isFixed = false) {
-                this.x = x;
-                this.y = y;
-                this.oldX = x;
-                this.oldY = y;
-                this.mass = mass;
-                this.isFixed = isFixed;
-                this.color = PALE_COLOR;
-                this.alpha = 1;
-                this.dissolving = false;
-                this.dissolveTimer = 0;
-            }
-
-            update() {
-                if (this.isFixed) return;
-
-                const vx = (this.x - this.oldX) * FRICTION;
-                const vy = (this.y - this.oldY) * FRICTION;
-
-                this.oldX = this.x;
-                this.oldY = this.y;
-
-                this.x += vx * slowMotionFactor;
-                this.y += (vy + GRAVITY) * slowMotionFactor;
-
-                // Dissolve Logic
-                if (this.dissolving) {
-                    this.dissolveTimer += 0.02 * slowMotionFactor;
-                    this.alpha = Math.max(0, 1 - this.dissolveTimer);
-                    if (this.alpha <= 0) return false; // Dead
+// Course objects
+class Trampoline {
+    constructor(x, y, w, h = 10) {
+        this.x = x; this.y = y; this.w = w; this.h = h;
+        this.bounceFactor = 1.2;
+        this.v = 0;
+        this.deflect = 0;
+        this.color = '#4a90d9';
+    }
+    draw() {
+        ctx.save();
+        let dy = this.deflect;
+        // Support poles
+        ctx.strokeStyle = '#8B7355';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(this.x, this.y + dy + this.h);
+        ctx.lineTo(this.x, this.y + this.h + 30);
+        ctx.moveTo(this.x + this.w, this.y + dy + this.h);
+        ctx.lineTo(this.x + this.w, this.y + this.h + 30);
+        ctx.stroke();
+        // Trampoline surface
+        let grad = ctx.createLinearGradient(this.x, this.y + dy, this.x, this.y + dy + this.h);
+        grad.addColorStop(0, '#6bc5f7');
+        grad.addColorStop(1, '#3a7bd5');
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.moveTo(this.x - 5, this.y + dy);
+        ctx.quadraticCurveTo(this.x + this.w / 2, this.y + dy + 15 + Math.abs(this.deflect) * 2, this.x + this.w + 5, this.y + dy);
+        ctx.lineTo(this.x + this.w + 5, this.y + dy + this.h);
+        ctx.quadraticCurveTo(this.x + this.w / 2, this.y + dy + 15 + this.h + Math.abs(this.deflect) * 2, this.x - 5, this.y + dy + this.h);
+        ctx.closePath();
+        ctx.fill();
+        // Net pattern
+        ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+        ctx.lineWidth = 1;
+        for (let i = 0; i < this.w; i += 12) {
+            ctx.beginPath();
+            ctx.moveTo(this.x + i, this.y + dy);
+            ctx.lineTo(this.x + i, this.y + dy + this.h);
+            ctx.stroke();
+        }
+        ctx.restore();
+    }
+    update() {
+        this.deflect *= 0.9;
+        this.v *= 0.9;
+    }
+    collide(p) {
+        if (p.y + p.radius > this.y + this.deflect && p.y - p.radius < this.y + this.deflect + this.h + 5) {
+            if (p.x > this.x - 10 && p.x < this.x + this.w + 10) {
+                let vel = p.y - p.py;
+                if (vel > 0) {
+                    p.y = this.y + this.deflect - p.radius;
+                    p.py = p.y + vel * this.bounceFactor;
+                    this.deflect += Math.abs(vel) * 0.5;
+                    this.v += Math.abs(vel) * 0.3;
+                    return true;
                 }
-                return true; // Alive
+            }
+        }
+        return false;
+    }
+}
+
+class Seesaw {
+    constructor(x, y, w) {
+        this.pivotX = x; this.pivotY = y;
+        this.w = w;
+        this.angle = 0;
+        this.angularVel = 0;
+        this.mass = 5;
+        this.color = '#c4956a';
+    }
+    draw() {
+        ctx.save();
+        // Pivot
+        ctx.fillStyle = '#666';
+        ctx.beginPath();
+        ctx.moveTo(this.pivotX - 15, this.pivotY + 25);
+        ctx.lineTo(this.pivotX + 15, this.pivotY + 25);
+        ctx.lineTo(this.pivotX, this.pivotY);
+        ctx.closePath();
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(this.pivotX, this.pivotY, 6, 0, Math.PI * 2);
+        ctx.fillStyle = '#999';
+        ctx.fill();
+        // Board
+        ctx.translate(this.pivotX, this.pivotY);
+        ctx.rotate(this.angle);
+        let grad = ctx.createLinearGradient(-this.w / 2, -6, this.w / 2, -6);
+        grad.addColorStop(0, '#a07850');
+        grad.addColorStop(0.5, '#c4956a');
+        grad.addColorStop(1, '#a07850');
+        ctx.fillStyle = grad;
+        ctx.fillRect(-this.w / 2, -6, this.w, 12);
+        ctx.strokeStyle = '#7a5a3a';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(-this.w / 2, -6, this.w, 12);
+        // Wood grain
+        ctx.strokeStyle = 'rgba(0,0,0,0.1)';
+        for (let i = -this.w/2 + 10; i < this.w/2; i += 20) {
+            ctx.beginPath();
+            ctx.moveTo(i, -5);
+            ctx.lineTo(i, 5);
+            ctx.stroke();
+        }
+        ctx.restore();
+    }
+    update() {
+        this.angularVel += Math.sin(this.angle) * 0.003;
+        this.angularVel *= 0.98;
+        this.angle += this.angularVel;
+    }
+    collide(p) {
+        let dx = p.x - this.pivotX;
+        let dy = p.y - this.pivotY;
+        let localX = dx * Math.cos(-this.angle) - dy * Math.sin(-this.angle);
+        let localY = dx * Math.sin(-this.angle) + dy * Math.cos(-this.angle);
+        if (Math.abs(localX) < this.w / 2 && localY > -10 && localY < 10) {
+            let vel = p.y - p.py;
+            if (vel > 0) {
+                p.y -= 3;
+                p.py = p.y + Math.abs(vel) * 0.8;
+                this.angularVel += vel * 0.02 * Math.sign(localX);
+                return true;
+            }
+        }
+        return false;
+    }
+}
+
+class SwingingLog {
+    constructor(x, y, length) {
+        this.pivotX = x; this.pivotY = y;
+        this.length = length;
+        this.angle = Math.PI / 2;
+        this.angularVel = 0;
+        this.color = '#8B6914';
+    }
+    draw() {
+        ctx.save();
+        // Chain/rope
+        ctx.strokeStyle = '#666';
+        ctx.lineWidth = 3;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(this.pivotX, 0);
+        ctx.lineTo(this.pivotX, this.pivotY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // Pivot point
+        ctx.beginPath();
+        ctx.arc(this.pivotX, this.pivotY, 5, 0, Math.PI * 2);
+        ctx.fillStyle = '#888';
+        ctx.fill();
+        // Log
+        let endX = this.pivotX + Math.cos(this.angle) * this.length;
+        let endY = this.pivotY + Math.sin(this.angle) * this.length;
+        ctx.strokeStyle = this.color;
+        ctx.lineWidth = 14;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(this.pivotX, this.pivotY);
+        ctx.lineTo(endX, endY);
+        ctx.stroke();
+        // Log detail
+        ctx.strokeStyle = '#6B4F12';
+        ctx.lineWidth = 12;
+        ctx.beginPath();
+        ctx.moveTo(this.pivotX, this.pivotY);
+        ctx.lineTo(endX, endY);
+        ctx.stroke();
+        // Bark texture
+        ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+        ctx.lineWidth = 1;
+        for (let t = 0.2; t < 1; t += 0.15) {
+            let bx = this.pivotX + (endX - this.pivotX) * t;
+            let by = this.pivotY + (endY - this.pivotY) * t;
+            ctx.beginPath();
+            ctx.moveTo(bx - 5, by - 7);
+            ctx.lineTo(bx + 5, by + 7);
+            ctx.stroke();
+        }
+        ctx.restore();
+    }
+    update() {
+        this.angularVel += Math.sin(this.angle) * 0.008;
+        this.angularVel *= 0.995;
+        this.angle += this.angularVel;
+    }
+    collide(p) {
+        let endX = this.pivotX + Math.cos(this.angle) * this.length;
+        let endY = this.pivotY + Math.sin(this.angle) * this.length;
+        let dx = endX - this.pivotX;
+        let dy = endY - this.pivotY;
+        let len = Math.hypot(dx, dy);
+        let nx = -dy / len;
+        let ny = dx / len;
+        let t = ((p.x - this.pivotX) * dx + (p.y - this.pivotY) * dy) / (len * len);
+        t = Math.max(0, Math.min(1, t));
+        let closestX = this.pivotX + dx * t;
+        let closestY = this.pivotY + dy * t;
+        let dist = Math.hypot(p.x - closestX, p.y - closestY);
+        if (dist < 10 && dist > 0) {
+            let vel = (p.x - p.px) * dx/len + (p.y - p.py) * dy/len;
+            if (vel < 0) {
+                let overlap = 10 - dist;
+                p.x += nx * overlap;
+                p.y += ny * overlap;
+                p.px += nx * overlap;
+                p.py += ny * overlap;
+                let tangentVx = (p.x - p.px);
+                let tangentVy = (p.y - p.py);
+                let dot = tangentVx * dx/len + tangentVy * dy/len;
+                p.px -= 2 * dot * dx/len;
+                p.py -= 2 * dot * dy/len;
+                this.angularVel += dot * 0.01;
+                return true;
+            }
+        }
+        return false;
+    }
+}
+
+// Floor and walls
+class Floor {
+    constructor() {
+        this.y = H - 40;
+        this.h = 40;
+    }
+    draw() {
+        let grad = ctx.createLinearGradient(0, this.y, 0, H);
+        grad.addColorStop(0, '#5c4033');
+        grad.addColorStop(0.3, '#4a3228');
+        grad.addColorStop(1, '#2d1f16');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, this.y, W, this.h);
+        // Wood planks
+        ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+        ctx.lineWidth = 1;
+        for (let i = 0; i < W; i += 80) {
+            ctx.beginPath();
+            ctx.moveTo(i, this.y);
+            ctx.lineTo(i, H);
+            ctx.stroke();
+        }
+        // Top edge highlight
+        ctx.strokeStyle = '#7a5a3a';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(0, this.y);
+        ctx.lineTo(W, this.y);
+        ctx.stroke();
+    }
+    collide(p) {
+        if (p.y + p.radius > this.y) {
+            p.y = this.y - p.radius;
+            p.py = p.y + (p.y - p.py) * 0.5;
+            return true;
+        }
+        return false;
+    }
+}
+
+class Wall {
+    constructor(x, side) {
+        this.x = x;
+        this.side = side;
+    }
+    draw() {
+        let grad = ctx.createLinearGradient(this.x - 20, 0, this.x + 20, 0);
+        if (this.side === 'left') {
+            grad.addColorStop(0, '#2d1f16');
+            grad.addColorStop(1, '#4a3228');
+        } else {
+            grad.addColorStop(0, '#4a3228');
+            grad.addColorStop(1, '#2d1f16');
+        }
+        ctx.fillStyle = grad;
+        ctx.fillRect(this.side === 'left' ? 0 : this.x - 20, 0, 20, H);
+    }
+    collide(p) {
+        if (this.side === 'left') {
+            if (p.x - p.radius < 20) {
+                p.x = 20 + p.radius;
+                p.px = p.x + (p.x - p.px) * 0.5;
+                return true;
+            }
+        } else {
+            if (p.x + p.radius > W - 20) {
+                p.x = W - 20 - p.radius;
+                p.px = p.x + (p.x - p.px) * 0.5;
+                return true;
+            }
+        }
+        return false;
+    }
+}
+
+// Ragdoll
+class Ragdoll {
+    constructor(x, y, scale = 1) {
+        this.particles = [];
+        this.constraints = [];
+        this.s = scale;
+        this.maxVel = 0;
+        this.collisions = 0;
+        this.spawnTime = Date.now();
+
+        // Create particles
+        let head = new Particle(x, y, 1.5);
+        let neck = new Particle(x, y + 20 * this.s);
+        let shoulderL = new Particle(x - 20 * this.s, y + 25 * this.s);
+        let shoulderR = new Particle(x + 20 * this.s, y + 25 * this.s);
+        let elbowL = new Particle(x - 35 * this.s, y + 45 * this.s);
+        let elbowR = new Particle(x + 35 * this.s, y + 45 * this.s);
+        let handL = new Particle(x - 40 * this.s, y + 65 * this.s);
+        let handR = new Particle(x + 40 * this.s, y + 65 * this.s);
+        let hip = new Particle(x, y + 50 * this.s);
+        let hipL = new Particle(x - 12 * this.s, y + 55 * this.s);
+        let hipR = new Particle(x + 12 * this.s, y + 55 * this.s);
+        let kneeL = new Particle(x - 18 * this.s, y + 80 * this.s);
+        let kneeR = new Particle(x + 18 * this.s, y + 80 * this.s);
+        let footL = new Particle(x - 20 * this.s, y + 105 * this.s);
+        let footR = new Particle(x + 20 * this.s, y + 105 * this.s);
+
+        this.particles = [head, neck, shoulderL, shoulderR, elbowL, elbowR, handL, handR, hip, hipL, hipR, kneeL, kneeR, footL, footR];
+
+        // Create constraints
+        let add = (p1, p2, joint = false) => this.constraints.push(new Constraint(p1, p2, joint));
+        let addDist = (p1, p2, len) => this.constraints.push(new Constraint(p1, p2, len));
+
+        // Head to neck
+        add(head, neck, true);
+        // Neck to shoulders
+        add(neck, shoulderL, true);
+        add(neck, shoulderR, true);
+        // Shoulders to elbows
+        add(shoulderL, elbowL, true);
+        add(shoulderR, elbowR, true);
+        // Elbows to hands
+        add(elbowL, handL, true);
+        add(elbowR, handR, true);
+        // Neck to hip
+        add(neck, hip, true);
+        // Hip to hip joints
+        add(hip, hipL, true);
+        add(hip, hipR, true);
+        // Hip joints to knees
+        add(hipL, kneeL, true);
+        add(hipR, kneeR, true);
+        // Knees to feet
+        add(kneeL, footL, true);
+        add(kneeR, footR, true);
+
+        // Cross constraints for body rigidity
+        addDist(neck, shoulderL, Math.hypot(neck.x - shoulderL.x, neck.y - shoulderL.y));
+        addDist(neck, shoulderR, Math.hypot(neck.x - shoulderR.x, neck.y - shoulderR.y));
+        addDist(shoulderL, shoulderR, Math.hypot(shoulderL.x - shoulderR.x, shoulderL.y - shoulderR.y));
+        addDist(neck, hip, Math.hypot(neck.x - hip.x, neck.y - hip.y));
+        addDist(hipL, hipR, Math.hypot(hipL.x - hipR.x, hipL.y - hipR.y));
+        addDist(shoulderL, hip, Math.hypot(shoulderL.x - hip.x, shoulderL.y - hip.y));
+        addDist(shoulderR, hip, Math.hypot(shoulderR.x - hip.x, shoulderR.y - hip.y));
+        addDist(neck, hipL, Math.hypot(neck.x - hipL.x, neck.y - hipL.y));
+        addDist(neck, hipR, Math.hypot(neck.x - hipR.x, neck.y - hipR.y));
+        addDist(hip, footL, Math.hypot(hip.x - footL.x, hip.y - footL.y) * 1.3);
+        addDist(hip, footR, Math.hypot(hip.x - footR.x, hip.y - footR.y) * 1.3);
+        addDist(handL, handR, Math.hypot(handL.x - handR.x, handL.y - handR.y) * 1.5);
+    }
+
+    update() {
+        for (let p of this.particles) {
+            p.update();
+        }
+    }
+
+    solveConstraints() {
+        for (let i = 0; i < CONSTRAINT_ITERATIONS; i++) {
+            for (let c of this.constraints) {
+                c.solve();
+            }
+        }
+        for (let i = 0; i < JOINT_ITERATIONS; i++) {
+            for (let c of this.constraints) {
+                c.solveJoint();
+            }
+        }
+    }
+
+    draw() {
+        if (this.dissolving) {
+            ctx.globalAlpha = this.dissolveAlpha;
+        }
+        let particles = this.particles;
+
+        // Draw body lines
+        let connections = [
+            [1, 0], [1, 2], [1, 3], [2, 4], [3, 5], [4, 6], [5, 7],
+            [1, 8], [8, 9], [8, 10], [9, 11], [10, 12], [11, 13], [12, 14]
+        ];
+
+        ctx.lineWidth = 4;
+        ctx.lineCap = 'round';
+
+        for (let [a, b] of connections) {
+            let p1 = particles[a], p2 = particles[b];
+            let grad = ctx.createLinearGradient(p1.x, p1.y, p2.x, p2.y);
+            grad.addColorStop(0, '#f0d0a0');
+            grad.addColorStop(1, '#d4a574');
+            ctx.strokeStyle = grad;
+            ctx.beginPath();
+            ctx.moveTo(p1.x, p1.y);
+            ctx.lineTo(p2.x, p2.y);
+            ctx.stroke();
+        }
+
+        // Draw joints
+        for (let i = 0; i < particles.length; i++) {
+            let p = particles[i];
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+            ctx.fillStyle = p.color;
+            ctx.fill();
+            ctx.strokeStyle = '#b8895a';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+
+        // Head detail - eyes
+        let head = particles[0];
+        let neck = particles[1];
+        let headAngle = Math.atan2(head.y - neck.y, head.x - neck.x);
+        let eyeOffX = Math.cos(headAngle + Math.PI / 2) * 4;
+        let eyeOffY = Math.sin(headAngle + Math.PI / 2) * 4;
+        let lookX = Math.cos(headAngle) * 3;
+        let lookY = Math.sin(headAngle) * 3;
+
+        // Left eye
+        ctx.beginPath();
+        ctx.arc(head.x + eyeOffX + lookX, head.y + eyeOffY + lookY, 2.5, 0, Math.PI * 2);
+        ctx.fillStyle = '#fff';
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(head.x + eyeOffX + lookX * 1.3, head.y + eyeOffY + lookY * 1.3, 1.2, 0, Math.PI * 2);
+        ctx.fillStyle = '#222';
+        ctx.fill();
+
+        // Right eye
+        ctx.beginPath();
+        ctx.arc(head.x - eyeOffX + lookX, head.y - eyeOffY + lookY, 2.5, 0, Math.PI * 2);
+        ctx.fillStyle = '#fff';
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(head.x - eyeOffX + lookX * 1.3, head.y - eyeOffY + lookY * 1.3, 1.2, 0, Math.PI * 2);
+        ctx.fillStyle = '#222';
+        ctx.fill();
+
+        // Mouth
+        ctx.beginPath();
+        ctx.arc(head.x + lookX * 0.5, head.y + lookY * 0.5 + 4, 3, 0.1, Math.PI - 0.1);
+        ctx.strokeStyle = '#8B4513';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        ctx.globalAlpha = 1;
+    }
+
+    getMaxVelocity() {
+        let maxV = 0;
+        for (let p of this.particles) {
+            let vx = p.x - p.px;
+            let vy = p.y - p.py;
+            let v = Math.hypot(vx, vy);
+            if (v > maxV) maxV = v;
+        }
+        return maxV;
+    }
+
+    isSettled() {
+        let totalVel = 0;
+        let count = 0;
+        for (let p of this.particles) {
+            let vx = p.x - p.px;
+            let vy = p.y - p.py;
+            totalVel += Math.hypot(vx, vy);
+            count++;
+        }
+        return totalVel / count < 0.3 && this.particles[0].y > H - 100;
+    }
+
+    dissolve() {
+        this.dissolving = true;
+    }
+
+    updateDissolve() {
+        if (this.dissolving) {
+            this.dissolveAlpha -= 0.02;
+            if (this.dissolveAlpha <= 0) return true;
+        }
+        return false;
+    }
+}
+
+// Course setup
+let trampolines = [];
+let seesaws = [];
+let swingingLogs = [];
+let floor;
+let walls;
+let ragdolls = [];
+let nextSpawn = 0;
+let spawnInterval = 180;
+let totalDissolved = 0;
+
+function initCourse() {
+    trampolines = [];
+    seesaws = [];
+    swingingLogs = [];
+    floor = new Floor();
+    walls = [new Wall(0, 'left'), new Wall(W, 'right')];
+
+    // Place trampolines
+    trampolines.push(new Trampoline(W * 0.15, H * 0.55, 120));
+    trampolines.push(new Trampoline(W * 0.5, H * 0.45, 130));
+    trampolines.push(new Trampoline(W * 0.78, H * 0.6, 110));
+
+    // Place seesaws
+    seesaws.push(new Seesaw(W * 0.35, H * 0.65, 160));
+    seesaws.push(new Seesaw(W * 0.7, H * 0.5, 140));
+
+    // Place swinging logs
+    swingingLogs.push(new SwingingLog(W * 0.25, H * 0.25, 100));
+    swingingLogs.push(new SwingingLog(W * 0.55, H * 0.2, 120));
+    swingingLogs.push(new SwingingLog(W * 0.82, H * 0.3, 90));
+}
+
+function spawnRagdoll() {
+    let x = W * 0.2 + Math.random() * W * 0.6;
+    let y = -30;
+    ragdolls.push(new Ragdoll(x, y));
+}
+
+function checkCollisions() {
+    let maxVel = 0;
+    for (let rd of ragdolls) {
+        if (rd.dissolving) continue;
+        let v = rd.getMaxVelocity();
+        if (v > maxVel) maxVel = v;
+
+        for (let p of rd.particles) {
+            floor.collide(p);
+            walls[0].collide(p);
+            walls[1].collide(p);
+
+            for (let t of trampolines) {
+                t.collide(p);
+            }
+            for (let s of seesaws) {
+                s.collide(p);
+            }
+            for (let l of swingingLogs) {
+                l.collide(p);
             }
 
-            constrain() {
-                // Boundaries
-                const boundY = height - GROUND_Y_OFFSET;
-                const boundX = 0;
-                const boundXRight = width;
+            // Ceiling
+            if (p.y - p.radius < 0) {
+                p.y = p.radius;
+                p.py = p.y + (p.y - p.py) * 0.3;
+            }
+        }
+    }
 
-                if (this.x < boundX) { this.x = boundX; this.oldX = this.x + (this.x - this.oldX) * BOUNCE; }
-                if (this.x > boundXRight) { this.x = boundXRight; this.oldX = this.x + (this.x - this.oldX) * BOUNCE; }
-                if (this.y > boundY) { this.y = boundY; this.oldY = this.y + (this.y - this.oldY) * BOUNCE; }
-                
-                // Obstacle Collision
-                for (let obs of obstacles) {
-                    const collision = obs.checkCollision(this);
-                    if (collision) {
-                        this.x = collision.x;
-                        this.y = collision.y;
-                        
-                        // Calculate reflection for impact detection
-                        const vx = this.x - this.oldX;
-                        const vy = this.y - this.oldY;
-                        const speed = Math.sqrt(vx*vx + vy*vy);
-                        
-                        if (speed > 2) {
-                            triggerSlowMotion(speed * 2);
-                        }
+    // Ragdoll-ragdoll collisions
+    for (let i = 0; i < ragdolls.length; i++) {
+        for (let j = i + 1; j < ragdolls.length; j++) {
+            let rd1 = ragdolls[i], rd2 = ragdolls[j];
+            if (rd1.dissolving || rd2.dissolving) continue;
+            for (let p1 of rd1.particles) {
+                for (let p2 of rd2.particles) {
+                    let dx = p2.x - p1.x;
+                    let dy = p2.y - p1.y;
+                    let dist = Math.hypot(dx, dy);
+                    let minDist = p1.radius + p2.radius + 2;
+                    if (dist < minDist && dist > 0) {
+                        let overlap = (minDist - dist) / 2;
+                        let nx = dx / dist;
+                        let ny = dy / dist;
+                        p1.x -= nx * overlap;
+                        p1.y -= ny * overlap;
+                        p2.x += nx * overlap;
+                        p2.y += ny * overlap;
+                        rd1.collisions++;
+                        rd2.collisions++;
                     }
                 }
             }
         }
+    }
 
-        class Constraint {
-            constructor(p1, p2, length = null, stiffness = 1) {
-                this.p1 = p1;
-                this.p2 = p2;
-                this.length = length || Vec2.dist(p1, p2);
-                this.stiffness = stiffness;
-            }
+    // Slow-mo detection
+    if (maxVel > 3) {
+        slowMoIntensity = Math.min(1, (maxVel - 3) / 8);
+        slowMoTimer = SLOW_MO_DURATION;
+    }
+}
 
-            solve() {
-                const dx = this.p2.x - this.p1.x;
-                const dy = this.p2.y - this.p1.y;
-                const dist = Math.sqrt(dx * dx + dy * dy);
-                
-                if (dist === 0) return;
+function updateCourse() {
+    for (let t of trampolines) t.update();
+    for (let s of seesaws) s.update();
+    for (let l of swingingLogs) l.update();
+}
 
-                const diff = (this.length - dist) / dist * this.stiffness;
-                const offsetX = dx * diff * 0.5;
-                const offsetY = dy * diff * 0.5;
+function drawBackground() {
+    // Dojo background
+    let grad = ctx.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, '#1a1a2e');
+    grad.addColorStop(0.4, '#16213e');
+    grad.addColorStop(1, '#0f3460');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
 
-                if (!this.p1.isFixed) {
-                    this.p1.x -= offsetX;
-                    this.p1.y -= offsetY;
-                }
-                if (!this.p2.isFixed) {
-                    this.p2.x += offsetX;
-                    this.p2.y += offsetY;
-                }
-            }
+    // Dojo decorations - subtle pattern
+    ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < W; i += 60) {
+        for (let j = 0; j < H; j += 60) {
+            ctx.strokeRect(i, j, 60, 60);
         }
+    }
 
-        class Obstacle {
-            constructor(type, x, y, w, h, props = {}) {
-                this.type = type;
-                this.x = x;
-                this.y = y;
-                this.w = w;
-                this.h = h;
-                this.angle = props.angle || 0;
-                this.angularVel = 0;
-                this.pinned = props.pinned || false;
-                this.pivot = props.pivot || null;
-            }
+    // Dojo sign
+    ctx.save();
+    ctx.font = 'bold 28px serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.textAlign = 'center';
+    ctx.fillText('道場', W / 2, 50);
+    ctx.font = '14px serif';
+    ctx.fillText('RAGDOLL DOJO', W / 2, 75);
+    ctx.restore();
 
-            update() {
-                if (this.type === 'seesaw' || this.type === 'log') {
-                    if (this.pinned) {
-                        // Pendulum logic
-                        const dx = this.x - this.pivot.x;
-                        const dy = this.y - this.pivot.y;
-                        const dist = Math.sqrt(dx*dx + dy*dy);
-                        
-                        // Gravity torque
-                        const angle = Math.atan2(dy, dx);
-                        const gravityTorque = Math.sin(angle) * 0.02;
-                        
-                        this.angularVel += gravityTorque;
-                        this.angularVel *= 0.99; // Damping
-                        this.angle += this.angularVel;
+    // Slow-mo indicator
+    if (slowMoTimer > 0) {
+        ctx.save();
+        ctx.globalAlpha = 0.3 + Math.sin(Date.now() * 0.01) * 0.1;
+        ctx.fillStyle = '#ff6b6b';
+        ctx.font = 'bold 16px monospace';
+        ctx.textAlign = 'right';
+        ctx.fillText('⚡ DRAMATIC ⚡', W - 30, 30);
+        ctx.restore();
+    }
+}
 
-                        // Update vertices for collision
-                        this.updateVertices();
-                    }
-                }
-            }
-
-            updateVertices() {
-                // Recalculate corners based on rotation
-                const hw = this.w / 2;
-                const hh = this.h / 2;
-                const cos = Math.cos(this.angle);
-                const sin = Math.sin(this.angle);
-
-                // Local corners
-                const corners = [
-                    {x: -hw, y: -hh}, {x: hw, y: -hh},
-                    {x: hw, y: hh}, {x: -hw, y: hh}
-                ];
-
-                this.vertices = corners.map(c => ({
-                    x: this.x + (c.x * cos - c.y * sin),
-                    y: this.y + (c.x * sin + c.y * sin) // Simple rotation
-                }));
-            }
-
-            checkCollision(p) {
-                // Simple AABB for trampoline
-                if (this.type === 'trampoline') {
-                    if (p.x > this.x - this.w/2 && p.x < this.x + this.w/2 &&
-                        p.y > this.y - this.h/2 && p.y < this.y + this.h/2) {
-                        
-                        // Detect if falling onto it
-                        if (p.y - p.oldY > 0) {
-                            p.y = this.y + this.h/2;
-                            p.oldY = p.y - (p.y - p.oldY) * 0.8; // Bouncy
-                            return {x: p.x, y: p.y};
-                        }
-                    }
-                    return null;
-                }
-
-                // Rotated Rectangle Collision
-                if (this.type === 'seesaw' || this.type === 'log') {
-                    // Transform particle to local space
-                    const dx = p.x - this.x;
-                    const dy = p.y - this.y;
-                    const cos = Math.cos(-this.angle);
-                    const sin = Math.sin(-this.angle);
-                    const lx = dx * cos - dy * sin;
-                    const ly = dx * sin + dy * cos;
-
-                    const hw = this.w / 2;
-                    const hh = this.h / 2;
-
-                    // Closest point on AABB to center
-                    const closestX = Math.max(-hw, Math.min(lx, hw));
-                    const closestY = Math.max(-hh, Math.min(ly, hh));
-
-                    const distX = lx - closestX;
-                    const distY = ly - closestY;
-                    const distance = Math.sqrt(distX*distX + distY*distY);
-
-                    if (distance < JOINT_RADIUS + 2) {
-                        // Collision normal in local space
-                        let nx = distX;
-                        let ny = distY;
-                        if (distance === 0) { nx = 0; ny = -1; } // Inside
-                        
-                        const len = Math.sqrt(nx*nx + ny*ny) || 1;
-                        nx /= len;
-                        ny /= len;
-
-                        // Rotate normal back to world space
-                        const wNx = nx * Math.cos(this.angle) - ny * Math.sin(this.angle);
-                        const wNy = nx * Math.sin(this.angle) + ny * Math.cos(this.angle);
-
-                        // Push out
-                        const overlap = (JOINT_RADIUS + 2) - distance;
-                        p.x += wNx * overlap;
-                        p.y += wNy * overlap;
-
-                        // Reflect velocity
-                        const v = {x: p.x - p.oldX, y: p.y - p.oldY};
-                        const dot = v.x * wNx + v.y * wNy;
-                        const rV = {x: v.x - 2 * dot * wNx, y: v.y - 2 * dot * wNy};
-                        
-                        p.oldX = p.x - rV.x * 0.5; // Friction
-                        p.oldY = p.y - rV.y * 0.5;
-
-                        return {x: p.x, y: p.y};
-                    }
-                }
-                return null;
-            }
-
-            draw() {
-                ctx.save();
-                ctx.translate(this.x, this.y);
-                ctx.rotate(this.angle);
-                ctx.strokeStyle = this.type === 'trampoline' ? TRAMPOLINE_COLOR : WOOD_COLOR;
-                ctx.lineWidth = 3;
-                ctx.fillStyle = 'rgba(0,0,0,0.3)';
-                
-                ctx.beginPath();
-                if (this.type === 'trampoline') {
-                    ctx.fillRect(-this.w/2, -this.h/2, this.w, this.h);
-                    ctx.strokeRect(-this.w/2, -this.h/2, this.w, this.h);
-                } else {
-                    ctx.fillRect(-this.w/2, -this.h/2, this.w, this.h);
-                    ctx.strokeRect(-this.w/2, -this.h/2, this.w, this.h);
-                }
-                ctx.restore();
-            }
-        }
-
-        // --- Ragdoll Factory ---
-        function createRagdoll(x, y) {
-            const scale = 1.5;
-            const headRadius = 10 * scale;
-            const neckLen = 10 * scale;
-            const spineLen = 12 * scale;
-            const armLen = 12 * scale;
-            const legLen = 14 * scale;
-
-            // Head
-            const head = new Particle(x, y, 1);
-            // Neck
-            const neck = new Particle(x, y + neckLen, 1);
-            // Spine
-            const spineTop = new Particle(x, y + neckLen + 5, 1);
-            const spineBot = new Particle(x, y + neckLen + spineLen, 1);
-            // Hips
-            const hip = new Particle(x, y + neckLen + spineLen + 5, 1);
-            
-            // Arms
-            const lElbow = new Particle(x - 5, y + neckLen + 10, 1);
-            const lHand = new Particle(x - 10, y + neckLen + 20, 1);
-            const rElbow = new Particle(x + 5, y + neckLen + 10, 1);
-            const rHand = new Particle(x + 10, y + neckLen + 20, 1);
-
-            // Legs
-            const lKnee = new Particle(x - 5, y + neckLen + spineLen + 10, 1);
-            const lFoot = new Particle(x - 10, y + neckLen + spineLen + 20, 1);
-            const rKnee = new Particle(x + 5, y + neckLen + spineLen + 10, 1);
-            const rFoot = new Particle(x + 10, y + neckLen + spineLen + 20, 1);
-
-            const allP = [head, neck, spineTop, spineBot, hip, lElbow, lHand, rElbow, rHand, lKnee, lFoot, rKnee, rFoot];
-            
-            // Add to global
-            particles.push(...allP);
-
-            // Constraints
-            const add = (p1, p2, stiff = 1) => constraints.push(new Constraint(p1, p2, null, stiff));
-            const addLimit = (p1, p2, stiff = 0.5) => constraints.push(new Constraint(p1, p2, null, stiff)); // Joint limits
-
-            // Structure
-            add(head, neck);
-            add(neck, spineTop);
-            add(spineTop, spineBot);
-            add(spineBot, hip);
-
-            // Arms
-            add(neck, lElbow); add(lElbow, lHand);
-            add(neck, rElbow); add(rElbow, rHand);
-
-            // Legs
-            add(hip, lKnee); add(lKnee, lFoot);
-            add(hip, rKnee); add(rKnee, rFoot);
-
-            // Structural Integrity (Triangle-ish)
-            add(neck, spineBot, 0.8);
-            add(spineTop, hip, 0.8);
-            
-            // Joint Limits (prevent snapping)
-            // Shoulders
-            addLimit(neck, lElbow, 0.1);
-            addLimit(neck, rElbow, 0.1);
-            // Hips
-            addLimit(hip, lKnee, 0.1);
-            addLimit(hip, rKnee, 0.1);
-
-            // Cross supports
-            add(head, spineBot, 0.5);
-            add(head, hip, 0.2);
-            add(lElbow, rElbow, 0.5);
-        }
-
-        // --- Level Generation ---
-        function generateObstacles() {
-            obstacles = [];
-            const groundY = height - GROUND_Y_OFFSET;
-            const centerX = width / 2;
-
-            // Center Trampoline
-            obstacles.push(new Obstacle('trampoline', centerX, groundY - 20, 150, 20, {angle: 0}));
-
-            // Left Seesaw
-            const s1X = centerX - 250;
-            obstacles.push(new Obstacle('seesaw', s1X, groundY - 50, 160, 10, {
-                pinned: true,
-                pivot: {x: s1X, y: groundY},
-                angle: 0.1
-            }));
-
-            // Right Log
-            const lX = centerX + 250;
-            obstacles.push(new Obstacle('log', lX, groundY - 50, 180, 15, {
-                pinned: true,
-                pivot: {x: lX, y: groundY},
-                angle: -0.2
-            }));
-
-            // High Platform
-            obstacles.push(new Obstacle('seesaw', centerX, groundY - 200, 100, 10, {
-                pinned: true,
-                pivot: {x: centerX, y: groundY - 100},
-                angle: 0
-            }));
-        }
-
-        // --- Game Logic ---
-
-        function triggerSlowMotion(intensity) {
-            // Cap intensity
-            const factor = Math.max(0.1, 1.0 - (intensity * 0.05));
-            if (factor < slowMotionFactor) {
-                slowMotionFactor = factor;
-            }
-        }
-
-        function checkSettled(p) {
-            if (p.dissolving) return;
-            const vx = Math.abs(p.x - p.oldX);
-            const vy = Math.abs(p.y - p.oldY);
-            const distToGround = (height - GROUND_Y_OFFSET) - p.y;
-            
-            // Check if near bottom and moving very slowly
-            if (distToGround < 5 && (vx < 0.1 && vy < 0.1)) {
-                p.dissolving = true;
-            }
-        }
-
-        function spawnLoop() {
-            const now = Date.now();
-            if (now > nextDropTime) {
-                // Decide spawn
-                const spawnX = Math.random() * (width * 0.8) + (width * 0.1);
-                createRagdoll(spawnX, -50);
-                
-                // Chance for double drop
-                if (Math.random() > 0.7) {
-                    createRagdoll(spawnX + 40, -50);
-                }
-
-                nextDropTime = now + 2000 + Math.random() * 3000;
-            }
-        }
-
-        function drawScene() {
-            // Clear
-            ctx.fillStyle = '#1a1a1a';
-            ctx.fillRect(0, 0, width, height);
-
-            // Draw Obstacles
-            obstacles.forEach(obs => {
-                obs.update();
-                obs.draw();
-            });
-
-            // Draw Particles
-            particles.forEach(p => {
-                if (p.alpha > 0) {
-                    ctx.globalAlpha = p.alpha;
-                    ctx.fillStyle = p.color;
+function drawParticles() {
+    for (let rd of ragdolls) {
+        if (!rd.dissolving) {
+            for (let p of rd.particles) {
+                // Speed glow
+                let vx = p.x - p.px;
+                let vy = p.y - p.py;
+                let speed = Math.hypot(vx, vy);
+                if (speed > 2) {
                     ctx.beginPath();
-                    ctx.arc(p.x, p.y, JOINT_RADIUS, 0, Math.PI * 2);
+                    ctx.arc(p.x, p.y, p.radius + speed * 0.5, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(255, 150, 50, ${Math.min(speed * 0.05, 0.3)})`;
                     ctx.fill();
-                    ctx.globalAlpha = 1;
                 }
-            });
+            }
+        }
+    }
+}
 
-            // Draw Constraints (Bones)
-            ctx.lineWidth = LINE_WIDTH;
-            ctx.lineCap = 'round';
-            
-            constraints.forEach(c => {
-                // If either particle is dissolving, don't draw or draw faint
-                if (c.p1.alpha > 0.1 && c.p2.alpha > 0.1) {
-                    ctx.strokeStyle = `rgba(200, 200, 200, ${(c.p1.alpha + c.p2.alpha)/2})`;
+// Spawn timer
+let frameCount = 0;
+let consecutiveDouble = 0;
+
+function gameLoop() {
+    frameCount++;
+
+    // Update time scale
+    if (slowMoTimer > 0) {
+        slowMoTimer--;
+        timeScale = 1 - slowMoIntensity * (1 - SLOW_MO_FACTOR);
+    } else {
+        timeScale = 1;
+    }
+
+    // Spawn logic
+    if (frameCount >= nextSpawn) {
+        spawnRagdoll();
+        // Occasionally spawn a second one
+        if (Math.random() < 0.25) {
+            setTimeout(() => {
+                if (ragdolls.length < 12) {
+                    spawnRagdoll();
+                }
+            }, 200 + Math.random() * 300);
+        }
+        nextSpawn = frameCount + spawnInterval + Math.floor(Math.random() * 120);
+        spawnInterval = Math.max(100, spawnInterval - 0.5);
+    }
+
+    // Update physics
+    for (let rd of ragdolls) {
+        rd.update();
+    }
+
+    // Solve constraints
+    for (let rd of ragdolls) {
+        rd.solveConstraints();
+    }
+
+    // Collisions
+    checkCollisions();
+    updateCourse();
+
+    // Remove dissolved ragdolls
+    ragdolls = ragdolls.filter(rd => {
+        if (rd.dissolving) {
+            if (rd.updateDissolve()) {
+                totalDissolved++;
+                return false;
+            }
+            return true;
+        }
+        // Check if settled
+        if (!rd.dissolving && rd.isSettled() && rd.particles[0].y > H - 80) {
+            rd.settleTimer++;
+            if (rd.settleTimer > 90) {
+                rd.dissolve();
+            }
+        }
+        // Remove if off screen
+        if (rd.particles[0].y > H + 200 || rd.particles[0].x < -200 || rd.particles[0].x > W + 200) {
+            totalDissolved++;
+            return false;
+        }
+        return true;
+    });
+
+    // Cap ragdolls
+    if (ragdolls.length > 15) {
+        ragdolls.shift();
+    }
+
+    // Draw
+    drawBackground();
+
+    // Draw course objects
+    for (let t of trampolines) t.draw();
+    for (let s of seesaws) s.draw();
+    for (let l of swingingLogs) l.draw();
+
+    floor.draw();
+    walls[0].draw();
+    walls[1].draw();
+
+    // Draw particles (speed glow)
+    drawParticles();
+
+    // Draw ragdolls
+    for (let rd of ragdolls) {
+        rd.draw();
+    }
+
+    // Dissolve particles effect
+    for (let rd of ragdolls) {
+        if (rd.dissolving) {
+            for (let p of rd.particles) {
+                if (Math.random() < 0.3) {
                     ctx.beginPath();
-                    ctx.moveTo(c.p1.x, c.p1.y);
-                    ctx.lineTo(c.p2.x, c.p2.y);
-                    ctx.stroke();
+                    ctx.arc(p.x + (Math.random() - 0.5) * 20, p.y + (Math.random() - 0.5) * 20, 2, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(240, 208, 160, ${Math.random() * 0.5 * rd.dissolveAlpha})`;
+                    ctx.fill();
                 }
-            });
-        }
-
-        function loop() {
-            // Physics Sub-steps
-            for (let i = 0; i < 1; i++) { // Slow motion handles time step scaling effectively
-                // Update positions
-                particles = particles.filter(p => p.update());
-
-                // Solve Constraints
-                for (let k = 0; k < ITERATIONS; k++) {
-                    constraints.forEach(c => c.solve());
-                    particles.forEach(p => p.constrain());
-                }
-
-                // Check settle status
-                particles.forEach(p => checkSettled(p));
             }
-
-            // Cleanup dead particles
-            particles = particles.filter(p => p.alpha > 0);
-
-            // Spawning
-            spawnLoop();
-
-            // Slow Motion Recovery
-            if (slowMotionFactor < 1.0) {
-                slowMotionFactor += 0.02;
-                if (slowMotionFactor > 1.0) slowMotionFactor = 1.0;
-            }
-
-            drawScene();
-            requestAnimationFrame(loop);
         }
+    }
 
-        // Init
-        resize();
-        loop();
+    // Stats
+    ctx.save();
+    ctx.font = '12px monospace';
+    ctx.fillStyle = 'rgba(255,255,255,0.2)';
+    ctx.textAlign = 'left';
+    ctx.fillText(`Ragdolls: ${ragdolls.filter(r => !r.dissolving).length} | Total dissolved: ${totalDissolved}`, 15, H - 15);
+    ctx.restore();
 
-    </script>
+    requestAnimationFrame(gameLoop);
+}
+
+initCourse();
+gameLoop();
+</script>
 </body>
 </html>

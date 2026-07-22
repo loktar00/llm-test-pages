@@ -1,417 +1,702 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dynamic Raycast Lighting</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            background-color: #000;
-            overflow: hidden;
-        }
-        canvas {
-            display: block;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>2D Dynamic Lighting</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { overflow: hidden; background: #000; }
+canvas { display: block; }
+</style>
 </head>
 <body>
-    <canvas id="canvas"></canvas>
-    <script>
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
 
-        let width, height;
-        let time = 0;
-        
-        // Configuration
-        const OBSTACLE_COUNT = 15;
-        const LIGHT_CYCLE_SECONDS = 30; // Full hue cycle duration
-        const LIGHT_SPEED = 0.5;
+let W, H;
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
 
-        // Colors
-        let mainLightColor = { h: 40, s: 100, l: 50 }; // Gold/Orange
-        let secondLightColor = { h: 200, s: 80, l: 60 }; // Cyan/Blue
+// Polygon obstacles
+const polygons = [];
+function randPoly(cx, cy, minR, maxR, sides) {
+    const verts = [];
+    const n = sides || (3 + Math.floor(Math.random() * 5));
+    for (let i = 0; i < n; i++) {
+        const angle = (Math.PI * 2 * i) / n + (Math.random() - 0.5) * 0.6;
+        const r = minR + Math.random() * (maxR - minR);
+        verts.push({ x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r });
+    }
+    return verts;
+}
 
-        // State
-        const obstacles = [];
-        const vertices = []; // All unique points for raycasting
+// Generate scattered polygons
+const polyConfigs = [
+    { cx: 0.15, cy: 0.2, r: [30, 80], s: [4, 7] },
+    { cx: 0.75, cy: 0.15, r: [40, 90], s: [3, 6] },
+    { cx: 0.5, cy: 0.5, r: [50, 120], s: [5, 8] },
+    { cx: 0.3, cy: 0.75, r: [35, 70], s: [4, 6] },
+    { cx: 0.8, cy: 0.65, r: [25, 65], s: [3, 5] },
+    { cx: 0.1, cy: 0.55, r: [40, 85], s: [5, 7] },
+    { cx: 0.6, cy: 0.85, r: [30, 60], s: [4, 6] },
+    { cx: 0.45, cy: 0.1, r: [35, 75], s: [3, 5] },
+    { cx: 0.9, cy: 0.4, r: [20, 55], s: [4, 6] },
+    { cx: 0.25, cy: 0.4, r: [45, 90], s: [5, 7] },
+    { cx: 0.65, cy: 0.35, r: [30, 70], s: [4, 6] },
+    { cx: 0.35, cy: 0.9, r: [35, 65], s: [3, 5] },
+    { cx: 0.85, cy: 0.85, r: [25, 55], s: [4, 6] },
+    { cx: 0.05, cy: 0.8, r: [40, 70], s: [5, 7] },
+    { cx: 0.55, cy: 0.2, r: [30, 60], s: [3, 5] },
+];
 
-        // --- Geometry Helpers ---
+for (const cfg of polyConfigs) {
+    const cx = cfg.cx * W;
+    const cy = cfg.cy * H;
+    const minR = cfg.r[0] * (W / 1920);
+    const maxR = cfg.r[1] * (W / 1920);
+    const sides = cfg.s[0] + Math.floor(Math.random() * (cfg.s[1] - cfg.s[0] + 1));
+    polygons.push(randPoly(cx, cy, minR, maxR, sides));
+}
 
-        function resize() {
-            width = canvas.width = window.innerWidth;
-            height = canvas.height = window.innerHeight;
+// Edge glow colors for polygons
+const glowColors = polygons.map(() => {
+    const hue = Math.random() * 360;
+    return `hsla(${hue}, 70%, 60%, 0.8)`;
+});
+
+// Ray-polygon intersection
+function rayIntersectSegment(rayOX, rayOX2, rayOY, rayOY2, ax, ay, bx, by, tMin, tMax) {
+    const dx = bx - ax;
+    const dy = by - ay;
+    const rdx = rayOX2 - rayOX;
+    const rdy = rayOY2 - rayOY;
+    const denom = dx * rdy - dy * rdx;
+    if (Math.abs(denom) < 1e-10) return null;
+    const t = ((ax - rayOX) * rdy - (ay - rayOY) * rdx) / denom;
+    const u = ((ax - rayOX) * dy - (ay - rayOY) * dx) / denom;
+    if (t >= tMin && t <= tMax && u >= 0 && u <= 1) {
+        return { t, u, x: rayOX + t * rdx, y: rayOY + t * rdy };
+    }
+    return null;
+}
+
+function rayIntersectsPolygon(ox, oy, dx, dy, poly, tMin, tMax) {
+    let closest = null;
+    for (let i = 0; i < poly.length; i++) {
+        const j = (i + 1) % poly.length;
+        const hit = rayIntersectSegment(ox, oy, dx, dy, poly[i].x, poly[i].y, poly[j].x, poly[j].y, tMin, tMax);
+        if (hit && (!closest || hit.t < closest.t)) {
+            closest = hit;
         }
-        window.addEventListener('resize', resize);
-        resize();
+    }
+    return closest;
+}
 
-        class Polygon {
-            constructor(x, y, radius, sides, rotation) {
-                this.points = [];
-                this.color = `hsl(${Math.random() * 360}, 10%, 15%)`; // Dark grey base
-                
-                for (let i = 0; i < sides; i++) {
-                    const angle = (i / sides) * Math.PI * 2 + rotation;
-                    this.points.push({
-                        x: x + Math.cos(angle) * radius,
-                        y: y + Math.sin(angle) * radius
-                    });
+function distSq(x1, y1, x2, y2) {
+    return (x1 - x2) ** 2 + (y1 - y2) ** 2;
+}
+
+// Check if edge midpoint is visible from light
+function isEdgeLit(ox, oy, poly, otherPolygons) {
+    for (let i = 0; i < poly.length; i++) {
+        const j = (i + 1) % poly.length;
+        const mx = (poly[i].x + poly[j].x) / 2;
+        const my = (poly[i].y + poly[j].y) / 2;
+        const dx = mx - ox;
+        const dy = my - oy;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d < 1) continue;
+        const rdx = dx / d;
+        const rdy = dy / d;
+        let blocked = false;
+        for (const op of otherPolygons) {
+            if (op === poly) continue;
+            const hit = rayIntersectsPolygon(ox, oy, rdx, rdy, op, 0.001, d);
+            if (hit && hit.t < d - 0.5) {
+                blocked = true;
+                break;
+            }
+        }
+        // Also check if any vertex of the same polygon blocks the view (self-shadowing)
+        if (!blocked) {
+            for (let k = 0; k < poly.length; k++) {
+                if (k === i || k === j || k === (i - 1 + poly.length) % poly.length || k === (j + 1) % poly.length) continue;
+                const hit = rayIntersectsPolygon(ox, oy, rdx, rdy, poly, 0.001, d);
+                if (hit && hit.t < d - 0.5) {
+                    blocked = true;
+                    break;
+                }
+            }
+        }
+        if (!blocked) return true;
+    }
+    return false;
+}
+
+// Compute shadow polygons for a light source
+function computeShadows(lightX, lightY, lightRadius) {
+    const shadowPolygons = [];
+
+    for (const poly of polygons) {
+        // Find shadow-casting vertices
+        // A vertex is shadow-casting if the edge to the next vertex goes away from the light
+        // and the edge to the previous vertex comes toward the light (or vice versa)
+        const shadowVerts = [];
+
+        for (let i = 0; i < poly.length; i++) {
+            const prev = poly[(i - 1 + poly.length) % poly.length];
+            const curr = poly[i];
+            const next = poly[(i + 1) % poly.length];
+
+            const dPrev = distSq(lightX, lightY, prev.x, prev.y);
+            const dCurr = distSq(lightX, lightY, curr.x, curr.y);
+            const dNext = distSq(lightX, lightY, next.x, next.y);
+
+            if ((dCurr > dPrev && dCurr > dNext) || (dCurr < dPrev && dCurr < dNext)) {
+                shadowVerts.push(i);
+            }
+        }
+
+        for (const vi of shadowVerts) {
+            const v = poly[vi];
+            const dx = v.x - lightX;
+            const dy = v.y - lightY;
+            const d = Math.sqrt(dx * dx + dy * dy);
+            if (d < 1) continue;
+
+            // Check if this vertex is behind another polygon from the light's perspective
+            let blocked = false;
+            for (const op of polygons) {
+                if (op === poly) continue;
+                const hit = rayIntersectsPolygon(lightX, lightY, dx / d, dy / d, op, 0.001, d - 1);
+                if (hit) {
+                    blocked = true;
+                    break;
+                }
+            }
+            if (blocked) continue;
+
+            // Find tangent points on other polygons
+            const tangents = [];
+
+            for (const op of polygons) {
+                if (op === poly) continue;
+                for (let j = 0; j < op.length; j++) {
+                    const hit = rayIntersectsPolygon(lightX, lightY, dx / d, dy / d, op, 0.001, d - 0.5);
+                    if (hit) {
+                        tangents.push({ x: hit.x, y: hit.y, t: hit.t });
+                    }
                 }
             }
 
-            draw(ctx) {
-                ctx.beginPath();
-                ctx.moveTo(this.points[0].x, this.points[0].y);
-                for (let i = 1; i < this.points.length; i++) {
-                    ctx.lineTo(this.points[i].x, this.points[i].y);
+            // Sort tangents by distance
+            tangents.sort((a, b) => a.t - b.t);
+
+            if (tangents.length > 0) {
+                // Shadow polygon: light -> first tangent -> along polygon edges -> last tangent -> back to light
+                const sp = [
+                    { x: lightX, y: lightY },
+                    tangents[0]
+                ];
+
+                // Trace along the blocking polygon edges
+                for (let k = 1; k < tangents.length; k++) {
+                    sp.push(tangents[k]);
                 }
-                ctx.closePath();
-                ctx.fillStyle = this.color;
-                ctx.fill();
-                
-                // Add a subtle outline to prevent z-fighting visual glitches
-                ctx.strokeStyle = '#111';
+
+                sp.push({ x: lightX, y: lightY });
+                shadowPolygons.push(sp);
+            }
+        }
+    }
+
+    return shadowPolygons;
+}
+
+// Simpler, more robust shadow casting
+function castShadows(lightX, lightY, maxDist) {
+    const shadowPolygons = [];
+
+    // For each polygon, find edges that face away from light (shadow-casting edges)
+    for (const poly of polygons) {
+        for (let i = 0; i < poly.length; i++) {
+            const j = (i + 1) % poly.length;
+            const ax = poly[i].x, ay = poly[i].y;
+            const bx = poly[j].x, by = poly[j].y;
+
+            // Check if this edge faces away from light (dot product of edge normal with light direction)
+            const edgeDx = bx - ax;
+            const edgeDy = by - ay;
+            const midX = (ax + bx) / 2;
+            const midY = (ay + by) / 2;
+            const toLightX = lightX - midX;
+            const toLightY = lightY - midY;
+            const dot = edgeDx * toLightY - edgeDy * toLightX;
+
+            if (dot > 0) {
+                // This edge casts a shadow (facing away from light)
+                // Check if the edge itself is visible from light
+                const dx = midX - lightX;
+                const dy = midY - lightY;
+                const d = Math.sqrt(dx * dx + dy * dy);
+                if (d < 1) continue;
+
+                let blocked = false;
+                for (const op of polygons) {
+                    if (op === poly) continue;
+                    const hit = rayIntersectsPolygon(lightX, lightY, dx / d, dy / d, op, 0.001, d);
+                    if (hit) { blocked = true; break; }
+                }
+                if (blocked) continue;
+
+                // Extend shadow from this edge
+                const shadowVerts = [{ x: ax, y: ay }, { x: bx, y: by }];
+
+                // Find blocking polygons along the edge directions
+                for (const dir of [{ x: ax - lightX, y: ay - lightY }, { x: bx - lightX, y: by - lightY }]) {
+                    const dd = Math.sqrt(dir.x * dir.x + dir.y * dir.y);
+                    if (dd < 1) continue;
+                    const rdx = dir.x / dd;
+                    const rdy = dir.y / dd;
+
+                    let closestHit = null;
+                    for (const op of polygons) {
+                        const hit = rayIntersectsPolygon(lightX, lightY, rdx, rdy, op, 0.001, maxDist);
+                        if (hit && (!closestHit || hit.t < closestHit.t)) {
+                            closestHit = hit;
+                        }
+                    }
+                    if (closestHit) {
+                        shadowVerts.push({ x: closestHit.x, y: closestHit.y });
+                    } else {
+                        shadowVerts.push({ x: lightX + rdx * maxDist, y: lightY + rdy * maxDist });
+                    }
+                }
+
+                shadowVerts.push({ x: lightX, y: lightY });
+                shadowPolygons.push(shadowVerts);
+            }
+        }
+    }
+
+    return shadowPolygons;
+}
+
+// Light sources
+let time = 0;
+const light1 = { x: W * 0.5, y: H * 0.5, baseHue: 35, radius: 0, orbitRadius: 0, speed: 0 };
+const light2 = { x: W * 0.5, y: H * 0.5, baseHue: 210, radius: 0, orbitRadius: 0, speed: 0 };
+
+function initLights() {
+    const scale = Math.min(W, H) / 1920;
+    light1.orbitRadius = Math.min(W, H) * 0.3;
+    light1.speed = 0.08;
+    light1.radius = 600 * scale;
+    light2.orbitRadius = Math.min(W, H) * 0.25;
+    light2.speed = -0.06;
+    light2.radius = 350 * scale;
+}
+initLights();
+window.addEventListener('resize', initLights);
+
+// Precompute polygon edges for faster checks
+const polyEdges = polygons.map(p => {
+    const edges = [];
+    for (let i = 0; i < p.length; i++) {
+        const j = (i + 1) % p.length;
+        edges.push({ a: p[i], b: p[j] });
+    }
+    return edges;
+});
+
+function rayIntersectsEdge(ox, oy, dx, dy, ex, ey, ex2, ey2, tMin, tMax) {
+    const denom = dx * (ey2 - ey) - dy * (ex2 - ex);
+    if (Math.abs(denom) < 1e-10) return null;
+    const t = ((ex - ox) * (ey2 - ey) - (ey - oy) * (ex2 - ex)) / denom;
+    const u = ((ex - ox) * dy - (ey - oy) * dx) / denom;
+    if (t >= tMin && t <= tMax && u >= 0 && u <= 1) {
+        return { t, u, x: ox + t * dx, y: oy + t * dy };
+    }
+    return null;
+}
+
+function rayHitsPolygon(ox, oy, dx, dy, poly, tMin, tMax) {
+    let closest = null;
+    for (const edge of polyEdges[polygons.indexOf(poly)]) {
+        const hit = rayIntersectsEdge(ox, oy, dx, dy, edge.a.x, edge.a.y, edge.b.x, edge.b.y, tMin, tMax);
+        if (hit && (!closest || hit.t < closest.t)) closest = hit;
+    }
+    return closest;
+}
+
+function isEdgeVisible(ox, oy, ax, ay, bx, by, excludePoly) {
+    const mx = (ax + bx) / 2;
+    const my = (ay + by) / 2;
+    const dx = mx - ox;
+    const dy = my - oy;
+    const d = Math.sqrt(dx * dx + dy * dy);
+    if (d < 1) return true;
+    const rdx = dx / d;
+    const rdy = dy / d;
+
+    for (let pi = 0; pi < polygons.length; pi++) {
+        if (polygons[pi] === excludePoly) continue;
+        const hit = rayHitsPolygon(ox, oy, rdx, rdy, polygons[pi], 0.001, d);
+        if (hit) return false;
+    }
+    return true;
+}
+
+function getLitEdges(poly) {
+    const lit = [];
+    for (const edge of polyEdges[polygons.indexOf(poly)]) {
+        if (isEdgeVisible(light1.x, light1.y, edge.a.x, edge.a.y, edge.b.x, edge.b.y, poly)) {
+            lit.push(edge);
+        }
+    }
+    return lit;
+}
+
+function getLitEdgesForLight(poly, lx, ly) {
+    const lit = [];
+    for (const edge of polyEdges[polygons.indexOf(poly)]) {
+        const dx = ((edge.a.x + edge.b.x) / 2) - lx;
+        const dy = ((edge.a.y + edge.b.y) / 2) - ly;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d < 1) { lit.push(edge); continue; }
+        const rdx = dx / d;
+        const rdy = dy / d;
+        let blocked = false;
+        for (let pi = 0; pi < polygons.length; pi++) {
+            if (polygons[pi] === poly) continue;
+            const hit = rayHitsPolygon(lx, ly, rdx, rdy, polygons[pi], 0.001, d);
+            if (hit) { blocked = true; break; }
+        }
+        if (!blocked) lit.push(edge);
+    }
+    return lit;
+}
+
+// Shadow polygon from light through polygon vertices
+function getShadowPolygons(lightX, lightY, maxDist) {
+    const shadows = [];
+
+    for (let pi = 0; pi < polygons.length; pi++) {
+        const poly = polygons[pi];
+        const edges = polyEdges[pi];
+
+        for (let i = 0; i < edges.length; i++) {
+            const edge = edges[i];
+            const mx = (edge.a.x + edge.b.x) / 2;
+            const my = (edge.a.y + edge.b.y) / 2;
+            const toLightX = lightX - mx;
+            const toLightY = lightY - my;
+            const toLightD = Math.sqrt(toLightX * toLightX + toLightY * toLightY);
+
+            // Edge normal (perpendicular to edge)
+            const edgeDx = edge.b.x - edge.a.x;
+            const edgeDy = edge.b.y - edge.a.y;
+            const normalDx = -edgeDy;
+            const normalDy = edgeDx;
+
+            // Check if edge faces away from light
+            const dot = normalDx * toLightX + normalDy * toLightY;
+            if (dot < 0) continue; // Face toward light, doesn't cast shadow
+
+            // Check if edge is visible from light
+            const dx = mx - lightX;
+            const dy = my - lightY;
+            const d = Math.sqrt(dx * dx + dy * dy);
+            if (d < 1) continue;
+            const rdx = dx / d;
+            const rdy = dy / d;
+
+            let blocked = false;
+            for (let pj = 0; pj < polygons.length; pj++) {
+                if (pj === pi) continue;
+                const hit = rayHitsPolygon(lightX, lightY, rdx, rdy, polygons[pj], 0.001, d);
+                if (hit) { blocked = true; break; }
+            }
+            if (blocked) continue;
+
+            // This edge casts a shadow
+            // Find the shadow extent by shooting rays from edge endpoints
+            const shadowPts = [];
+
+            for (const vert of [edge.a, edge.b]) {
+                const vdx = vert.x - lightX;
+                const vdy = vert.y - lightY;
+                const vd = Math.sqrt(vdx * vdx + vdy * vdy);
+                if (vd < 1) { shadowPts.push({ x: vert.x, y: vert.y }); continue; }
+                const vrdx = vdx / vd;
+                const vrdy = vdy / vd;
+
+                let closestHit = null;
+                for (let pj = 0; pj < polygons.length; pj++) {
+                    const hit = rayHitsPolygon(lightX, lightY, vrdx, vrdy, polygons[pj], 0.001, maxDist);
+                    if (hit && (!closestHit || hit.t < closestHit.t)) {
+                        closestHit = hit;
+                    }
+                }
+                if (closestHit) {
+                    shadowPts.push({ x: closestHit.x, y: closestHit.y });
+                } else {
+                    shadowPts.push({ x: lightX + vrdx * maxDist, y: lightY + vrdy * maxDist });
+                }
+            }
+
+            shadowPts.push({ x: lightX, y: lightY });
+            shadows.push(shadowPts);
+        }
+    }
+
+    return shadows;
+}
+
+// Draw polygon with optional glow
+function drawPolyWithGlow(poly, color, glowColor, lineWidth, glowWidth) {
+    ctx.beginPath();
+    ctx.moveTo(poly[0].x, poly[0].y);
+    for (let i = 1; i < poly.length; i++) {
+        ctx.lineTo(poly[i].x, poly[i].y);
+    }
+    ctx.closePath();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineWidth;
+    ctx.stroke();
+
+    if (glowWidth > 0 && glowColor) {
+        ctx.save();
+        ctx.shadowColor = glowColor;
+        ctx.shadowBlur = glowWidth;
+        ctx.strokeStyle = glowColor;
+        ctx.lineWidth = lineWidth * 0.5;
+        ctx.stroke();
+        ctx.restore();
+    }
+}
+
+// Main render
+function render() {
+    time += 0.016;
+
+    // Update light positions
+    const t1 = time * light1.speed;
+    light1.x = W / 2 + Math.cos(t1) * light1.orbitRadius;
+    light1.y = H / 2 + Math.sin(t1 * 0.7) * light1.orbitRadius * 0.7;
+
+    const t2 = time * light2.speed + Math.PI;
+    light2.x = W / 2 + Math.cos(t2) * light2.orbitRadius;
+    light2.y = H / 2 + Math.sin(t2 * 0.8) * light2.orbitRadius * 0.6;
+
+    // Hue shift (full cycle over ~3 minutes = 180 seconds)
+    const hue1 = (35 + time * 3) % 360; // warm -> shifts slowly
+    const hue2 = (210 + time * 2) % 360;
+
+    // Clear
+    ctx.fillStyle = '#050508';
+    ctx.fillRect(0, 0, W, H);
+
+    // Draw room boundary
+    ctx.strokeStyle = '#1a1a2e';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(2, 2, W - 4, H - 4);
+
+    // Compute shadows for both lights
+    const maxDist = Math.sqrt(W * W + H * H);
+    const shadows1 = getShadowPolygons(light1.x, light1.y, maxDist);
+    const shadows2 = getShadowPolygons(light2.x, light2.y, maxDist);
+
+    // Draw shadow regions (dark)
+    ctx.fillStyle = '#020204';
+
+    // Composite: draw shadows from light 1
+    for (const sp of shadows1) {
+        ctx.beginPath();
+        ctx.moveTo(sp[0].x, sp[0].y);
+        for (let i = 1; i < sp.length; i++) {
+            ctx.lineTo(sp[i].x, sp[i].y);
+        }
+        ctx.closePath();
+        ctx.fill();
+    }
+
+    // Draw shadows from light 2
+    for (const sp of shadows2) {
+        ctx.beginPath();
+        ctx.moveTo(sp[0].x, sp[0].y);
+        for (let i = 1; i < sp.length; i++) {
+            ctx.lineTo(sp[i].x, sp[i].y);
+        }
+        ctx.closePath();
+        ctx.fill();
+    }
+
+    // Draw lit areas for light 1
+    const hsl1 = `hsl(${hue1}, 80%, 55%)`;
+    const hsl1a = `hsla(${hue1}, 80%, 55%, 0.12)`;
+
+    // Draw soft light falloff areas
+    for (const sp of shadows1) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, 0, W, H);
+        ctx.moveTo(sp[0].x, sp[0].y);
+        for (let i = 1; i < sp.length; i++) {
+            ctx.lineTo(sp[i].x, sp[i].y);
+        }
+        ctx.closePath();
+        ctx.clip('evenodd');
+
+        // Draw light cone
+        ctx.beginPath();
+        ctx.moveTo(sp[0].x, sp[0].y);
+        for (let i = 1; i < sp.length - 1; i++) {
+            ctx.lineTo(sp[i].x, sp[i].y);
+        }
+        ctx.closePath();
+        ctx.fillStyle = hsl1a;
+        ctx.fill();
+        ctx.restore();
+    }
+
+    // Draw lit areas for light 2
+    const hsl2 = `hsl(${hue2}, 60%, 45%)`;
+    const hsl2a = `hsla(${hue2}, 60%, 45%, 0.08)`;
+
+    for (const sp of shadows2) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, 0, W, H);
+        ctx.moveTo(sp[0].x, sp[0].y);
+        for (let i = 1; i < sp.length; i++) {
+            ctx.lineTo(sp[i].x, sp[i].y);
+        }
+        ctx.closePath();
+        ctx.clip('evenodd');
+
+        ctx.beginPath();
+        ctx.moveTo(sp[0].x, sp[0].y);
+        for (let i = 1; i < sp.length - 1; i++) {
+            ctx.lineTo(sp[i].x, sp[i].y);
+        }
+        ctx.closePath();
+        ctx.fillStyle = hsl2a;
+        ctx.fill();
+        ctx.restore();
+    }
+
+    // Draw obstacles
+    for (let i = 0; i < polygons.length; i++) {
+        const poly = polygons[i];
+        const litEdges = getLitEdgesForLight(poly, light1.x, light1.y);
+        const litEdges2 = getLitEdgesForLight(poly, light2.x, light2.y);
+
+        // Draw filled polygon (dark)
+        ctx.beginPath();
+        ctx.moveTo(poly[0].x, poly[0].y);
+        for (let j = 1; j < poly.length; j++) {
+            ctx.lineTo(poly[j].x, poly[j].y);
+        }
+        ctx.closePath();
+        ctx.fillStyle = '#0a0a12';
+        ctx.fill();
+
+        // Draw lit edges with glow
+        const glowIntensity1 = litEdges.length > 0 ? 1 : 0;
+        const glowIntensity2 = litEdges2.length > 0 ? 0.5 : 0;
+
+        for (const edge of litEdges) {
+            ctx.beginPath();
+            ctx.moveTo(edge.a.x, edge.a.y);
+            ctx.lineTo(edge.b.x, edge.b.y);
+            ctx.strokeStyle = `hsla(${hue1}, 70%, 60%, ${0.3 + glowIntensity1 * 0.4})`;
+            ctx.lineWidth = 2;
+            ctx.shadowColor = `hsla(${hue1}, 80%, 55%, 0.8)`;
+            ctx.shadowBlur = 8 + Math.sin(time * 2 + i) * 3;
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+        }
+
+        for (const edge of litEdges2) {
+            ctx.beginPath();
+            ctx.moveTo(edge.a.x, edge.a.y);
+            ctx.lineTo(edge.b.x, edge.b.y);
+            ctx.strokeStyle = `hsla(${hue2}, 60%, 55%, ${0.2 + glowIntensity2 * 0.3})`;
+            ctx.lineWidth = 1.5;
+            ctx.shadowColor = `hsla(${hue2}, 70%, 50%, 0.6)`;
+            ctx.shadowBlur = 5 + Math.sin(time * 1.5 + i) * 2;
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+        }
+
+        // Draw unlit edges faintly
+        const allEdges = polyEdges[i];
+        for (const edge of allEdges) {
+            const isLit = litEdges.some(e => e === edge) || litEdges2.some(e => e === edge);
+            if (!isLit) {
+                ctx.beginPath();
+                ctx.moveTo(edge.a.x, edge.a.y);
+                ctx.lineTo(edge.b.x, edge.b.y);
+                ctx.strokeStyle = '#1a1a2e';
                 ctx.lineWidth = 1;
                 ctx.stroke();
             }
         }
+    }
 
-        // --- Initialization ---
+    // Draw light sources
+    // Light 1 - warm
+    const grd1 = ctx.createRadialGradient(light1.x, light1.y, 0, light1.x, light1.y, light1.radius);
+    grd1.addColorStop(0, `hsla(${hue1}, 90%, 80%, 0.35)`);
+    grd1.addColorStop(0.3, `hsla(${hue1}, 80%, 60%, 0.15)`);
+    grd1.addColorStop(1, `hsla(${hue1}, 70%, 40%, 0)`);
+    ctx.fillStyle = grd1;
+    ctx.fillRect(light1.x - light1.radius, light1.y - light1.radius, light1.radius * 2, light1.radius * 2);
 
-        function init() {
-            // Generate random polygons
-            for (let i = 0; i < OBSTACLE_COUNT; i++) {
-                const radius = 30 + Math.random() * 60;
-                const sides = 3 + Math.floor(Math.random() * 4); // 3 to 6 sides
-                const x = Math.random() * width;
-                const y = Math.random() * height;
-                const rotation = Math.random() * Math.PI;
-                obstacles.push(new Polygon(x, y, radius, sides, rotation));
-            }
+    // Light source point
+    ctx.beginPath();
+    ctx.arc(light1.x, light1.y, 5, 0, Math.PI * 2);
+    ctx.fillStyle = `hsla(${hue1}, 90%, 90%, 0.9)`;
+    ctx.shadowColor = `hsla(${hue1}, 90%, 70%, 1)`;
+    ctx.shadowBlur = 20;
+    ctx.fill();
+    ctx.shadowBlur = 0;
 
-            // Collect all vertices from polygons to create a "room" boundary or extra obstacles
-            // For this demo, we will treat the edges of the canvas as the main room boundary
-            // but we will add the polygon vertices to our raycasting list.
-        }
+    // Light 2 - cool
+    const grd2 = ctx.createRadialGradient(light2.x, light2.y, 0, light2.x, light2.y, light2.radius);
+    grd2.addColorStop(0, `hsla(${hue2}, 70%, 70%, 0.2)`);
+    grd2.addColorStop(0.4, `hsla(${hue2}, 60%, 50%, 0.08)`);
+    grd2.addColorStop(1, `hsla(${hue2}, 50%, 30%, 0)`);
+    ctx.fillStyle = grd2;
+    ctx.fillRect(light2.x - light2.radius, light2.y - light2.radius, light2.radius * 2, light2.radius * 2);
 
-        // --- Core Logic ---
+    ctx.beginPath();
+    ctx.arc(light2.x, light2.y, 3, 0, Math.PI * 2);
+    ctx.fillStyle = `hsla(${hue2}, 80%, 85%, 0.7)`;
+    ctx.shadowColor = `hsla(${hue2}, 80%, 65%, 0.8)`;
+    ctx.shadowBlur = 12;
+    ctx.fill();
+    ctx.shadowBlur = 0;
 
-        // Raycast against a line segment
-        function getIntersection(rayStart, rayEnd, lineStart, lineEnd) {
-            const x1 = rayStart.x;
-            const y1 = rayStart.y;
-            const x2 = rayEnd.x;
-            const y2 = rayEnd.y;
+    // Subtle vignette
+    const vignette = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.75);
+    vignette.addColorStop(0, 'rgba(0,0,0,0)');
+    vignette.addColorStop(1, 'rgba(0,0,0,0.5)');
+    ctx.fillStyle = vignette;
+    ctx.fillRect(0, 0, W, H);
 
-            const x3 = lineStart.x;
-            const y3 = lineStart.y;
-            const x4 = lineEnd.x;
-            const y4 = lineEnd.y;
+    requestAnimationFrame(render);
+}
 
-            const denom = (y4 - y3) * (x2 - x1) - (x4 - x3) * (y2 - y1);
-            
-            if (denom === 0) return null;
-
-            const ua = ((x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)) / denom;
-            const ub = ((x2 - x1) * (y1 - y3) - (y2 - y1) * (x1 - x3)) / denom;
-
-            if (ua >= 0 && ua <= 1 && ub >= 0 && ub <= 1) {
-                return {
-                    x: x1 + ua * (x2 - x1),
-                    y: y1 + ua * (y2 - y1),
-                    u: ua
-                };
-            }
-            return null;
-        }
-
-        function render() {
-            time += 0.016;
-
-            // 1. Update Light Positions and Colors
-            const t = time * LIGHT_SPEED;
-            
-            // Light 1: Drifting warm light
-            const l1x = width / 2 + Math.cos(t) * (Math.min(width, height) * 0.35);
-            const l1y = height / 2 + Math.sin(t * 1.3) * (Math.min(width, height) * 0.35);
-            
-            // Hue shift over minutes (60s * minutes)
-            const hueShift = (time / (LIGHT_CYCLE_SECONDS * 60)) * 360;
-            const l1h = (40 + hueShift) % 360;
-            mainLightColor = `hsl(${l1h}, 90%, 60%)`;
-
-            // Light 2: Counter-orbit cool light
-            const l2x = width / 2 + Math.cos(-t * 0.8) * (Math.min(width, height) * 0.25);
-            const l2y = height / 2 + Math.sin(-t * 0.8 + 2) * (Math.min(width, height) * 0.25);
-            secondLightColor = `hsl(${200 + Math.sin(t)*20}, 80%, 60%)`;
-
-            // 2. Clear Screen (Deep Dark)
-            ctx.fillStyle = '#050505';
-            ctx.fillRect(0, 0, width, height);
-
-            // 3. Draw Obstacles (Base Layer)
-            // They are drawn dark. We will draw them again in "lit" mode on top.
-            obstacles.forEach(obs => obs.draw(ctx));
-
-            // 4. Lighting Layer
-            // We use a clipping mask of the obstacles to ensure shadows are sharp
-            // and light doesn't bleed through walls.
-            
-            // Create a mask of all obstacles
-            ctx.save();
-            ctx.beginPath();
-            obstacles.forEach(obs => {
-                ctx.moveTo(obs.points[0].x, obs.points[0].y);
-                for (let i = 1; i < obs.points.length; i++) {
-                    ctx.lineTo(obs.points[i].x, obs.points[i].y);
-                }
-                ctx.closePath();
-            });
-            ctx.clip();
-
-            // Draw Darkness over everything inside obstacles (to darken them further)
-            ctx.fillStyle = '#000';
-            ctx.fillRect(0, 0, width, height);
-
-            // --- Light 1 ---
-            ctx.save();
-            ctx.shadowBlur = 200;
-            ctx.shadowColor = mainLightColor;
-            
-            // Draw the "cone" of light for Light 1
-            // We trace rays to all vertices and the corners of the screen
-            const rays1 = getRays(l1x, l1y);
-            
-            ctx.beginPath();
-            ctx.moveTo(l1x, l1y);
-            // Sort rays by angle to draw a proper polygon fan
-            rays1.sort((a, b) => a.angle - b.angle);
-            
-            rays1.forEach(ray => {
-                ctx.lineTo(ray.x, ray.y);
-            });
-            ctx.closePath();
-            
-            ctx.fillStyle = mainLightColor;
-            ctx.globalCompositeOperation = 'lighter'; // Additive blending for glow
-            ctx.fill();
-            ctx.restore();
-
-            // --- Light 2 ---
-            ctx.save();
-            ctx.shadowBlur = 150;
-            ctx.shadowColor = secondLightColor;
-            
-            const rays2 = getRays(l2x, l2y);
-            
-            ctx.beginPath();
-            ctx.moveTo(l2x, l2y);
-            rays2.sort((a, b) => a.angle - b.angle);
-            
-            rays2.forEach(ray => {
-                ctx.lineTo(ray.x, ray.y);
-            });
-            ctx.closePath();
-            
-            ctx.fillStyle = secondLightColor;
-            ctx.globalAlpha = 0.4; // Dimmer
-            ctx.globalCompositeOperation = 'screen'; // Screen blend for depth
-            ctx.fill();
-            ctx.restore();
-
-            ctx.restore(); // End Clip
-
-            // 5. Draw Edge Glow
-            // Iterate obstacles again, draw their edges with the light color
-            ctx.save();
-            ctx.globalCompositeOperation = 'screen';
-            ctx.lineWidth = 2;
-            
-            // For Light 1
-            ctx.strokeStyle = mainLightColor;
-            ctx.shadowBlur = 15;
-            ctx.shadowColor = mainLightColor;
-            ctx.globalAlpha = 0.6;
-            obstacles.forEach(obs => obs.drawEdges(ctx));
-
-            // For Light 2
-            ctx.strokeStyle = secondLightColor;
-            ctx.shadowColor = secondLightColor;
-            ctx.globalAlpha = 0.3;
-            obstacles.forEach(obs => obs.drawEdges(ctx));
-            
-            ctx.restore();
-
-            // 6. Draw Point Light Sources (Visual Glows)
-            drawLightOrb(l1x, l1y, mainLightColor, 8, 0);
-            drawLightOrb(l2x, l2y, secondLightColor, 5, 0.5);
-
-            requestAnimationFrame(render);
-        }
-
-        function drawLightOrb(x, y, color, radius, alpha) {
-            ctx.beginPath();
-            ctx.arc(x, y, radius, 0, Math.PI * 2);
-            ctx.fillStyle = '#fff';
-            ctx.globalCompositeOperation = 'lighter';
-            ctx.globalAlpha = alpha;
-            ctx.shadowBlur = 20;
-            ctx.shadowColor = color;
-            ctx.fill();
-            ctx.globalAlpha = 1;
-            ctx.shadowBlur = 0;
-        }
-
-        function getRays(x, y) {
-            const rays = [];
-            const cx = x;
-            const cy = y;
-            
-            // Helper to add a ray
-            const addRay = (px, py) => {
-                // Calculate angle
-                let angle = Math.atan2(py - cy, px - cx);
-                // Normalize angle to 0 -> 2PI for sorting
-                if (angle < 0) angle += Math.PI * 2;
-                
-                rays.push({ x: px, y: py, angle: angle });
-            };
-
-            // 1. Add Corners of the Canvas
-            addRay(0, 0);
-            addRay(width, 0);
-            addRay(width, height);
-            addRay(0, height);
-
-            // 2. Add Vertices of all Obstacles
-            obstacles.forEach(obs => {
-                obs.points.forEach(p => addRay(p.x, p.y));
-            });
-
-            // 3. Raycast to find intersection points
-            const castedRays = [];
-
-            rays.forEach(r => {
-                let closest = null;
-                let minDist = Infinity;
-
-                // Ray direction
-                const dx = r.x - cx;
-                const dy = r.y - cy;
-                const length = Math.sqrt(dx*dx + dy*dy);
-                const dirX = dx / length;
-                const dirY = dy / length;
-                
-                const rayEnd = { x: cx + dirX * 2000, y: cy + dirY * 2000 }; // Long ray
-
-                // Check against all obstacle edges
-                obstacles.forEach(obs => {
-                    for (let i = 0; i < obs.points.length; i++) {
-                        const p1 = obs.points[i];
-                        const p2 = obs.points[(i + 1) % obs.points.length];
-                        
-                        const hit = getIntersection(
-                            {x: cx, y: cy}, 
-                            rayEnd, 
-                            p1, 
-                            p2
-                        );
-
-                        if (hit) {
-                            const dist = Math.sqrt((hit.x - cx)**2 + (hit.y - cy)**2);
-                            if (dist < minDist) {
-                                minDist = dist;
-                                closest = hit;
-                            }
-                        }
-                    }
-                });
-
-                if (closest) {
-                    castedRays.push(closest);
-                } else {
-                    // If no obstacle hit, extend to edge of canvas or far distance
-                    // Simple approximation: project to canvas bounds
-                    // We already added canvas corners, so if no obstacle hit, 
-                    // the ray likely goes to the canvas edge. 
-                    // To be precise, we could calculate intersection with canvas rects,
-                    // but since we added corners, the sorting logic will handle the fan shape roughly.
-                    // However, to fill the gaps between corners, we need the exact canvas edge hit.
-                    
-                    // Let's just use the original target if it didn't hit anything, 
-                    // but clamp it to canvas bounds if it's a corner ray.
-                    // For simplicity in this visual demo, if no obstacle hit, 
-                    // we assume it hits the far wall.
-                    
-                    // A robust way:
-                    let bestCanvasPoint = null;
-                    let bestDist = Infinity;
-                    
-                    // Check intersection with 4 walls
-                    const walls = [
-                        {x1:0, y1:0, x2:width, y2:0}, // Top
-                        {x1:width, y1:0, x2:width, y2:height}, // Right
-                        {x1:width, y1:height, x2:0, y2:height}, // Bottom
-                        {x1:0, y1:height, x2:0, y2:0} // Left
-                    ];
-                    
-                    walls.forEach(w => {
-                        const hit = getIntersection({x:cx, y:cy}, rayEnd, w.x1, w.y1);
-                        if(hit) {
-                            const d = Math.sqrt((hit.x-cx)**2 + (hit.y-cy)**2);
-                            if(d < bestDist) {
-                                bestDist = d;
-                                bestCanvasPoint = hit;
-                            }
-                        }
-                    });
-                    
-                    if(bestCanvasPoint) castedRays.push(bestCanvasPoint);
-                }
-            });
-
-            // Remove duplicates (points very close to each other)
-            const uniqueRays = [];
-            const threshold = 1.0;
-            
-            castedRays.sort((a, b) => a.angle - b.angle);
-            
-            for(let i=0; i<castedRays.length; i++) {
-                const curr = castedRays[i];
-                // Check against last added
-                if (uniqueRays.length === 0) {
-                    uniqueRays.push(curr);
-                } else {
-                    const last = uniqueRays[uniqueRays.length - 1];
-                    const dist = Math.sqrt((curr.x - last.x)**2 + (curr.y - last.y)**2);
-                    if (dist > threshold) {
-                        uniqueRays.push(curr);
-                    }
-                }
-            }
-            
-            return uniqueRays;
-        }
-
-        // Add drawEdges method to Polygon class
-        Polygon.prototype.drawEdges = function(ctx) {
-            ctx.beginPath();
-            ctx.moveTo(this.points[0].x, this.points[0].y);
-            for (let i = 1; i < this.points.length; i++) {
-                ctx.lineTo(this.points[i].x, this.points[i].y);
-            }
-            ctx.closePath();
-            ctx.stroke();
-        };
-
-        // Start
-        init();
-        render();
-
-    </script>
+render();
+</script>
 </body>
 </html>

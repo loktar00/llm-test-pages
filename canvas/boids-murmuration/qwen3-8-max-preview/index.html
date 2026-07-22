@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Murmuration — dusk screensaver</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;overflow:hidden;background:#0b1430}
+  canvas{display:block}
+  body.idle{cursor:none}
+  #cap{position:fixed;left:30px;bottom:26px;z-index:2;pointer-events:none;animation:capfade 13s ease forwards}
+  #cap .rule{display:block;width:34px;height:1px;background:rgba(255,206,150,.65);margin-bottom:10px}
+  #cap em{display:block;font:italic 400 clamp(20px,2.4vw,27px)/1 Georgia,'Times New Roman',serif;
+    color:rgba(255,228,196,.92);letter-spacing:.045em;text-shadow:0 1px 14px rgba(20,10,30,.6)}
+  #cap small{display:block;margin-top:7px;font:600 9px/1 ui-sans-serif,system-ui,sans-serif;
+    letter-spacing:.34em;text-transform:uppercase;color:rgba(226,196,178,.5)}
+  @keyframes capfade{0%{opacity:0;transform:translateY(8px)}7%{opacity:1;transform:none}72%{opacity:1}100%{opacity:0}}
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<div id="cap"><span class="rule"></span><em>murmuration</em><small>sturnus vulgaris &middot; dusk flight</small></div>
+<script>
+(() => {
+"use strict";
+const TAU = Math.PI * 2;
+const cv = document.getElementById('scene');
+const ctx = cv.getContext('2d', { alpha:false });
+
+let W = 0, H = 0, DPR = 1;
+let horizonY = 0, bankTopY = 0, sunX = 0, sunY = 0, sunR = 0;
+let bp1 = 0, bp2 = 0;
+
+const skyC   = document.createElement('canvas');
+const cloudC = document.createElement('canvas');
+const ridgeC = document.createElement('canvas');
+const waterC = document.createElement('canvas');
+const bankC  = document.createElement('canvas');
+const vigC   = document.createElement('canvas');
+
+let stars = [], shim = [], reeds = [];
+
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+const bankY = x => bankTopY + Math.sin(x*0.004+bp1)*5 + Math.sin(x*0.013+bp2)*3;
+function ellipse(c,x,y,rx,ry){c.beginPath();c.ellipse(x,y,rx,ry,0,0,TAU);c.fill();}
+
+/* ---------- boids ---------- */
+let N = 0, px, py, vx, vy, panic, depth, order, lEnd0 = 0, lEnd1 = 0;
+const CELL = 60;
+let gcols = 0, grows = 0, ghead, gnext;
+
+function initBoids(){
+  N = Math.max(400, Math.min(700, Math.round(W*H/2300)));
+  px = new Float32Array(N); py = new Float32Array(N);
+  vx = new Float32Array(N); vy = new Float32Array(N);
+  panic = new Float32Array(N); depth = new Float32Array(N);
+  const rnd = mulberry32(42424242);
+  const cx = W*0.5, cy = horizonY*0.55;
+  for(let i=0;i<N;i++){
+    px[i] = cx + (rnd()-0.5)*W*0.34;
+    py[i] = cy + (rnd()-0.5)*H*0.26;
+    const a = rnd()*TAU, s = 2 + rnd()*1.4;
+    vx[i] = Math.cos(a)*s; vy[i] = Math.sin(a)*s;
+    depth[i] = 0.75 + rnd()*0.6;
+  }
+  order = Array.from({length:N},(_,i)=>i).sort((a,b)=>depth[a]-depth[b]);
+  lEnd0 = 0; while(lEnd0<N && depth[order[lEnd0]] < 0.95) lEnd0++;
+  lEnd1 = lEnd0; while(lEnd1<N && depth[order[lEnd1]] < 1.15) lEnd1++;
+}
+function sizeGrid(){
+  if(!N) return;
+  gcols = Math.max(1, Math.ceil(W/CELL));
+  grows = Math.max(1, Math.ceil(H/CELL));
+  ghead = new Int32Array(gcols*grows);
+  gnext = new Int32Array(N);
+}
+
+/* ---------- invisible predator ---------- */
+const pred = { x:0, y:0, rad:0, state:0, timer:5 };
+function placePredator(){ pred.x = W*0.15; pred.y = H*0.3; }
+function updatePredator(dtN, t, mx, my, mvx, mvy){
+  const dt = dtN/60;
+  pred.timer -= dt;
+  if(pred.state === 0){                       // dormant: slow drift, no influence
+    const ia = t*0.12 + 2.1;
+    const ix = W*0.5 + Math.cos(ia)*W*0.4;
+    const iy = H*0.34 + Math.sin(ia*0.63 + 0.8)*H*0.17;
+    pred.x += (ix-pred.x)*0.01*dtN;
+    pred.y += (iy-pred.y)*0.01*dtN;
+    pred.rad += (0-pred.rad)*0.06*dtN;
+    if(pred.timer <= 0){ pred.state = 1; pred.timer = 5.5 + Math.random()*5; }
+  } else {                                    // strike: carve slowly through the flock
+    const tx = mx + mvx*26, ty = my + mvy*26;
+    let dx = tx-pred.x, dy = ty-pred.y;
+    const d = Math.sqrt(dx*dx+dy*dy) || 1;
+    const wob = Math.sin(t*1.6)*0.55;
+    pred.x += (dx/d - dy/d*wob)*1.6*dtN;
+    pred.y += (dy/d + dx/d*wob)*1.6*dtN;
+    pred.rad += (168-pred.rad)*0.05*dtN;
+    if(pred.timer <= 0){ pred.state = 0; pred.timer = 7 + Math.random()*9; }
+  }
+  if(pred.x < 30) pred.x = 30; else if(pred.x > W-30) pred.x = W-30;
+  if(pred.y < H*0.10) pred.y = H*0.10; else if(pred.y > horizonY-30) pred.y = horizonY-30;
+}
+
+/* ---------- simulation step ---------- */
+function step(dtN, t){
+  ghead.fill(-1);
+  for(let i=0;i<N;i++){
+    let cx = (px[i]/CELL)|0; if(cx<0)cx=0; else if(cx>=gcols)cx=gcols-1;
+    let cy = (py[i]/CELL)|0; if(cy<0)cy=0; else if(cy>=grows)cy=grows-1;
+    const c = cy*gcols+cx; gnext[i] = ghead[c]; ghead[c] = i;
+  }
+  let mx=0,my=0,mvx=0,mvy=0;
+  for(let i=0;i<N;i++){ mx+=px[i]; my+=py[i]; mvx+=vx[i]; mvy+=vy[i]; }
+  mx/=N; my/=N; mvx/=N; mvy/=N;
+  updatePredator(dtN, t, mx, my, mvx, mvy);
+
+  const R2 = 56*56, SR2 = 23*23, CAP = 26;
+  const mB = horizonY + (bankTopY-horizonY)*0.55;
+  const roostX = W*0.5 + Math.sin(t*0.05)*W*0.24 + Math.sin(t*0.023+1.7)*W*0.11;
+  let roostY = H*0.40 + Math.sin(t*0.041+2.1)*H*0.12 + Math.cos(t*0.016)*H*0.05;
+  if(roostY > horizonY-70) roostY = horizonY-70;
+  const pr2 = pred.rad*pred.rad;
+
+  for(let i=0;i<N;i++){
+    const x = px[i], y = py[i], vi = panic[i];
+    let alx=0,aly=0,csx=0,csy=0,sepx=0,sepy=0,cnt=0,scnt=0;
+    const gx = (x/CELL)|0, gy = (y/CELL)|0;
+    scan:
+    for(let oy=-1;oy<=1;oy++){
+      const yy = gy+oy; if(yy<0||yy>=grows) continue;
+      for(let ox=-1;ox<=1;ox++){
+        const xx = gx+ox; if(xx<0||xx>=gcols) continue;
+        let j = ghead[yy*gcols+xx];
+        while(j !== -1){
+          if(j !== i){
+            const dx = px[j]-x, dy = py[j]-y, d2 = dx*dx+dy*dy;
+            if(d2 < R2){
+              alx+=vx[j]; aly+=vy[j]; csx+=px[j]; csy+=py[j]; cnt++;
+              if(d2 < SR2 && d2 > 0.01){ const inv = 1/d2; sepx -= dx*inv; sepy -= dy*inv; scnt++; }
+              if(cnt >= CAP) break scan;
+            }
+          }
+          j = gnext[j];
+        }
+      }
+    }
+    const maxSp = 3.6*(1+vi*0.85), mf = 0.055;
+    const wS = 1.7*(1+vi*1.2), wA = 1.0, wC = 0.85*(1-vi*0.55);
+    let fx = 0, fy = 0;
+    if(cnt > 0){
+      let ax = alx/cnt, ay = aly/cnt, m = Math.sqrt(ax*ax+ay*ay);
+      if(m > 1e-4){ ax=ax/m*maxSp-vx[i]; ay=ay/m*maxSp-vy[i]; m=Math.sqrt(ax*ax+ay*ay);
+        if(m>mf){ax*=mf/m; ay*=mf/m;} fx+=ax*wA; fy+=ay*wA; }
+      let cx2 = csx/cnt-x, cy2 = csy/cnt-y; m = Math.sqrt(cx2*cx2+cy2*cy2);
+      if(m > 1e-4){ cx2=cx2/m*maxSp-vx[i]; cy2=cy2/m*maxSp-vy[i]; m=Math.sqrt(cx2*cx2+cy2*cy2);
+        if(m>mf){cx2*=mf/m; cy2*=mf/m;} fx+=cx2*wC; fy+=cy2*wC; }
+    }
+    if(scnt > 0){
+      let m = Math.sqrt(sepx*sepx+sepy*sepy);
+      if(m > 1e-4){ sepx=sepx/m*maxSp-vx[i]; sepy=sepy/m*maxSp-vy[i]; m=Math.sqrt(sepx*sepx+sepy*sepy);
+        const lim = mf*1.7; if(m>lim){sepx*=lim/m; sepy*=lim/m;} fx+=sepx*wS; fy+=sepy*wS; }
+    }
+    // ambient wind undulation
+    const fa = Math.sin(x*0.0015+t*0.30) + Math.cos(y*0.0021-t*0.19) + Math.sin((x+y)*0.0009+t*0.07);
+    fx += Math.cos(fa*2.0)*0.026; fy += Math.sin(fa*2.0)*0.026;
+    // loose pull toward a wandering roost point keeps the flock on stage
+    const rdx = roostX-x, rdy = roostY-y, rd = Math.sqrt(rdx*rdx+rdy*rdy);
+    if(rd > 150){ fx += rdx/rd*mf*0.6; fy += rdy/rd*mf*0.6; }
+    // flee the predator; panic spreads urgency and loosens cohesion -> splits
+    if(pred.rad > 1){
+      const dxp = x-pred.x, dyp = y-pred.y, d2p = dxp*dxp+dyp*dyp;
+      if(d2p < pr2 && d2p > 0.01){
+        const dp = Math.sqrt(d2p), k = 1-dp/pred.rad, f = 0.5*k*(1+vi*0.9);
+        fx += dxp/dp*f; fy += dyp/dp*f;
+        const np = k*1.15; if(np > panic[i]) panic[i] = np > 1 ? 1 : np;
+      }
+    }
+    // soft bounds: sky above, open water below
+    if(x < 80) fx += (1-x/80)*0.13;
+    else if(x > W-80) fx -= (1-(W-x)/80)*0.13;
+    if(y < 36) fy += (1-y/36)*0.13;
+    if(y > mB) fy -= Math.min(1.4,(y-mB)/46*0.16);
+
+    vx[i] += fx*dtN; vy[i] += fy*dtN;
+    let sp = Math.sqrt(vx[i]*vx[i]+vy[i]*vy[i]);
+    if(sp < 1e-3){ vx[i]=1.7; vy[i]=0; sp=1.7; }
+    if(sp > maxSp){ vx[i]*=maxSp/sp; vy[i]*=maxSp/sp; }
+    else if(sp < 1.7){ vx[i]*=1.7/sp; vy[i]*=1.7/sp; }
+    px[i] += vx[i]*dtN; py[i] += vy[i]*dtN;
+    if(px[i] < -24){ px[i]=-24; vx[i]=Math.abs(vx[i]); }
+    else if(px[i] > W+24){ px[i]=W+24; vx[i]=-Math.abs(vx[i]); }
+    if(py[i] < -24){ py[i]=-24; vy[i]=Math.abs(vy[i]); }
+    else if(py[i] > H+24){ py[i]=H+24; vy[i]=-Math.abs(vy[i]); }
+    panic[i] *= (1-0.03*dtN); if(panic[i] < 0.001) panic[i] = 0;
+  }
+}
+
+/* ---------- scene painting (cached layers) ---------- */
+function deciduous(c,x,y,h){
+  c.fillRect(x-h*0.035, y-h*0.5, h*0.07, h*0.5);
+  c.beginPath();
+  c.moveTo(x+h*0.24, y-h*0.66); c.arc(x, y-h*0.66, h*0.24, 0, TAU);
+  c.moveTo(x-h*0.01, y-h*0.52); c.arc(x-h*0.18, y-h*0.52, h*0.17, 0, TAU);
+  c.moveTo(x+h*0.37, y-h*0.54); c.arc(x+h*0.19, y-h*0.54, h*0.18, 0, TAU);
+  c.moveTo(x+h*0.10, y-h*0.46); c.arc(x-h*0.06, y-h*0.46, h*0.16, 0, TAU);
+  c.fill();
+}
+function conifer(c,x,y,h){
+  c.fillRect(x-h*0.03, y-h*0.18, h*0.06, h*0.18);
+  c.beginPath();
+  for(let k=0;k<3;k++){
+    const w = h*(0.30-k*0.075), yb = y-h*(0.16+k*0.27), hh = h*0.40;
+    c.moveTo(x-w,yb); c.lineTo(x+w,yb); c.lineTo(x,yb-hh); c.closePath();
+  }
+  c.fill();
+}
+
+function buildScene(){
+  const rnd = mulberry32(987654321);
+  horizonY = Math.round(H*0.72);
+  bankTopY = Math.round(H*0.905);
+  sunR = Math.max(18, Math.min(52, H*0.05));
+  sunX = Math.round(W*0.63);
+  sunY = horizonY - sunR*0.72;
+  bp1 = rnd()*TAU; bp2 = rnd()*TAU;
+
+  /* sky */
+  skyC.width = W*DPR; skyC.height = H*DPR;
+  const s = skyC.getContext('2d'); s.scale(DPR,DPR);
+  const g = s.createLinearGradient(0,0,0,horizonY);
+  g.addColorStop(0.00,'#0b1430'); g.addColorStop(0.30,'#1f2c55');
+  g.addColorStop(0.50,'#3f4470'); g.addColorStop(0.66,'#6d5070');
+  g.addColorStop(0.78,'#a4655f'); g.addColorStop(0.88,'#d3875a');
+  g.addColorStop(1.00,'#f0b478');
+  s.fillStyle = g; s.fillRect(0,0,W,horizonY+2);
+  let rg = s.createRadialGradient(sunX,sunY,0,sunX,sunY,Math.max(W,H)*0.55);
+  rg.addColorStop(0,'rgba(255,196,120,0.60)');
+  rg.addColorStop(0.25,'rgba(255,160,95,0.25)');
+  rg.addColorStop(1,'rgba(255,150,90,0)');
+  s.fillStyle = rg; s.fillRect(0,0,W,horizonY+2);
+  rg = s.createRadialGradient(sunX,sunY,0,sunX,sunY,sunR*1.35);
+  rg.addColorStop(0,'rgba(255,244,214,0.98)');
+  rg.addColorStop(0.55,'rgba(255,214,150,0.95)');
+  rg.addColorStop(1,'rgba(255,190,120,0)');
+  s.fillStyle = rg; s.beginPath(); s.arc(sunX,sunY,sunR*1.35,0,TAU); s.fill();
+  const hz = s.createLinearGradient(0,horizonY-H*0.12,0,horizonY);
+  hz.addColorStop(0,'rgba(240,190,130,0)');
+  hz.addColorStop(1,'rgba(244,198,140,0.30)');
+  s.fillStyle = hz; s.fillRect(0,horizonY-H*0.12,W,H*0.12+2);
+
+  stars = [];
+  const nS = Math.round(Math.min(170, Math.max(60, W*H/15000)));
+  for(let i=0;i<nS;i++){
+    const y = rnd()*rnd()*horizonY*0.62;
+    stars.push({ x:rnd()*W, y, r:0.6+rnd()*1.1, ph:rnd()*TAU, sp:0.4+rnd()*1.6,
+                 a:0.25+0.6*(1-y/(horizonY*0.62)) });
+  }
+
+  /* drifting lenticular clouds, periodic for a seamless wrap */
+  cloudC.width = W*DPR; cloudC.height = H*DPR;
+  const c = cloudC.getContext('2d'); c.scale(DPR,DPR);
+  for(let i=0;i<7;i++){
+    const y = horizonY*(0.40+rnd()*0.52);
+    const L = W*(0.14+rnd()*0.30), th = 3+rnd()*9;
+    const x0 = 10+rnd()*Math.max(1,W-L-20), cx = x0+L/2;
+    c.fillStyle = 'rgba(56,42,74,0.42)';
+    ellipse(c,cx,y,L/2,th/2);
+    ellipse(c,cx-L*0.22,y+th*0.18,L*0.28,th*0.42);
+    ellipse(c,cx+L*0.25,y+th*0.14,L*0.30,th*0.40);
+    c.fillStyle = 'rgba(255,188,130,0.34)';
+    ellipse(c,cx,y+th*0.5,L*0.40,1.4);
+  }
+
+  /* ridges */
+  ridgeC.width = W*DPR; ridgeC.height = H*DPR;
+  const r = ridgeC.getContext('2d'); r.scale(DPR,DPR);
+  const f1=rnd()*TAU, f2=rnd()*TAU, f3=rnd()*TAU, f4=rnd()*TAU;
+  const base1 = horizonY-H*0.042, amp1 = H*0.052;
+  r.fillStyle = '#4a3a60';
+  r.beginPath(); r.moveTo(0,horizonY+8);
+  for(let x=0;x<=W;x+=6){
+    const y = base1 - (Math.sin(x*0.0032+f1)*0.62 + Math.sin(x*0.0081+f2)*0.38)*amp1
+                    - Math.sin(x*0.0014+f3)*H*0.012;
+    r.lineTo(x,y);
+  }
+  r.lineTo(W,horizonY+8); r.closePath(); r.fill();
+
+  const base2 = horizonY-H*0.008, amp2 = H*0.026;
+  const midY = x => base2 - (Math.sin(x*0.0046+f3)*0.6 + Math.sin(x*0.011+f4)*0.4)*amp2;
+  r.fillStyle = '#2a1f42';
+  r.beginPath(); r.moveTo(0,horizonY+8);
+  for(let x=0;x<=W;x+=6) r.lineTo(x,midY(x));
+  r.lineTo(W,horizonY+8); r.closePath(); r.fill();
+  let tx = 18+rnd()*40;
+  while(tx < W-14){
+    const yb = midY(tx)+2, h = H*(0.028+rnd()*0.05);
+    r.fillStyle = '#2a1f42';
+    if(rnd() < 0.72) deciduous(r,tx,yb,h); else conifer(r,tx,yb,h);
+    tx += 50+rnd()*110;
+  }
+
+  /* water */
+  waterC.width = W*DPR; waterC.height = H*DPR;
+  const w = waterC.getContext('2d'); w.scale(DPR,DPR);
+  const wg = w.createLinearGradient(0,horizonY,0,bankTopY+12);
+  wg.addColorStop(0,'#c9815c'); wg.addColorStop(0.16,'#8a5460');
+  wg.addColorStop(0.45,'#453058'); wg.addColorStop(1,'#150f28');
+  w.fillStyle = wg; w.fillRect(0,horizonY-1,W,bankTopY-horizonY+14);
+  w.fillStyle = 'rgba(12,8,22,0.20)';
+  for(let i=0;i<16;i++){
+    const yr = rnd(), y = horizonY+3+yr*(bankTopY-horizonY-6);
+    w.fillRect(rnd()*W-60, y, 50+rnd()*170, 1+yr*1.2);
+  }
+  let rw = sunR*2.8;
+  let gl = w.createLinearGradient(sunX-rw,0,sunX+rw,0);
+  gl.addColorStop(0,'rgba(255,190,120,0)');
+  gl.addColorStop(0.5,'rgba(255,196,126,0.38)');
+  gl.addColorStop(1,'rgba(255,190,120,0)');
+  w.fillStyle = gl; w.fillRect(sunX-rw,horizonY-1,rw*2,bankTopY-horizonY+14);
+  rw = sunR*1.0;
+  gl = w.createLinearGradient(sunX-rw,0,sunX+rw,0);
+  gl.addColorStop(0,'rgba(255,224,168,0)');
+  gl.addColorStop(0.5,'rgba(255,226,170,0.42)');
+  gl.addColorStop(1,'rgba(255,224,168,0)');
+  w.fillStyle = gl; w.fillRect(sunX-rw,horizonY-1,rw*2,bankTopY-horizonY+14);
+  w.fillStyle = 'rgba(255,222,166,0.55)'; w.fillRect(0,horizonY-1,W,1.2);
+
+  shim = [];
+  for(let i=0;i<30;i++)
+    shim.push({ yr:Math.pow(rnd(),1.4), xo:rnd()*2-1, len:8+rnd()*30, ph:rnd()*TAU, sp:0.5+rnd()*1.4 });
+
+  /* foreground bank */
+  bankC.width = W*DPR; bankC.height = H*DPR;
+  const b = bankC.getContext('2d'); b.scale(DPR,DPR);
+  b.fillStyle = '#0f0a19';
+  b.beginPath(); b.moveTo(0,H+4);
+  for(let x=0;x<=W;x+=5) b.lineTo(x,bankY(x));
+  b.lineTo(W,H+4); b.closePath(); b.fill();
+  b.strokeStyle = '#0f0a19'; b.lineCap = 'round';
+  for(let x=0;x<W;x+=4+rnd()*9){
+    const y = bankY(x), hgt = 3+rnd()*8, ln = (rnd()-0.5)*6;
+    b.lineWidth = 0.8+rnd()*0.9;
+    b.beginPath(); b.moveTo(x,y+2); b.quadraticCurveTo(x+ln*0.4,y-hgt*0.6,x+ln,y-hgt); b.stroke();
+  }
+
+  reeds = [];
+  const nR = Math.round(W/24);
+  for(let i=0;i<nR;i++){
+    const x = rnd()*W;
+    reeds.push({ x, y:bankY(x)+2, h:20+rnd()*46, ph:rnd()*TAU, sp:0.5+rnd()*0.9,
+                 lean:(rnd()-0.5)*9, w:0.9+rnd()*0.9, head:rnd()<0.7 });
+  }
+
+  /* vignette */
+  vigC.width = W*DPR; vigC.height = H*DPR;
+  const v = vigC.getContext('2d'); v.scale(DPR,DPR);
+  const vg = v.createRadialGradient(W*0.5,H*0.44,Math.min(W,H)*0.36, W*0.5,H*0.5,Math.hypot(W,H)*0.62);
+  vg.addColorStop(0,'rgba(7,6,16,0)'); vg.addColorStop(1,'rgba(7,6,16,0.5)');
+  v.fillStyle = vg; v.fillRect(0,0,W,H);
+  const tg = v.createLinearGradient(0,0,0,H*0.28);
+  tg.addColorStop(0,'rgba(4,6,16,0.34)'); tg.addColorStop(1,'rgba(4,6,16,0)');
+  v.fillStyle = tg; v.fillRect(0,0,W,H*0.28);
+}
+
+/* ---------- render ---------- */
+const LSTYLE = [
+  { c:'rgba(46,34,60,0.50)', sz:1.5, lw:0.7 },
+  { c:'rgba(28,20,40,0.72)', sz:1.9, lw:1.0 },
+  { c:'rgba(14,9,22,0.92)',  sz:2.4, lw:1.3 }
+];
+function drawBoids(){
+  const ranges = [[0,lEnd0],[lEnd0,lEnd1],[lEnd1,N]];
+  for(let L=0;L<3;L++){
+    const st = LSTYLE[L], a = ranges[L][0], b = ranges[L][1];
+    if(b <= a) continue;
+    ctx.strokeStyle = st.c; ctx.lineWidth = st.lw; ctx.lineCap = 'round';
+    ctx.beginPath();
+    for(let k=a;k<b;k++){
+      const i = order[k], d = depth[i]*1.5;
+      ctx.moveTo(px[i]-vx[i]*d, py[i]-vy[i]*d);
+      ctx.lineTo(px[i]+0.01, py[i]);
+    }
+    ctx.stroke();
+    ctx.fillStyle = st.c;
+    ctx.beginPath();
+    const s = st.sz;
+    for(let k=a;k<b;k++){
+      const i = order[k], q = s*depth[i]*0.8;
+      ctx.rect(px[i]-q*0.5, py[i]-q*0.5, q, q);
+    }
+    ctx.fill();
+  }
+}
+
+function render(t){
+  ctx.drawImage(skyC,0,0,W,H);
+  ctx.fillStyle = '#e8ecff';
+  for(let i=0;i<stars.length;i++){
+    const s = stars[i];
+    ctx.globalAlpha = s.a*(0.5+0.5*Math.sin(t*s.sp+s.ph));
+    ctx.fillRect(s.x,s.y,s.r,s.r);
+  }
+  ctx.globalAlpha = 1;
+  const ox = -((t*6)%W);
+  ctx.drawImage(cloudC,ox,0,W,H);
+  ctx.drawImage(cloudC,ox+W,0,W,H);
+  ctx.drawImage(ridgeC,0,0,W,H);
+  ctx.drawImage(waterC,0,0,W,H);
+  ctx.lineCap = 'round'; ctx.strokeStyle = '#ffd9a2';
+  for(let i=0;i<shim.length;i++){
+    const d = shim[i], yr = d.yr;
+    const y = horizonY+2+yr*(bankTopY-horizonY-6);
+    const spread = sunR*(1.2+yr*3.2);
+    const x = sunX + d.xo*spread + Math.sin(t*d.sp+d.ph)*5;
+    const len = d.len*(0.55+yr*1.6)*(0.75+0.25*Math.sin(t*d.sp*1.9+d.ph*3));
+    ctx.globalAlpha = (0.08+0.30*(0.5+0.5*Math.sin(t*d.sp+d.ph*2)))*(1-yr*0.35);
+    ctx.lineWidth = 1+yr*1.4;
+    ctx.beginPath(); ctx.moveTo(x-len/2,y); ctx.lineTo(x+len/2,y); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  ctx.drawImage(bankC,0,0,W,H);
+  ctx.strokeStyle = '#0f0a19';
+  for(let i=0;i<reeds.length;i++){
+    const r = reeds[i];
+    const sway = Math.sin(t*r.sp+r.ph)*(2.5+r.h*0.06)+r.lean;
+    const txp = r.x+sway, typ = r.y-r.h;
+    ctx.lineWidth = r.w;
+    ctx.beginPath(); ctx.moveTo(r.x,r.y);
+    ctx.quadraticCurveTo(r.x+sway*0.3, r.y-r.h*0.55, txp, typ); ctx.stroke();
+    if(r.head){
+      ctx.lineWidth = r.w*2.6;
+      ctx.beginPath(); ctx.moveTo(txp,typ); ctx.lineTo(txp+sway*0.12, typ-6); ctx.stroke();
+    }
+  }
+  drawBoids();
+  ctx.drawImage(vigC,0,0,W,H);
+}
+
+/* ---------- boot / loop / resize ---------- */
+let last = performance.now(), t = 0;
+function frame(now){
+  let dt = (now-last)/1000; last = now;
+  if(dt > 0.05) dt = 0.05;
+  const dtN = dt*60; t += dt;
+  step(dtN, t);
+  render(t);
+  requestAnimationFrame(frame);
+}
+
+let rsT = null;
+function resize(){
+  const ow = W, oh = H;
+  DPR = Math.min(window.devicePixelRatio||1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = Math.round(W*DPR); cv.height = Math.round(H*DPR);
+  cv.style.width = W+'px'; cv.style.height = H+'px';
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  buildScene();
+  if(N > 0 && ow > 0){
+    const rx = W/ow, ry = H/oh;
+    for(let i=0;i<N;i++){ px[i]*=rx; py[i]*=ry; }
+  }
+  sizeGrid();
+}
+window.addEventListener('resize', () => { clearTimeout(rsT); rsT = setTimeout(resize, 160); });
+
+resize();
+initBoids();
+sizeGrid();
+placePredator();
+
+let curT;
+function poke(){
+  document.body.classList.remove('idle');
+  clearTimeout(curT);
+  curT = setTimeout(() => document.body.classList.add('idle'), 3500);
+}
+window.addEventListener('pointermove', poke);
+poke();
+
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

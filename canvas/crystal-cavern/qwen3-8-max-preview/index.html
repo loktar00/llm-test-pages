@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta name="color-scheme" content="dark"/>
+<title>Crystal Cavern — a speleological screensaver</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#04050c;cursor:crosshair}
+  canvas#cave{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none}
+  #vignette{position:fixed;inset:0;pointer-events:none;
+    background:
+      radial-gradient(130% 100% at 50% 40%, rgba(0,0,0,0) 52%, rgba(3,4,10,.62) 100%),
+      linear-gradient(rgba(6,8,18,.35), rgba(0,0,0,0) 18% 82%, rgba(4,5,12,.4));}
+  #title{position:fixed;top:26px;left:30px;pointer-events:none;user-select:none;transition:opacity 3s ease}
+  #title.dim{opacity:.22}
+  #title h1{margin:0;font-family:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,serif;
+    font-style:italic;font-weight:400;font-size:clamp(18px,2.2vw,27px);letter-spacing:.46em;
+    color:rgba(214,231,248,.92);text-transform:uppercase;text-shadow:0 0 24px rgba(120,180,255,.35);
+    opacity:0;animation:rise 2.2s .5s ease forwards}
+  #title small{display:block;margin-top:8px;font-family:ui-monospace,"SF Mono","Cascadia Code",Consolas,monospace;
+    font-size:10px;letter-spacing:.34em;color:rgba(150,185,215,.55);text-transform:uppercase;
+    opacity:0;animation:rise 2.2s 1.2s ease forwards}
+  #title small b{color:rgba(190,225,255,.85);font-weight:400}
+  #hud{position:fixed;left:30px;bottom:22px;pointer-events:none;user-select:none;
+    font-family:ui-monospace,"SF Mono","Cascadia Code",Consolas,monospace;font-size:10.5px;
+    letter-spacing:.22em;color:rgba(158,192,222,.5);text-transform:uppercase;
+    opacity:0;animation:rise 2s 1.8s ease forwards}
+  #hud em{font-style:normal;color:rgba(196,232,255,.85)}
+  @keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+</style>
+</head>
+<body>
+<canvas id="cave"></canvas>
+<div id="vignette"></div>
+<div id="title"><h1>Crystal Cavern</h1><small>speleological screensaver · <b>nº 03</b> · continuous accretion</small></div>
+<div id="hud">…</div>
+<script>
+'use strict';
+/* ============ setup ============ */
+const canvas=document.getElementById('cave'),ctx=canvas.getContext('2d');
+const hud=document.getElementById('hud'),titleEl=document.getElementById('title');
+let W=0,H=0,dpr=1;
+const STEP=6;
+let floorPts=[],ceilPts=[],rock=null,stalactites=[],pools=[];
+let bgGrad=null;
+const reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+function rnd(a,b){return a+Math.random()*(b-a)}
+function pick(a){return a[(Math.random()*a.length)|0]}
+function clamp(v,a,b){return v<a?a:v>b?b:v}
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+function vnoise(rand){const g=new Float32Array(512);for(let i=0;i<512;i++)g[i]=rand();
+  return x=>{const i=Math.floor(x),f=x-i,u=f*f*(3-2*f);return g[i&511]*(1-u)+g[(i+1)&511]*u}}
+function sampleAt(pts,x){const i=clamp(x/STEP,0,pts.length-1.001),i0=i|0,f=i-i0;return pts[i0].y*(1-f)+pts[i0+1].y*f}
+const floorAt=x=>sampleAt(floorPts,x),ceilAt=x=>sampleAt(ceilPts,x);
+
+/* ============ glow sprites (fast cached radial gradients) ============ */
+const PALETTE=[174,196,262,318,44,152];
+const sprites={};
+function sprite(hue,sat,lit){const k=hue+'_'+sat+'_'+lit;if(sprites[k])return sprites[k];
+  const s=document.createElement('canvas');s.width=s.height=64;const g=s.getContext('2d');
+  const rg=g.createRadialGradient(32,32,0,32,32,32);
+  rg.addColorStop(0,`hsla(${hue},${sat}%,${lit}%,1)`);
+  rg.addColorStop(.3,`hsla(${hue},${sat}%,${lit}%,.5)`);
+  rg.addColorStop(1,`hsla(${hue},${sat}%,${lit}%,0)`);
+  g.fillStyle=rg;g.fillRect(0,0,64,64);sprites[k]=s;return s}
+function hueSprite(h){h=((Math.round(h/8)*8)%360+360)%360;return sprite(h,92,68)}
+const lightSprite=sprite(46,100,80),coreSprite=sprite(50,60,96),mistSprite=sprite(214,70,62);
+
+/* ============ cavern rock ============ */
+function buildRock(){
+  const seed=(Math.random()*1e9)|0;
+  const rA=mulberry32(seed),rB=mulberry32(seed^0x9e3779b9);
+  const n1=vnoise(rA),n2=vnoise(rA),n3=vnoise(rA),n4=vnoise(rB),n5=vnoise(rB),n6=vnoise(rB);
+  floorPts=[];ceilPts=[];
+  for(let x=0;x<=W+STEP;x+=STEP){
+    const edge=1-Math.sin(Math.PI*(x/W));
+    const fh=H*(0.10+0.10*edge+0.075*n1(x*0.004)+0.035*n2(x*0.014)+0.014*n3(x*0.06));
+    const ch=H*(0.08+0.10*edge+0.07*n4(x*0.004)+0.03*n5(x*0.015)+0.012*n6(x*0.06));
+    floorPts.push({x,y:H-fh});ceilPts.push({x,y:ch});
+  }
+  rock=document.createElement('canvas');rock.width=Math.ceil(W*dpr);rock.height=Math.ceil(H*dpr);
+  const g=rock.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);
+  /* ceiling slab */
+  let grad=g.createLinearGradient(0,0,0,H*0.45);
+  grad.addColorStop(0,'#161d31');grad.addColorStop(1,'#0a0e1c');
+  g.beginPath();g.moveTo(-10,-10);for(const p of ceilPts)g.lineTo(p.x,p.y);g.lineTo(W+10,-10);g.closePath();
+  g.fillStyle=grad;g.fill();
+  g.strokeStyle='rgba(140,170,220,.05)';g.lineWidth=1;
+  for(let s=1;s<=4;s++){g.beginPath();
+    for(let i=0;i<ceilPts.length;i++){const p=ceilPts[i],y=p.y-s*9-Math.sin(i*0.7+s)*2;i?g.lineTo(p.x,y):g.moveTo(p.x,y)}g.stroke()}
+  /* floor slab */
+  grad=g.createLinearGradient(0,H*0.55,0,H);
+  grad.addColorStop(0,'#0a0e1c');grad.addColorStop(1,'#182036');
+  g.beginPath();g.moveTo(-10,H+10);for(const p of floorPts)g.lineTo(p.x,p.y);g.lineTo(W+10,H+10);g.closePath();
+  g.fillStyle=grad;g.fill();
+  for(let s=1;s<=4;s++){g.beginPath();
+    for(let i=0;i<floorPts.length;i++){const p=floorPts[i],y=p.y+s*9+Math.sin(i*0.6+s)*2;i?g.lineTo(p.x,y):g.moveTo(p.x,y)}g.stroke()}
+  /* mineral speckle */
+  const rs=mulberry32(seed^0x51ab3d);g.fillStyle='rgba(160,190,235,.055)';
+  for(let i=0;i<420;i++){const x=rs()*W;
+    if(rs()<0.5){g.fillRect(x,rs()*sampleAt(ceilPts,x)*0.92,1.4,1.4)}
+    else{const fy=sampleAt(floorPts,x);g.fillRect(x,fy+rs()*(H-fy)*0.92,1.4,1.4)}}
+  /* rim light on both edges */
+  g.lineWidth=1.6;g.strokeStyle='rgba(150,185,230,.20)';
+  g.beginPath();ceilPts.forEach((p,i)=>i?g.lineTo(p.x,p.y):g.moveTo(p.x,p.y));g.stroke();
+  g.beginPath();floorPts.forEach((p,i)=>i?g.lineTo(p.x,p.y):g.moveTo(p.x,p.y));g.stroke();
+  g.lineWidth=5;g.strokeStyle='rgba(150,185,230,.05)';
+  g.beginPath();ceilPts.forEach((p,i)=>i?g.lineTo(p.x,p.y):g.moveTo(p.x,p.y));g.stroke();
+  g.beginPath();floorPts.forEach((p,i)=>i?g.lineTo(p.x,p.y):g.moveTo(p.x,p.y));g.stroke();
+  /* stalactites (drip sources) */
+  stalactites=[];pools=[];
+  const count=clamp(Math.round(W/340),3,8);
+  for(let i=0;i<count;i++){
+    const x=W*rnd(0.06,0.94),cy=sampleAt(ceilPts,x);
+    const len=rnd(34,90)*(H/820)+rnd(0,26),wdt=rnd(9,20),tipY=cy+len;
+    const gg=g.createLinearGradient(x,cy,x,tipY);
+    gg.addColorStop(0,'#131a2d');gg.addColorStop(1,'#0c1120');
+    g.beginPath();g.moveTo(x-wdt/2,cy-2);
+    g.quadraticCurveTo(x-wdt*0.18,cy+len*0.55,x,tipY);
+    g.quadraticCurveTo(x+wdt*0.18,cy+len*0.55,x+wdt/2,cy-2);
+    g.closePath();g.fillStyle=gg;g.fill();
+    g.strokeStyle='rgba(160,195,240,.16)';g.lineWidth=1;
+    g.beginPath();g.moveTo(x-wdt*0.32,cy);g.quadraticCurveTo(x-wdt*0.14,cy+len*0.5,x-0.5,tipY-1);g.stroke();
+    stalactites.push({x,tipY});pools.push({x,y:0});
+  }
+  pools.forEach(p=>p.y=sampleAt(floorPts,p.x)+3);
+  /* stalagmite bumps */
+  const bumps=clamp(Math.round(W/420),2,6);
+  for(let i=0;i<bumps;i++){const x=W*rnd(0.05,0.95),fy=sampleAt(floorPts,x),h2=rnd(16,52),w2=rnd(14,34);
+    g.beginPath();g.moveTo(x-w2/2,fy+2);g.quadraticCurveTo(x-w2*0.15,fy-h2*0.5,x,fy-h2);
+    g.quadraticCurveTo(x+w2*0.15,fy-h2*0.5,x+w2/2,fy+2);g.closePath();g.fillStyle='#101627';g.fill()}
+}
+
+/* ============ state ============ */
+let crystals=[],shards=[],sparkles=[],ripples=[],splashes=[],dust=[],drips=[],dustPuffs=[];
+let phase='grow',tremorT=0,shattered=false,shakeAmp=0;
+let biomass=0,threshold=1,spawnTimer=0,crystalSeq=0;
+const light={x:innerWidth/2,y:innerHeight*0.4};
+const mouse={x:innerWidth/2,y:innerHeight*0.4,on:false};
+let t=0,hudT=0;
+
+/* ============ crystals ============ */
+function mkBranch(x0,y0,angle,maxLen,w,depth,pre){
+  return {x0,y0,angle,len:pre?maxLen*rnd(0.25,1):2,maxLen,w,depth,
+    speed:rnd(14,30)*(H/820+0.4),forked:false,pOff:Math.random(),pSpd:rnd(0.12,0.35)};
+}
+function spawnCrystal(x,surf,pre){
+  const hue=pick(PALETTE)+rnd(-8,8);
+  const c={id:++crystalSeq,x,surf,hue,branches:[],age:0,biomass:0};
+  const baseY=surf==='floor'?floorAt(x)+4:ceilAt(x)-4;
+  const dir=surf==='floor'?-Math.PI/2:Math.PI/2;
+  const trunks=1+((Math.random()*2.2)|0);
+  for(let i=0;i<trunks;i++)
+    c.branches.push(mkBranch(x+rnd(-6,6),baseY,dir+rnd(-0.38,0.38),rnd(H*0.10,H*0.24),rnd(5.5,12),0,pre));
+  crystals.push(c);return c;
+}
+function updateCrystals(dt){
+  biomass=0;
+  for(const c of crystals){
+    c.age+=dt;let cm=0;const add=[];
+    for(let i=0;i<c.branches.length;i++){
+      const b=c.branches[i];
+      if(b.len<b.maxLen)b.len=Math.min(b.maxLen,b.len+b.speed*dt*(0.75+0.25*Math.sin(t*0.8+b.pOff*7)));
+      cm+=b.len*b.w;
+      /* branching rule: fork once past half-growth, up to depth 2 */
+      if(!b.forked&&b.depth<2&&b.len>b.maxLen*0.5&&c.branches.length+add.length<15&&Math.random()<dt*0.85){
+        b.forked=true;
+        const n=Math.random()<0.55?1:2,s0=Math.random()<0.5?-1:1;
+        for(let k=0;k<n;k++){
+          const side=k===0?s0:-s0;
+          const ang=b.angle+side*rnd(0.42,0.95),pos=rnd(0.55,0.88);
+          add.push(mkBranch(b.x0+Math.cos(b.angle)*b.len*pos,b.y0+Math.sin(b.angle)*b.len*pos,
+            ang,b.maxLen*rnd(0.38,0.62),Math.max(2.6,b.w*0.6),b.depth+1,false));
+        }
+      }
+    }
+    c.branches.push(...add);
+    c.biomass=cm;biomass+=cm;
+  }
+}
+function drawBranch(b,hue){
+  const dx=Math.cos(b.angle),dy=Math.sin(b.angle),px=-dy,py=dx;
+  const L=b.len;if(L<2)return;
+  const w=b.w*(0.55+0.45*Math.min(1,L/b.maxLen));
+  const tx=b.x0+dx*L,ty=b.y0+dy*L;
+  const sL=L*0.74,sw=w*0.52,sx=b.x0+dx*sL,sy=b.y0+dy*sL;
+  /* refraction: facet brightness from angle to the wandering light */
+  const la=Math.atan2(light.y-(b.y0+dy*L*0.55),light.x-(b.x0+dx*L*0.55));
+  const facing=Math.cos(b.angle-la);
+  const bright=0.45+0.55*Math.max(0,facing);
+  const spec=Math.pow(Math.max(0,facing),5);
+  const k=Math.sin(la-b.angle)>=0?1:-1;
+  const g=ctx.createLinearGradient(b.x0,b.y0,tx,ty);
+  g.addColorStop(0,`hsla(${hue},62%,${8+9*bright}%,.97)`);
+  g.addColorStop(.55,`hsla(${hue},80%,${22+30*bright}%,.96)`);
+  g.addColorStop(1,`hsla(${hue},96%,${55+34*bright}%,.97)`);
+  ctx.fillStyle=g;
+  ctx.beginPath();
+  ctx.moveTo(b.x0+px*w,b.y0+py*w);ctx.lineTo(sx+px*sw,sy+py*sw);ctx.lineTo(tx,ty);
+  ctx.lineTo(sx-px*sw,sy-py*sw);ctx.lineTo(b.x0-px*w,b.y0-py*w);
+  ctx.closePath();ctx.fill();
+  /* lit facet */
+  ctx.fillStyle=`hsla(${hue},100%,82%,${0.10+0.34*spec})`;
+  ctx.beginPath();ctx.moveTo(b.x0,b.y0);
+  ctx.lineTo(b.x0+px*w*k,b.y0+py*w*k);ctx.lineTo(sx+px*sw*k,sy+py*sw*k);ctx.lineTo(tx,ty);
+  ctx.closePath();ctx.fill();
+  /* shaded facet */
+  ctx.fillStyle=`hsla(${hue+14},70%,10%,.28)`;
+  ctx.beginPath();ctx.moveTo(b.x0,b.y0);
+  ctx.lineTo(b.x0-px*w*k,b.y0-py*w*k);ctx.lineTo(sx-px*sw*k,sy-py*sw*k);ctx.lineTo(tx,ty);
+  ctx.closePath();ctx.fill();
+  /* ridge */
+  ctx.strokeStyle=`hsla(${hue},100%,88%,${0.14+0.55*spec})`;ctx.lineWidth=0.9;
+  ctx.beginPath();ctx.moveTo(b.x0,b.y0);ctx.lineTo(tx,ty);ctx.stroke();
+  /* mature tip glint */
+  if(L>b.maxLen*0.96){
+    ctx.globalCompositeOperation='lighter';
+    const a=clamp((0.25+0.3*Math.max(0,Math.sin(t*2.1+b.pOff*9)))*(0.4+0.6*spec+0.3*bright),0,0.7);
+    ctx.globalAlpha=a;const s=w*3.2;
+    ctx.drawImage(hueSprite(hue),tx-s/2,ty-s/2,s,s);
+    ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
+  }
+  /* internal glimmer travelling up the shaft */
+  if(L>26){
+    const q=(t*b.pSpd+b.pOff)%1;
+    ctx.globalCompositeOperation='lighter';
+    ctx.globalAlpha=Math.sin(Math.PI*q)*0.5*(0.35+0.65*bright);
+    const s2=w*2.4;
+    ctx.drawImage(hueSprite(hue),b.x0+dx*L*q-s2/2,b.y0+dy*L*q-s2/2,s2,s2);
+    ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
+  }
+}
+function drawCrystals(){
+  for(const c of crystals){
+    ctx.globalCompositeOperation='lighter';
+    ctx.globalAlpha=0.16+0.06*Math.sin(t*1.3+c.id);
+    const bs=70+c.biomass*0.004;
+    ctx.drawImage(hueSprite(c.hue),c.x-bs/2,(c.surf==='floor'?floorAt(c.x):ceilAt(c.x))-bs/2,bs,bs);
+    ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
+    for(const b of c.branches)drawBranch(b,c.hue);
+  }
+}
+
+/* ============ sparkles ============ */
+function updateSparkles(dt){
+  if(Math.random()<dt*6&&crystals.length){
+    const c=pick(crystals),b=pick(c.branches);
+    if(b.len>10){const q=rnd(0.15,1);
+      sparkles.push({x:b.x0+Math.cos(b.angle)*b.len*q,y:b.y0+Math.sin(b.angle)*b.len*q,
+        life:1,hue:c.hue+rnd(-14,14),s:rnd(6,16)})}
+  }
+  for(let i=sparkles.length-1;i>=0;i--){sparkles[i].life-=dt*1.4;if(sparkles[i].life<=0)sparkles.splice(i,1)}
+}
+function drawSparkles(){
+  ctx.globalCompositeOperation='lighter';
+  for(const s of sparkles){
+    const a=Math.sin(Math.PI*clamp(s.life,0,1));
+    ctx.globalAlpha=a*0.9;
+    ctx.drawImage(hueSprite(s.hue),s.x-s.s/2,s.y-s.s/2,s.s,s.s);
+    ctx.globalAlpha=a*0.5;ctx.strokeStyle='hsla(0,0%,100%,.8)';ctx.lineWidth=0.7;
+    const r=s.s*0.55;
+    ctx.beginPath();ctx.moveTo(s.x-r,s.y);ctx.lineTo(s.x+r,s.y);
+    ctx.moveTo(s.x,s.y-r);ctx.lineTo(s.x,s.y+r);ctx.stroke();
+  }
+  ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
+}
+
+/* ============ caustics on the rock ============ */
+function drawCaustics(){
+  ctx.globalCompositeOperation='lighter';
+  for(let i=0;i<5;i++){ /* wandering ambient patches */
+    const x=clamp(light.x+Math.sin(t*0.26+i*2.4)*W*0.30,W*0.03,W*0.97);
+    const onFloor=i<3,y=onFloor?floorAt(x)+4:ceilAt(x)-4;
+    const hue=(t*7+i*72)%360,s=130+60*Math.sin(t*0.9+i*1.7);
+    ctx.globalAlpha=0.05+0.035*(0.5+0.5*Math.sin(t*1.8+i*2.2));
+    ctx.save();ctx.translate(x,y);ctx.scale(1,0.3);
+    ctx.drawImage(hueSprite(hue),-s/2,-s/2,s,s);ctx.restore();
+  }
+  for(const c of crystals){ /* crystal-tinted refraction */
+    if(c.biomass<900)continue;
+    const size=clamp(60+c.biomass*0.012,60,190);
+    const a=0.05+0.04*Math.sin(t*1.4+c.id*2.2);
+    if(c.surf==='floor'){
+      const x=clamp(c.x+(c.x-light.x)*0.22,10,W-10),y=floorAt(x)+5;
+      ctx.globalAlpha=a;ctx.save();ctx.translate(x,y);ctx.scale(1,0.3);
+      ctx.drawImage(hueSprite(c.hue),-size/2,-size/2,size,size);ctx.restore();
+    }else{
+      const x=clamp(c.x+(c.x-light.x)*0.45,10,W-10),y=floorAt(x)+5;
+      ctx.globalAlpha=a*0.9;ctx.save();ctx.translate(x,y);ctx.scale(1,0.28);
+      ctx.drawImage(hueSprite(c.hue),-size/2,-size/2,size,size);ctx.restore();
+      ctx.globalAlpha=a*0.7;
+      ctx.drawImage(hueSprite(c.hue),c.x-size*0.4,ceilAt(c.x)-size*0.4,size*0.8,size*0.8);
+    }
+  }
+  ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
+}
+
+/* ============ drips, pools, ripples ============ */
+function initDrips(){drips=stalactites.map(s=>({x:s.x,tipY:s.tipY,state:'form',t:rnd(0.5,6),vy:0,y:0}))}
+function updateDrips(dt){
+  for(const d of drips){
+    if(d.state==='form'){d.t-=dt;if(d.t<=0){d.state='fall';d.y=d.tipY;d.vy=12}}
+    else{d.vy+=880*dt;d.y+=d.vy*dt;
+      const fy=floorAt(d.x)-2;
+      if(d.y>=fy){
+        ripples.push({x:d.x,y:floorAt(d.x)+3,r:2,life:1});
+        for(let i=0;i<3;i++)splashes.push({x:d.x,y:fy,vx:rnd(-46,46),vy:rnd(-140,-50),life:1});
+        d.state='form';d.t=rnd(2.5,8);
+      }}
+  }
+  for(let i=ripples.length-1;i>=0;i--){const r=ripples[i];r.r+=34*dt;r.life-=dt*0.8;if(r.life<=0)ripples.splice(i,1)}
+  for(let i=splashes.length-1;i>=0;i--){const s=splashes[i];s.vy+=700*dt;s.x+=s.vx*dt;s.y+=s.vy*dt;s.life-=dt*1.6;if(s.life<=0)splashes.splice(i,1)}
+}
+function drawPools(){
+  for(const p of pools){
+    const near=clamp(1-Math.abs(light.x-p.x)/420,0,1);
+    ctx.beginPath();ctx.ellipse(p.x,p.y,30,6.5,0,0,Math.PI*2);
+    ctx.fillStyle='rgba(9,14,26,.85)';ctx.fill();
+    ctx.strokeStyle=`rgba(170,210,245,${0.10+0.22*near})`;ctx.lineWidth=1;ctx.stroke();
+    if(near>0.05){ctx.globalCompositeOperation='lighter';ctx.globalAlpha=0.16*near;
+      ctx.save();ctx.translate(p.x,p.y);ctx.scale(1,0.25);ctx.drawImage(lightSprite,-26,-26,52,52);ctx.restore();
+      ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over'}
+  }
+  for(const r of ripples){
+    const a=r.life*0.5;
+    ctx.strokeStyle=`hsla(196,85%,80%,${a})`;ctx.lineWidth=1.1;
+    ctx.beginPath();ctx.ellipse(r.x,r.y,r.r,r.r*0.28,0,0,Math.PI*2);ctx.stroke();
+    ctx.strokeStyle=`hsla(196,85%,85%,${a*0.5})`;
+    ctx.beginPath();ctx.ellipse(r.x,r.y,r.r*0.55,r.r*0.16,0,0,Math.PI*2);ctx.stroke();
+  }
+  ctx.fillStyle='rgba(190,225,250,.7)';
+  for(const s of splashes){ctx.globalAlpha=s.life*0.8;ctx.beginPath();ctx.arc(s.x,s.y,1.3,0,Math.PI*2);ctx.fill()}
+  ctx.globalAlpha=1;
+  for(const d of drips){
+    if(d.state==='form'){
+      if(d.t<1.2){
+        const r=clamp(1-d.t/1.2,0,1)*3+0.6;
+        ctx.fillStyle='rgba(185,220,250,.85)';
+        ctx.beginPath();ctx.arc(d.x,d.tipY+r*0.7,r,0,Math.PI*2);ctx.fill();
+        ctx.fillStyle='rgba(255,255,255,.6)';
+        ctx.beginPath();ctx.arc(d.x-r*0.3,d.tipY+r*0.45,r*0.3,0,Math.PI*2);ctx.fill();
+      }
+    }else{
+      ctx.fillStyle='rgba(190,225,252,.9)';
+      ctx.save();ctx.translate(d.x,d.y);ctx.scale(1,1+Math.min(1.4,d.vy/500));
+      ctx.beginPath();ctx.arc(0,0,2.4,0,Math.PI*2);ctx.fill();ctx.restore();
+    }
+  }
+}
+
+/* ============ tremor cycle & shards ============ */
+function updateCycle(dt){
+  if(phase==='grow'){
+    if(biomass>threshold){phase='tremor';tremorT=0;shattered=false}
+  }else{
+    tremorT+=dt;
+    const p=tremorT/2.6;
+    const env=p<0.3?p/0.3:Math.max(0,1-(p-0.3)/0.7);
+    shakeAmp=env*7*(reduced?0.3:1);
+    if(!shattered&&tremorT>0.85){shatterOldest();shattered=true}
+    if(tremorT>2.6){phase='grow';shakeAmp=0;threshold=W*H*rnd(0.015,0.021);spawnTimer=1.2}
+  }
+}
+function shatterOldest(){
+  const n=clamp(Math.floor(crystals.length*0.5),2,crystals.length);
+  const doomed=crystals.splice(0,n); /* oldest first */
+  for(const c of doomed){
+    for(const b of c.branches){
+      const dx=Math.cos(b.angle),dy=Math.sin(b.angle);
+      const count=2+((Math.random()*2)|0);
+      for(let i=0;i<count;i++){
+        const q=rnd(0.15,1),x=b.x0+dx*b.len*q,y=b.y0+dy*b.len*q;
+        const s=Math.max(3,b.w*rnd(0.5,1.1));
+        shards.push({x,y,vx:rnd(-90,90)+dx*rnd(10,70),vy:rnd(-30,60)+dy*rnd(10,70),
+          rot:rnd(0,6.3),vr:rnd(-4,4),s,life:1,hue:c.hue+rnd(-10,10),
+          pts:[[0,-s],[s*0.7,s*0.6],[-s*0.6,s*0.5]]});
+      }
+      for(let i=0;i<3;i++)dustPuffs.push({x:b.x0+dx*b.len*rnd(0,1),y:b.y0+dy*b.len*rnd(0,1),
+        vx:rnd(-30,30),vy:rnd(-40,10),life:1,s:rnd(10,26)});
+    }
+  }
+}
+function updateShards(dt){
+  for(let i=shards.length-1;i>=0;i--){
+    const s=shards[i];
+    s.vy+=520*dt;s.x+=s.vx*dt;s.y+=s.vy*dt;s.rot+=s.vr*dt;
+    const fy=floorAt(s.x)-2;
+    if(s.y>fy){s.y=fy;s.vy*=-0.38;s.vx*=0.6;s.vr*=0.5;if(Math.abs(s.vy)<26)s.vy=0}
+    s.life-=dt*(s.vy===0?0.9:0.45); /* dissolve faster once settled */
+    if(s.life<=0)shards.splice(i,1);
+  }
+  for(let i=dustPuffs.length-1;i>=0;i--){const d=dustPuffs[i];
+    d.x+=d.vx*dt;d.y+=d.vy*dt;d.vy-=6*dt;d.life-=dt*0.7;if(d.life<=0)dustPuffs.splice(i,1)}
+}
+function drawShards(){
+  for(const s of shards){
+    const a=clamp(s.life,0,1);
+    ctx.save();ctx.translate(s.x,s.y);ctx.rotate(s.rot);
+    ctx.scale(0.35+0.65*a,0.35+0.65*a);ctx.globalAlpha=a*0.95;
+    ctx.fillStyle=`hsla(${s.hue},85%,${58+20*a}%,.95)`;
+    ctx.beginPath();ctx.moveTo(s.pts[0][0],s.pts[0][1]);ctx.lineTo(s.pts[1][0],s.pts[1][1]);
+    ctx.lineTo(s.pts[2][0],s.pts[2][1]);ctx.closePath();ctx.fill();
+    ctx.strokeStyle=`hsla(${s.hue},100%,88%,${a*0.6})`;ctx.lineWidth=0.8;ctx.stroke();
+    ctx.restore();
+  }
+  ctx.globalAlpha=1;
+  ctx.globalCompositeOperation='lighter';
+  for(const d of dustPuffs){ctx.globalAlpha=d.life*0.12;ctx.drawImage(mistSprite,d.x-d.s/2,d.y-d.s/2,d.s,d.s)}
+  ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
+}
+
+/* ============ wandering light, dust, mist ============ */
+function updateLight(dt){
+  const wx=W*0.5+Math.sin(t*0.052)*W*0.30+Math.sin(t*0.021+1.7)*W*0.13;
+  const wy=H*0.42+Math.sin(t*0.043+0.6)*H*0.17+Math.sin(t*0.011)*H*0.05;
+  let tx=wx,ty=wy;
+  if(mouse.on){tx=wx*0.72+mouse.x*0.28;ty=wy*0.72+mouse.y*0.28}
+  const k=1-Math.pow(0.02,dt);
+  light.x+=(tx-light.x)*k;light.y+=(ty-light.y)*k;
+}
+function drawLight(){
+  ctx.globalCompositeOperation='lighter';
+  const pulse=1+0.08*Math.sin(t*2.3)+0.05*Math.sin(t*5.1);
+  let s=240*pulse;ctx.globalAlpha=0.5;ctx.drawImage(lightSprite,light.x-s/2,light.y-s/2,s,s);
+  s=64*pulse;ctx.globalAlpha=0.85;ctx.drawImage(lightSprite,light.x-s/2,light.y-s/2,s,s);
+  s=14;ctx.globalAlpha=0.95;ctx.drawImage(coreSprite,light.x-s/2,light.y-s/2,s,s);
+  ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
+}
+function initDust(){dust=[];for(let i=0;i<46;i++)dust.push({x:Math.random()*W,y:Math.random()*H,s:rnd(6,20),ph:rnd(0,7),sz:rnd(0.6,1.7)})}
+function updateDust(dt){for(const d of dust){d.y-=d.s*dt;d.x+=Math.sin(t*0.6+d.ph)*8*dt;if(d.y<-4){d.y=H+4;d.x=Math.random()*W}}}
+function drawDust(){
+  ctx.globalCompositeOperation='lighter';ctx.fillStyle='rgba(210,228,255,1)';
+  for(const d of dust){
+    const near=clamp(1-Math.hypot(d.x-light.x,d.y-light.y)/360,0,1);
+    ctx.globalAlpha=0.04+0.30*near*near;
+    ctx.beginPath();ctx.arc(d.x,d.y,d.sz,0,Math.PI*2);ctx.fill();
+  }
+  ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
+}
+function drawMist(){
+  ctx.globalCompositeOperation='lighter';
+  for(let i=0;i<3;i++){
+    const x=W*(0.5+0.42*Math.sin(t*0.03+i*2.6)),y=H*(0.62+0.12*Math.sin(t*0.023+i*1.9)),s=W*0.5;
+    ctx.globalAlpha=0.028+0.014*Math.sin(t*0.4+i*2);
+    ctx.save();ctx.translate(x,y);ctx.scale(1,0.32);ctx.drawImage(mistSprite,-s/2,-s/2,s,s);ctx.restore();
+  }
+  ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
+}
+
+/* ============ spawning & hud ============ */
+function updateSpawning(dt){
+  if(phase!=='grow')return;
+  const maxC=clamp(Math.round(W/240),5,12);
+  spawnTimer-=dt;
+  if(crystals.length<maxC&&biomass<threshold*0.92&&spawnTimer<=0){
+    spawnCrystal(W*rnd(0.05,0.95),Math.random()<0.62?'floor':'ceiling',false);
+    spawnTimer=rnd(1.6,4.0);
+  }
+}
+function updateHud(dt){
+  hudT-=dt;if(hudT>0)return;hudT=0.22;
+  const pct=clamp(Math.round(biomass/threshold*100),0,100);
+  const status=phase==='tremor'?(shattered?'<em>resettling</em>':'<em>tremor · shattering</em>')
+    :(pct>86?'<em>resonance near</em>':'accretion');
+  hud.innerHTML=`growth <em>${String(pct).padStart(3,'0')}%</em> · formations <em>${String(crystals.length).padStart(2,'0')}</em> · drips <em>${drips.length}</em> · phase: ${status}`;
+}
+
+/* ============ interaction ============ */
+addEventListener('pointermove',e=>{mouse.x=e.clientX;mouse.y=e.clientY;mouse.on=true});
+addEventListener('pointerleave',()=>mouse.on=false);
+addEventListener('pointerdown',e=>{
+  const x=e.clientX,y=e.clientY;
+  for(let i=0;i<10;i++)sparkles.push({x:x+rnd(-14,14),y:y+rnd(-14,14),life:1,hue:pick(PALETTE)+rnd(-10,10),s:rnd(8,20)});
+  const df=Math.abs(y-floorAt(x)),dc=Math.abs(y-ceilAt(x));
+  if(Math.min(df,dc)<H*0.34&&crystals.length<20)
+    spawnCrystal(clamp(x,20,W-20),df<dc?'floor':'ceiling',false);
+});
+
+/* ============ boot ============ */
+function resize(){
+  const ow=W,oh=H;
+  W=innerWidth;H=innerHeight;dpr=Math.min(devicePixelRatio||1,1.75);
+  canvas.width=Math.ceil(W*dpr);canvas.height=Math.ceil(H*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  buildRock();initDust();initDrips();bgGrad=null;
+  if(ow>0){const kx=W/ow,ky=H/oh;
+    for(const c of crystals)for(const b of c.branches){b.x0*=kx;b.y0*=ky;b.len*=ky;b.maxLen*=ky;b.w*=kx}}
+}
+function seedScene(){
+  crystals=[];shards=[];sparkles=[];ripples=[];splashes=[];dustPuffs=[];
+  const n=clamp(Math.round(W/260),4,8);
+  for(let i=0;i<n;i++)spawnCrystal(W*rnd(0.07,0.93),Math.random()<0.6?'floor':'ceiling',true);
+  initDust();initDrips();
+  threshold=W*H*rnd(0.015,0.021);
+  phase='grow';spawnTimer=1;
+}
+function drawBackground(){
+  if(!bgGrad){bgGrad=ctx.createLinearGradient(0,0,0,H);
+    bgGrad.addColorStop(0,'#05060d');bgGrad.addColorStop(0.45,'#0a0f20');
+    bgGrad.addColorStop(0.75,'#0b1226');bgGrad.addColorStop(1,'#070a16')}
+  ctx.fillStyle=bgGrad;ctx.fillRect(0,0,W,H);
+}
+let last=performance.now();
+function frame(now){
+  const dt=Math.min(0.05,(now-last)/1000);last=now;t+=dt;
+  updateLight(dt);updateCrystals(dt);updateSpawning(dt);updateCycle(dt);
+  updateDrips(dt);updateShards(dt);updateSparkles(dt);updateDust(dt);updateHud(dt);
+  drawBackground();
+  ctx.save();
+  if(shakeAmp>0.05)ctx.translate((Math.random()*2-1)*shakeAmp,(Math.random()*2-1)*shakeAmp);
+  ctx.drawImage(rock,0,0,W,H);
+  drawCaustics();
+  drawPools();
+  drawCrystals();
+  drawShards();
+  drawSparkles();
+  drawLight();
+  drawDust();
+  drawMist();
+  ctx.restore();
+  requestAnimationFrame(frame);
+}
+addEventListener('resize',resize);
+resize();seedScene();
+setTimeout(()=>titleEl.classList.add('dim'),7000);
+requestAnimationFrame(n=>{last=n;frame(n)});
+</script>
+</body>
+</html>

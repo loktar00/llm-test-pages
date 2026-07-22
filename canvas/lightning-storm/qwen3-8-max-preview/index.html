@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#04050c">
+<title>Lightning Storm — Plains Nocturne</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#04050c}
+  #c{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none}
+  body.idle #c{cursor:none}
+  #hud{position:fixed;left:34px;bottom:30px;z-index:5;pointer-events:none;user-select:none;
+       opacity:0;transition:opacity 1.6s ease}
+  #hud.on{opacity:1}
+  #hud .t{font-family:"Palatino Linotype","Book Antiqua",Palatino,Georgia,serif;
+          font-size:13px;font-weight:400;letter-spacing:.46em;text-transform:uppercase;
+          color:rgba(208,217,242,.9);text-shadow:0 1px 14px rgba(0,0,0,.8)}
+  #hud .s{margin-top:8px;font:italic 12px/1.4 Georgia,"Times New Roman",serif;
+          letter-spacing:.16em;color:rgba(163,178,212,.62);text-shadow:0 1px 10px rgba(0,0,0,.7)}
+  #hud .h{margin-top:16px;font:600 9.5px/1 "Segoe UI",system-ui,-apple-system,sans-serif;
+          letter-spacing:.32em;text-transform:uppercase;color:rgba(150,168,206,.45)}
+  #stat{position:fixed;right:34px;bottom:30px;z-index:5;pointer-events:none;user-select:none;
+        text-align:right;font:600 9.5px/1.9 "Segoe UI",system-ui,sans-serif;
+        letter-spacing:.3em;text-transform:uppercase;color:rgba(150,168,206,.5);
+        opacity:0;transition:opacity 1.6s ease}
+  #stat.on{opacity:1}
+  #meter{width:112px;height:2px;margin:5px 0 8px auto;background:rgba(140,160,200,.16);overflow:hidden}
+  #mfill{display:block;height:100%;width:100%;background:rgba(196,210,244,.75);
+         transform-origin:left center;transform:scaleX(0);transition:transform .28s linear}
+  #stat b{font-weight:600;color:rgba(205,216,244,.75);font-variant-numeric:tabular-nums;letter-spacing:.18em}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <div class="t">Lightning Storm</div>
+  <div class="s">rolling plains &middot; a night watch</div>
+  <div class="h">click — call a bolt &nbsp;&middot;&nbsp; space — salvo</div>
+</div>
+<div id="stat">
+  storm cycle
+  <div id="meter"><i id="mfill"></i></div>
+  strikes &nbsp;<b id="strikes">000</b>
+</div>
+<script>
+"use strict";
+(() => {
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const hud = document.getElementById('hud'), stat = document.getElementById('stat');
+const mfill = document.getElementById('mfill'), strikesEl = document.getElementById('strikes');
+const TAU = Math.PI * 2;
+const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+let W = 0, H = 0, DPR = 1, S = 1;
+let clouds = [], grass = [], rain = [], splashes = [], bolts = [], sheets = [], pending = [], fencePosts = [];
+let vignette = null;
+let flash = 0, skyFlash = 0, fx = 0, fy = 0;
+let wind = .8, millAng = 0, tPrev = 0, tNow = 0, strikes = 0, statT = 0, hudTimer = 0;
+
+/* ---------- helpers ---------- */
+const rand  = (a = 1, b) => b === void 0 ? Math.random() * a : a + Math.random() * (b - a);
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp  = (a, b, t) => a + (b - a) * t;
+const mixC  = (c, d, t) => [lerp(c[0], d[0], t), lerp(c[1], d[1], t), lerp(c[2], d[2], t)];
+const rgb   = (c, a = 1) => 'rgba(' + (c[0] | 0) + ',' + (c[1] | 0) + ',' + (c[2] | 0) + ',' + a + ')';
+function n1(t){ const i = Math.floor(t), f = t - i, u = f * f * (3 - 2 * f);
+  const r = n => { const s = Math.sin(n * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); };
+  return r(i) * (1 - u) + r(i + 1) * u; }
+/* storm activity arrives in slow, beating waves */
+function activity(t){ return clamp(.5 + .5 * Math.sin(t * .11 + 1.2) * Math.sin(t * .047 + 4.1) + .28 * Math.sin(t * .019 + 2.4), 0, 1); }
+
+/* ---------- rolling plains ---------- */
+const RIDGES = [
+  { base:.585, a1:.028, f1:1.9, p1:.6,  a2:.011, f2:5.1, p2:2.3, col:[17,23,40], lit:[88,106,146], fk:.95 },
+  { base:.705, a1:.042, f1:1.4, p1:2.9, a2:.016, f2:3.9, p2:.8,  col:[11,15,27], lit:[64,80,114],  fk:.80 },
+  { base:.865, a1:.048, f1:1.1, p1:4.6, a2:.020, f2:3.1, p2:1.7, col:[6,8,15],   lit:[42,54,82],   fk:.62 }
+];
+function ridgeY(r, x){ const u = x / W;
+  return (r.base + Math.sin(u * TAU * r.f1 + r.p1) * r.a1 + Math.sin(u * TAU * r.f2 + r.p2) * r.a2) * H; }
+
+function drawRidge(r, f){
+  const step = Math.max(12, W / 110);
+  ctx.beginPath();
+  ctx.moveTo(-6, H + 6); ctx.lineTo(-6, ridgeY(r, -6));
+  for (let x = -6 + step; x <= W + 6; x += step) ctx.lineTo(x, ridgeY(r, x));
+  ctx.lineTo(W + 6, H + 6); ctx.closePath();
+  ctx.fillStyle = rgb(mixC(r.col, r.lit, clamp(f * r.fk, 0, 1))); ctx.fill();
+  if (f > .02){ /* rim light on the crest during a flash */
+    ctx.beginPath();
+    for (let x = -6; x <= W + 6; x += step){ const y = ridgeY(r, x); x === -6 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); }
+    ctx.strokeStyle = 'rgba(185,202,240,' + (.22 * f * r.fk) + ')';
+    ctx.lineWidth = 1.1 * S; ctx.stroke();
+  }
+}
+
+/* ---------- layered clouds (pre-rendered tileable strips) ---------- */
+const CLOUDCFG = [
+  { yF:.02, bH:.26, cy:.55, sp:.34, sc:.75,  speed:7,  al:.75, den:.9,   litF:.7  },
+  { yF:.13, bH:.34, cy:.5,  sp:.30, sc:1.15, speed:13, al:.95, den:1,    litF:1   },
+  { yF:.30, bH:.30, cy:.45, sp:.28, sc:1.6,  speed:22, al:1,   den:1.05, litF:1.2 }
+];
+function puff(g, x, y, r, lit, o){
+  const gr = g.createRadialGradient(x, y - r * .15, r * .08, x, y, r);
+  if (lit){ gr.addColorStop(0, 'rgba(199,213,243,' + (.5 * o.al) + ')');
+            gr.addColorStop(.65, 'rgba(152,170,208,' + (.22 * o.al) + ')');
+            gr.addColorStop(1, 'rgba(152,170,208,0)'); }
+  else    { gr.addColorStop(0, 'rgba(26,31,48,' + (.62 * o.al) + ')');
+            gr.addColorStop(.7, 'rgba(20,24,40,' + (.3 * o.al) + ')');
+            gr.addColorStop(1, 'rgba(20,24,40,0)'); }
+  g.fillStyle = gr; g.beginPath(); g.arc(x, y, r, 0, TAU); g.fill();
+}
+function makeCloudLayer(o){
+  const stripW = Math.max(1024, Math.ceil(W * 1.5)), h = Math.max(64, Math.ceil(o.bH * H));
+  const paint = lit => {
+    const c = document.createElement('canvas'); c.width = stripW; c.height = h;
+    const g = c.getContext('2d');
+    const clusters = Math.round(stripW / (120 * S) * o.den);
+    for (let i = 0; i < clusters; i++){
+      const cx = rand(stripW), cy = h * o.cy + rand(-o.sp, o.sp) * h;
+      const n = 4 + (Math.random() * 6 | 0);
+      for (let j = 0; j < n; j++){
+        const px = cx + rand(-95, 95) * S * o.sc, py = cy + rand(-26, 26) * S * o.sc;
+        const r = rand(26, 68) * S * o.sc;
+        puff(g, px, py, r, lit, o);
+        puff(g, px - stripW, py, r, lit, o); /* wrap copies -> seamless tile */
+        puff(g, px + stripW, py, r, lit, o);
+      }
+    }
+    return c;
+  };
+  return { stripW, h, yF:o.yF, speed:o.speed * (REDUCED ? .45 : 1), litF:o.litF,
+           base:paint(false), lit:paint(true), off:rand(4096) };
+}
+function drawClouds(t, f){
+  const wk = .55 + wind * .45;
+  for (const L of clouds){
+    const off = ((t * L.speed * wk) + L.off) % L.stripW;
+    ctx.drawImage(L.base, -off, L.yF * H);
+    ctx.drawImage(L.base, L.stripW - off, L.yF * H);
+    const la = clamp(f * 1.3 * L.litF, 0, .95); /* lightning lights the deck from within */
+    if (la > .01){
+      ctx.globalAlpha = la;
+      ctx.drawImage(L.lit, -off, L.yF * H);
+      ctx.drawImage(L.lit, L.stripW - off, L.yF * H);
+      ctx.globalAlpha = 1;
+    }
+  }
+}
+
+/* ---------- sheet lightning inside the clouds ---------- */
+function spawnSheet(act){
+  const L = clouds[1 + (Math.random() * 2 | 0)];
+  sheets.push({ x:rand(W * .05, W * .95), y:L.yF * H + L.h * rand(.3, .7),
+    r:rand(120, 320) * S * (.7 + act * .7), born:tNow, life:rand(.3, .85), seed:rand(100) });
+  if (sheets.length > 6) sheets.shift();
+}
+function sheetI(s, t){ const a = (t - s.born) / s.life; if (a < 0 || a > 1) return 0;
+  return Math.sin(Math.PI * a) * (.5 + .5 * n1(t * 33 + s.seed)); }
+function drawSheets(){
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  for (const s of sheets){
+    const I = sheetI(s, tNow); if (I < .02) continue;
+    const g = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, s.r);
+    g.addColorStop(0, 'rgba(190,205,240,' + (.38 * I) + ')');
+    g.addColorStop(.55, 'rgba(150,170,220,' + (.16 * I) + ')');
+    g.addColorStop(1, 'rgba(150,170,220,0)');
+    ctx.fillStyle = g; ctx.fillRect(s.x - s.r, s.y - s.r, s.r * 2, s.r * 2);
+  }
+  ctx.restore();
+}
+
+/* ---------- forked bolts: recursive midpoint displacement ---------- */
+function createBolt(x0, y0, x1, y1, branchP){
+  const segs = [];
+  const dist = Math.hypot(x1 - x0, y1 - y0);
+  (function walk(ax, ay, bx, by, disp, g){
+    if (disp < 5 || g > 5){ segs.push({ ax, ay, bx, by, g }); return; }
+    const dx = bx - ax, dy = by - ay, l = Math.hypot(dx, dy) || 1;
+    const off = (Math.random() - .5) * disp;
+    const px = (ax + bx) / 2 + (-dy / l) * off, py = (ay + by) / 2 + (dx / l) * off;
+    walk(ax, ay, px, py, disp * .52, g);
+    walk(px, py, bx, by, disp * .52, g);
+    if (g < 3 && Math.random() < branchP){ /* fork */
+      const ang = Math.atan2(dy, dx) + (Math.random() < .5 ? -1 : 1) * rand(.35, .95);
+      const bl = l * rand(.5, 1.15);
+      walk(px, py, px + Math.cos(ang) * bl, py + Math.sin(ang) * bl, disp * .55, g + 1);
+    }
+  })(x0, y0, x1, y1, dist * .17, 0);
+  return segs;
+}
+function makeBoltObj(ox, oy, tx, ty, grounded, fk){
+  const pulses = [{ t:0, a:1, k:rand(11, 16) }];
+  const n = Math.random() < .7 ? 1 + (Math.random() * 2 | 0) : 0; /* restrikes */
+  for (let i = 0; i < n; i++) pulses.push({ t:rand(.06, .42), a:rand(.4, .95), k:rand(9, 15) });
+  pulses.sort((a, b) => a.t - b.t);
+  bolts.push({ segs:createBolt(ox, oy, tx, ty, grounded ? .13 : .22), ox, oy, tx, ty, grounded, fk,
+    born:tNow, life:pulses[pulses.length - 1].t + .42, pulses, seed:rand(100),
+    w:(grounded ? rand(2.5, 3.5) : rand(1.7, 2.5)) * S });
+  if (bolts.length > 4) bolts.shift();
+  strikes++;
+}
+function spawnBolt(p){
+  if (p.crawler){ /* intra-cloud crawler */
+    const ox = rand(W * .15, W * .85), oy = H * rand(.2, .38);
+    const tx = clamp(ox + (Math.random() < .5 ? -1 : 1) * rand(W * .15, W * .4), 20, W - 20);
+    makeBoltObj(ox, oy, tx, oy + rand(-50, 70) * S, false, .6);
+  } else {
+    const tx = p.x != null ? clamp(p.x, 10, W - 10) : rand(W * .05, W * .95);
+    const rr = Math.random(), ri = rr < .5 ? 2 : rr < .85 ? 1 : 0;
+    makeBoltObj(clamp(tx + rand(-90, 90) * S, 20, W - 20), H * rand(.22, .40),
+                tx, ridgeY(RIDGES[ri], tx) + rand(-6, 2) * S, true, ri === 0 ? .65 : 1);
+  }
+}
+function queueSalvo(act, cx){
+  const n = 1 + (Math.random() < act * .55 ? 1 : 0) + (Math.random() < act * .3 ? 1 : 0);
+  const t0 = tNow + rand(0, .08);
+  for (let i = 0; i < n; i++)
+    pending.push({ at:t0 + i * rand(.06, .3), x:cx != null ? cx + rand(-40, 40) * S : null,
+                   crawler:cx == null && Math.random() < .22 });
+}
+function boltI(b, t){
+  const a = t - b.born; if (a < 0 || a > b.life) return 0;
+  let i = 0;
+  for (const p of b.pulses){ const d = a - p.t; if (d >= 0) i += p.a * Math.exp(-d * p.k); }
+  return Math.min(1.25, i * (.82 + .36 * n1(a * 47 + b.seed)));
+}
+function drawBolts(){
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  for (const b of bolts){
+    const I = boltI(b, tNow); if (I < .02) continue;
+    let g = ctx.createRadialGradient(b.ox, b.oy, 0, b.ox, b.oy, H * .46);
+    g.addColorStop(0, 'rgba(160,182,238,' + (.30 * I * b.fk) + ')'); g.addColorStop(1, 'rgba(160,182,238,0)');
+    ctx.fillStyle = g; ctx.fillRect(b.ox - H * .46, b.oy - H * .46, H * .92, H * .92);
+    if (b.grounded){
+      g = ctx.createRadialGradient(b.tx, b.ty, 0, b.tx, b.ty, H * .34);
+      g.addColorStop(0, 'rgba(150,176,235,' + (.30 * I * b.fk) + ')'); g.addColorStop(1, 'rgba(150,176,235,0)');
+      ctx.fillStyle = g; ctx.fillRect(b.tx - H * .34, b.ty - H * .34, H * .68, H * .68);
+    }
+    const byGen = [];
+    for (const s of b.segs) (byGen[s.g] || (byGen[s.g] = [])).push(s);
+    for (let gg = 0; gg < byGen.length; gg++){
+      const arr = byGen[gg]; if (!arr) continue;
+      ctx.beginPath();
+      for (const s of arr){ ctx.moveTo(s.ax, s.ay); ctx.lineTo(s.bx, s.by); }
+      const bw = Math.max(.55, b.w * (1 - gg * .30));
+      ctx.lineWidth = bw * 3.2;  ctx.strokeStyle = 'rgba(105,135,255,' + Math.min(1, .10 * I) + ')'; ctx.stroke();
+      ctx.lineWidth = bw * 1.45; ctx.strokeStyle = 'rgba(172,198,255,' + Math.min(1, .32 * I) + ')'; ctx.stroke();
+      ctx.lineWidth = bw * .55;  ctx.strokeStyle = 'rgba(246,249,255,' + Math.min(1, .95 * I) + ')'; ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+/* ---------- sky ---------- */
+function drawSky(f){
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0,   rgb(mixC([4,6,14],   [88,108,160],  f * .45)));
+  g.addColorStop(.45, rgb(mixC([9,13,26],  [96,116,170],  f * .6)));
+  g.addColorStop(.72, rgb(mixC([22,30,50], [120,140,195], f * .85)));
+  g.addColorStop(1,   rgb(mixC([13,18,32], [80,98,150],   f * .7)));
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  const mg = ctx.createRadialGradient(W * .74, H * .13, 0, W * .74, H * .13, H * .5);
+  mg.addColorStop(0, 'rgba(150,170,212,.07)'); mg.addColorStop(1, 'rgba(150,170,212,0)');
+  ctx.fillStyle = mg; ctx.fillRect(0, 0, W, H * .7);
+}
+
+/* ---------- windmill on the far ridge ---------- */
+function drawWindmill(f){
+  const x = W * .235, y = ridgeY(RIDGES[0], x) + 2 * S, h = H * .115, top = y - h;
+  const col = rgb(mixC([12,16,29], [76,92,128], f * .85));
+  ctx.strokeStyle = col; ctx.fillStyle = col;
+  const bw = h * .17, tw = h * .05;
+  ctx.lineWidth = 1.4 * S;
+  ctx.beginPath();
+  ctx.moveTo(x - bw, y); ctx.lineTo(x - tw, top);
+  ctx.moveTo(x + bw, y); ctx.lineTo(x + tw, top);
+  for (let i = 0; i < 4; i++){
+    const t0 = i / 4, t1 = (i + 1) / 4;
+    const y0 = lerp(y, top, t0), y1 = lerp(y, top, t1);
+    const w0 = lerp(bw, tw, t0), w1 = lerp(bw, tw, t1);
+    ctx.moveTo(x - w0, y0); ctx.lineTo(x + w1, y1);
+    ctx.moveTo(x + w0, y0); ctx.lineTo(x - w1, y1);
+  }
+  ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x - h * .36, top); ctx.stroke();
+  ctx.fillRect(x - h * .50, top - h * .06, h * .15, h * .12);
+  const R = h * .5;
+  ctx.lineWidth = 1.1 * S;
+  ctx.beginPath();
+  for (let i = 0; i < 16; i++){
+    const a = millAng + i * TAU / 16;
+    ctx.moveTo(x + Math.cos(a) * R * .3, top + Math.sin(a) * R * .3);
+    ctx.lineTo(x + Math.cos(a) * R, top + Math.sin(a) * R);
+  }
+  ctx.stroke();
+  ctx.lineWidth = .8 * S;
+  ctx.beginPath(); ctx.arc(x, top, R, 0, TAU); ctx.stroke();
+  ctx.beginPath(); ctx.arc(x, top, h * .035, 0, TAU); ctx.fill();
+}
+
+/* ---------- cottonwoods ---------- */
+function drawTree(x, ri, s, f){
+  const y = ridgeY(RIDGES[ri], x), h = H * .05 * s;
+  const col = rgb(mixC([8,10,18], [58,72,104], f * .75));
+  ctx.strokeStyle = col; ctx.fillStyle = col;
+  ctx.lineWidth = 1.6 * S * s;
+  ctx.beginPath(); ctx.moveTo(x, y + 2 * S); ctx.lineTo(x + h * .05, y - h * .6); ctx.stroke();
+  const cy = y - h * .85;
+  ctx.beginPath();
+  const B = [[0,0,.42],[-.3,.12,.3],[.3,.1,.32],[-.14,-.22,.3],[.18,-.2,.28],[0,.22,.3]];
+  for (const b of B){ ctx.moveTo(x + b[0] * h + h * b[2], cy + b[1] * h); ctx.arc(x + b[0] * h, cy + b[1] * h, h * b[2], 0, TAU); }
+  ctx.fill();
+}
+
+/* ---------- farmhouse, one lit window ---------- */
+function drawHouse(t, f){
+  const x = W * .63, y = ridgeY(RIDGES[1], x) + 1 * S;
+  const w = H * .088, h = w * .52;
+  const flick = .78 + .22 * n1(t * 2.1 + 13.7); /* oil-lamp shimmer */
+  const body = mixC([9,11,19], [62,76,108], f * .7);
+  const roof = mixC([14,16,25], [76,90,124], f * .78);
+  const wx = x + w * .16, ww = w * .21, wh = h * .42, wl = wx - ww / 2, wt = y - h * .76;
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  let g = ctx.createRadialGradient(wx, wt + wh / 2, 0, wx, wt + wh / 2, w * .9);
+  g.addColorStop(0, 'rgba(255,178,92,' + (.2 * flick) + ')'); g.addColorStop(1, 'rgba(255,178,92,0)');
+  ctx.fillStyle = g; ctx.fillRect(wx - w * .9, wt + wh / 2 - w * .9, w * 1.8, w * 1.8);
+  g = ctx.createRadialGradient(wx, y + 3 * S, 0, wx, y + 3 * S, w * .7);
+  g.addColorStop(0, 'rgba(255,166,80,' + (.12 * flick) + ')'); g.addColorStop(1, 'rgba(255,166,80,0)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(wx, y + 3 * S, w * .7, w * .2, 0, 0, TAU); ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = rgb(body);
+  ctx.fillRect(x + w * .20, y - h - h * .78, w * .10, h * .8);           /* chimney */
+  ctx.fillStyle = rgb(mixC(body, [0,0,0], .3));
+  ctx.fillRect(x - w * .92, y - h * .50, w * .44, h * .50);              /* lean-to */
+  ctx.strokeStyle = rgb(roof); ctx.lineWidth = 2 * S;
+  ctx.beginPath(); ctx.moveTo(x - w * .96, y - h * .44); ctx.lineTo(x - w * .48, y - h * .74); ctx.stroke();
+  ctx.fillStyle = rgb(body);
+  ctx.fillRect(x - w / 2, y - h, w, h);                                  /* main block */
+  ctx.fillStyle = rgb(roof);
+  ctx.beginPath(); ctx.moveTo(x - w * .64, y - h); ctx.lineTo(x, y - h - h * .78); ctx.lineTo(x + w * .64, y - h);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = 'rgba(8,10,17,.95)';
+  ctx.fillRect(x - w * .07, y - h * .46, w * .13, h * .46);              /* door */
+  const dw = w * .15, dh = h * .30, dx = x - w * .30 - dw / 2, dy = y - h * .72;
+  ctx.fillStyle = 'rgba(15,19,31,.92)'; ctx.fillRect(dx, dy, dw, dh);    /* dark window */
+  ctx.strokeStyle = rgb(mixC(body, [0,0,0], .3)); ctx.lineWidth = 1 * S; ctx.strokeRect(dx, dy, dw, dh);
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';                  /* the lit window */
+  g = ctx.createRadialGradient(wx, wt + wh / 2, 0, wx, wt + wh / 2, w * .4);
+  g.addColorStop(0, 'rgba(255,196,120,' + (.55 * flick) + ')'); g.addColorStop(1, 'rgba(255,196,120,0)');
+  ctx.fillStyle = g; ctx.fillRect(wx - w * .4, wt + wh / 2 - w * .4, w * .8, w * .8);
+  ctx.restore();
+  const wg = ctx.createLinearGradient(0, wt, 0, wt + wh);
+  wg.addColorStop(0, 'rgba(255,216,142,' + (.95 * flick) + ')');
+  wg.addColorStop(1, 'rgba(255,158,64,' + (.92 * flick) + ')');
+  ctx.fillStyle = wg; ctx.fillRect(wl, wt, ww, wh);
+  ctx.strokeStyle = rgb(body); ctx.lineWidth = 1.1 * S;
+  ctx.beginPath(); ctx.moveTo(wx, wt); ctx.lineTo(wx, wt + wh);
+  ctx.moveTo(wl, wt + wh * .5); ctx.lineTo(wl + ww, wt + wh * .5); ctx.stroke();
+  ctx.strokeStyle = rgb(mixC(roof, [0,0,0], .15)); ctx.lineWidth = 1.3 * S;
+  ctx.strokeRect(wl - 1, wt - 1, ww + 2, wh + 2);
+}
+
+/* ---------- fence & grass ---------- */
+function drawFence(f){
+  if (fencePosts.length < 2) return;
+  const col = rgb(mixC([7,9,16], [46,58,86], f * .6));
+  ctx.strokeStyle = col;
+  const ph = H * .032;
+  ctx.lineWidth = 1.2 * S;
+  ctx.beginPath();
+  for (const px of fencePosts){ const y = ridgeY(RIDGES[2], px);
+    ctx.moveTo(px, y + 2 * S); ctx.lineTo(px + 1.5 * S, y - ph); }
+  ctx.stroke();
+  ctx.lineWidth = .8 * S;
+  for (const k of [.42, .78]){
+    ctx.beginPath();
+    let prev = null;
+    for (const px of fencePosts){
+      const y = ridgeY(RIDGES[2], px) - ph * k;
+      if (prev){ ctx.moveTo(prev.x, prev.y);
+        ctx.quadraticCurveTo((prev.x + px) / 2, (prev.y + y) / 2 + H * .006, px, y); }
+      prev = { x:px, y };
+    }
+    ctx.stroke();
+  }
+}
+function drawGrass(t, f){
+  ctx.strokeStyle = rgb(mixC([5,7,12], [42,54,80], f * .5), .95);
+  ctx.lineCap = 'round'; ctx.lineWidth = 1.05 * S;
+  ctx.beginPath();
+  for (const g of grass){
+    const sway = Math.sin(t * 2.1 + g.ph) + .6 * Math.sin(t * 3.9 + g.ph * 1.7);
+    const tipx = g.x + g.lean + sway * (2.5 + wind * 6.5) * (g.h / 30);
+    ctx.moveTo(g.x, g.y);
+    ctx.quadraticCurveTo((g.x + tipx) / 2 + sway * 1.5 * S, g.y - g.h * .55, tipx, g.y - g.h);
+  }
+  ctx.stroke();
+}
+
+/* ---------- wind-blown rain ---------- */
+function drawRain(f){
+  ctx.lineCap = 'butt';
+  const cols = [[138,158,194],[156,176,210],[178,198,232]];
+  const als = [.09, .15, .25], ws = [.7, 1, 1.4];
+  for (let bk = 0; bk < 3; bk++){
+    ctx.beginPath();
+    for (const d of rain){
+      if (d.bk !== bk) continue;
+      const sp = Math.hypot(d.vx, d.vy), u = d.len / sp;
+      ctx.moveTo(d.x, d.y); ctx.lineTo(d.x - d.vx * u, d.y - d.vy * u);
+    }
+    ctx.strokeStyle = rgb(mixC(cols[bk], [228,236,255], f * .5), als[bk] + f * .16);
+    ctx.lineWidth = ws[bk] * S;
+    ctx.stroke();
+  }
+}
+function drawSplashes(){
+  if (!splashes.length) return;
+  ctx.strokeStyle = 'rgba(180,200,235,.5)'; ctx.lineWidth = 1 * S; ctx.lineCap = 'round';
+  for (const s of splashes){
+    const a = (tNow - s.t0) / .32; if (a >= 1) continue;
+    ctx.globalAlpha = (1 - a) * .35;
+    ctx.beginPath(); ctx.arc(s.x, s.y, (1.5 + a * 6) * S, Math.PI * 1.08, Math.PI * 1.92); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+/* ---------- setup ---------- */
+function buildVignette(){
+  vignette = document.createElement('canvas');
+  vignette.width = Math.max(2, W); vignette.height = Math.max(2, H);
+  const g = vignette.getContext('2d');
+  const rg = g.createRadialGradient(W / 2, H * .45, Math.min(W, H) * .36, W / 2, H * .52, Math.max(W, H) * .78);
+  rg.addColorStop(0, 'rgba(3,4,9,0)'); rg.addColorStop(1, 'rgba(2,3,7,.62)');
+  g.fillStyle = rg; g.fillRect(0, 0, W, H);
+  const lg = g.createLinearGradient(0, 0, 0, H);
+  lg.addColorStop(0, 'rgba(2,3,8,.38)'); lg.addColorStop(.22, 'rgba(2,3,8,0)');
+  lg.addColorStop(.82, 'rgba(2,3,8,0)'); lg.addColorStop(1, 'rgba(1,2,5,.55)');
+  g.fillStyle = lg; g.fillRect(0, 0, W, H);
+}
+function initGrass(){
+  grass = [];
+  const n = Math.round(W / 7);
+  for (let i = 0; i < n; i++)
+    grass.push({ x:rand(W), y:H + rand(-2, 4), h:rand(13, 44) * S * rand(.7, 1.3), ph:rand(TAU), lean:rand(-5, 5) * S });
+}
+function initFence(){ fencePosts = []; for (let px = W * .045; px < W * .34; px += W * .0315) fencePosts.push(px); }
+function initRain(){
+  rain = [];
+  const n = Math.round(clamp(W * H / 3200, 200, 620) * (REDUCED ? .4 : 1));
+  for (let i = 0; i < n; i++){
+    const d = rand(.25, 1);
+    rain.push({ x:rand(W * 1.2) - W * .1, y:rand(H), d, vy:(460 + 680 * d) * S, vx:0,
+                len:rand(9, 28) * S * (.6 + d * .6), bk:d < .5 ? 0 : d < .78 ? 1 : 2 });
+  }
+}
+function resize(){
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  S = clamp(H / 900, .62, 1.9);
+  clouds = CLOUDCFG.map(makeCloudLayer);
+  buildVignette(); initGrass(); initFence(); initRain();
+  bolts = []; sheets = []; pending = []; splashes = []; flash = 0; skyFlash = 0;
+}
+addEventListener('resize', resize);
+
+/* ---------- main loop ---------- */
+function frame(now){
+  requestAnimationFrame(frame);
+  const t = now / 1000;
+  if (!tPrev) tPrev = t;
+  const dt = Math.min(.05, t - tPrev); tPrev = t; tNow = t;
+
+  wind = .45 + .6 * n1(t * .055 + 3) + .3 * n1(t * .31 + 57);
+  const act = activity(t);
+
+  if (Math.random() < (0.05 + Math.pow(act, 2.3) * 1.35) * dt) queueSalvo(act);
+  if (Math.random() < (0.10 + act * 1.2) * dt) spawnSheet(act);
+  for (let i = pending.length - 1; i >= 0; i--)
+    if (t >= pending[i].at){ spawnBolt(pending[i]); pending.splice(i, 1); }
+  bolts = bolts.filter(b => t - b.born < b.life);
+  sheets = sheets.filter(s => t - s.born < s.life);
+  millAng += dt * (.7 + wind * 1.9) * (REDUCED ? .4 : 1);
+
+  for (const d of rain){
+    d.vx = wind * 330 * d.d * S;
+    d.x += d.vx * dt; d.y += d.vy * dt;
+    if (d.y > H + 24){
+      if (d.bk === 2 && splashes.length < 70 && !REDUCED) splashes.push({ x:d.x, y:H - rand(1, 6), t0:t });
+      d.y = rand(-70, -10); d.x = rand(-W * .15, W);
+    }
+    if (d.x > W + 60) d.x -= W + 120;
+  }
+  splashes = splashes.filter(s => t - s.t0 < .32);
+
+  let f = 0; fx = W * .5; fy = H * .3;
+  for (const b of bolts){ const I = boltI(b, t) * b.fk; if (I > f){ f = I; fx = b.ox; fy = b.oy; } }
+  for (const s of sheets){ const I = sheetI(s, t) * .32; if (I > f){ f = I; fx = s.x; fy = s.y; } }
+  flash = Math.max(f, flash * Math.exp(-dt * 6.2));
+  skyFlash += (flash - skyFlash) * (1 - Math.exp(-dt * (flash > skyFlash ? 26 : 7)));
+
+  let sx = 0, sy = 0;
+  if (!REDUCED && flash > .04){
+    const a = flash * flash * 4.5 * S;
+    sx = (n1(t * 61) - .5) * 2 * a; sy = (n1(t * 53 + 9) - .5) * 2 * a;
+  }
+
+  /* ---- render ---- */
+  ctx.save();
+  ctx.translate(sx, sy);
+  drawSky(skyFlash);
+  if (skyFlash > .012){
+    ctx.fillStyle = 'rgba(125,148,205,' + (.15 * skyFlash) + ')'; ctx.fillRect(0, 0, W, H);
+    const g = ctx.createRadialGradient(fx, fy, 0, fx, fy, Math.max(W, H) * .7);
+    g.addColorStop(0, 'rgba(152,172,226,' + (.22 * skyFlash) + ')'); g.addColorStop(1, 'rgba(152,172,226,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  }
+  drawClouds(t, skyFlash);
+  drawSheets();
+  drawRidge(RIDGES[0], flash);
+  drawWindmill(flash);
+  const mg = ctx.createLinearGradient(0, H * .55, 0, H * .82); /* valley mist */
+  mg.addColorStop(0, 'rgba(46,60,92,0)');
+  mg.addColorStop(.5, 'rgba(46,60,92,' + (.15 + skyFlash * .2) + ')');
+  mg.addColorStop(1, 'rgba(46,60,92,0)');
+  ctx.fillStyle = mg; ctx.fillRect(0, H * .55, W, H * .27);
+  drawRidge(RIDGES[1], flash);
+  drawTree(W * .135, 1, 1, flash); drawTree(W * .085, 1, .7, flash); drawTree(W * .865, 1, .85, flash);
+  drawHouse(t, flash);
+  drawRidge(RIDGES[2], flash);
+  drawFence(flash);
+  drawGrass(t, flash);
+  drawBolts();
+  drawRain(flash);
+  drawSplashes();
+  ctx.restore();
+  ctx.drawImage(vignette, 0, 0, W, H);
+
+  if (t - statT > .15){
+    statT = t;
+    mfill.style.transform = 'scaleX(' + act.toFixed(3) + ')';
+    strikesEl.textContent = String(strikes).padStart(3, '0');
+  }
+}
+
+/* ---------- interaction ---------- */
+cv.addEventListener('pointerdown', e => {
+  wake();
+  const n = 1 + (Math.random() < .5 ? 1 : 0);
+  for (let i = 0; i < n; i++)
+    pending.push({ at:tNow + .02 + i * rand(.05, .22), x:e.clientX + rand(-30, 30) * S, crawler:false });
+});
+function wake(){
+  hud.classList.add('on'); stat.classList.add('on'); document.body.classList.remove('idle');
+  clearTimeout(hudTimer);
+  hudTimer = setTimeout(() => {
+    hud.classList.remove('on'); stat.classList.remove('on'); document.body.classList.add('idle');
+  }, 6000);
+}
+addEventListener('pointermove', wake, { passive:true });
+addEventListener('keydown', e => {
+  if (e.code === 'Space'){ e.preventDefault(); queueSalvo(1); }
+  wake();
+});
+
+resize();
+wake();
+pending.push({ at:1.1,  x:W * .42, crawler:false });
+pending.push({ at:1.55, x:W * .52, crawler:false });
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

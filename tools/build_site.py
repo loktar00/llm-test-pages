@@ -29,6 +29,10 @@ SHORT_LABELS = {
     'qwen3-8-max-preview': '3.8',
     'laguna-s-2-1-q8': 'Laguna',
     'glm-5-2-contrast160-iq3': 'GLM',
+    'deepseek-v4-flash': 'DS Flash',
+    'deepseek-v4-pro': 'DS Pro',
+    'gpt-5-6-terra': 'Terra',
+    'glm-5-2-or': 'GLM 5.2',
 }
 
 

@@ -1,0 +1,1850 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Dungeon Crawler - Gauntlet Style</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        html,
+        body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #000;
+        }
+        canvas {
+            display: block;
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="game"></canvas>
+    <script>
+        // ──────────────────────────────────────────────
+        // ASSET MANIFEST – image-generation prompts
+        // ──────────────────────────────────────────────
+        window.ASSET_MANIFEST = {
+            floor: { file: "assets/floor.png",
+                prompt: "Seamless top-down dungeon floor tile, weathered stone blocks with subtle cracks, dark gray-brown palette, 512x512 game asset, flat even lighting, repeating pattern" },
+            wall: { file: "assets/wall.png",
+                prompt: "Top-down dungeon wall tile, rough dark stone bricks with mortar lines, deep shadows at edges, 512x512 game asset, seamless tiling, grim fantasy style" },
+            hero: { file: "assets/hero.png",
+                prompt: "Top-down fantasy warrior sprite, blue armored knight with a round shield, centered on plain dark transparent background, 512x512 game character, clean silhouette, vibrant colors" },
+            ghost: { file: "assets/ghost.png",
+                prompt: "Top-down ghost enemy sprite, ethereal white translucent wraith with dark eye sockets, floating, centered on plain dark background, 512x512 game asset, spooky fantasy" },
+            grunt: { file: "assets/grunt.png",
+                prompt: "Top-down orc grunt enemy sprite, greenish-brown brute with small horns and a club, centered on plain dark background, 512x512 game asset, fierce fantasy style" },
+            generator: { file: "assets/generator.png",
+                prompt: "Top-down monster generator, dark stone pedestal with a glowing purple crystal orb on top, magical runes, centered on plain dark background, 512x512 game asset, ominous fantasy" },
+            key: { file: "assets/key.png",
+                prompt: "Top-down golden key item, ornate bow and shaft, shiny metallic, centered on plain dark background, 512x512 game asset, bright gold highlights" },
+            food: { file: "assets/food.png",
+                prompt: "Top-down food item, a roasted turkey leg on a wooden platter, appetizing warm colors, centered on plain dark background, 512x512 game asset, fantasy tavern style" },
+            treasure: { file: "assets/treasure.png",
+                prompt: "Top-down treasure pile, gold coins and a ruby, sparkling, centered on plain dark background, 512x512 game asset, rich golden tones, fantasy loot" },
+            exit: { file: "assets/exit.png",
+                prompt: "Top-down magical exit portal, swirling blue-white vortex with glowing runes, centered on plain dark background, 512x512 game asset, mystical teleportation circle" }
+        };
+
+        // ──────────────────────────────────────────────
+        // IMAGE LOADING
+        // ──────────────────────────────────────────────
+        const assetImages = {};
+        const assetSlots = Object.keys(window.ASSET_MANIFEST);
+        let assetsLoadedCount = 0;
+
+        assetSlots.forEach(slot => {
+            const img = new Image();
+            img.onload = () => {
+                assetImages[slot] = img;
+                assetsLoadedCount++;
+            };
+            img.onerror = () => {
+                assetImages[slot] = null;
+            };
+            img.src = window.ASSET_MANIFEST[slot].file;
+        });
+
+        // ──────────────────────────────────────────────
+        // CONSTANTS
+        // ──────────────────────────────────────────────
+        const TILE_SIZE = 48;
+        const MAP_COLS = 42;
+        const MAP_ROWS = 30;
+        const HERO_SPEED = 5.5; // tiles/sec
+        const HERO_MAX_HEALTH = 100;
+        const HEALTH_DRAIN = 1.0; // HP/sec
+        const SHOOT_COOLDOWN = 0.38; // sec between shots
+        const PROJECTILE_SPEED = 13; // tiles/sec
+        const PROJECTILE_LIFETIME = 1.4; // sec
+        const GHOST_SPEED = 3.2;
+        const GHOST_HP = 1;
+        const GHOST_DAMAGE = 7; // HP/sec contact
+        const GRUNT_SPEED = 2.3;
+        const GRUNT_HP = 3;
+        const GRUNT_DAMAGE = 11;
+        const GENERATOR_SPAWN_INTERVAL = 3.5; // sec
+        const GENERATOR_MAX_SPAWNS = 4;
+        const FOOD_RESTORE_MIN = 22;
+        const FOOD_RESTORE_MAX = 35;
+        const TREASURE_SCORE = 50;
+        const HUMAN_IDLE_TIMEOUT = 10; // sec before AI resumes
+        const GAME_OVER_DURATION = 2.2; // sec
+        const LEVEL_TRANSITION_DURATION = 1.2; // sec
+        const CAMERA_LERP = 0.09;
+
+        // ──────────────────────────────────────────────
+        // DOM SETUP
+        // ──────────────────────────────────────────────
+        const canvas = document.getElementById('game');
+        const ctx = canvas.getContext('2d');
+
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // ──────────────────────────────────────────────
+        // GAME STATE
+        // ──────────────────────────────────────────────
+        let map = []; // 2D: map[row][col] = 0 floor, 1 wall, 2 locked door
+        let hero = null;
+        let enemies = [];
+        let generators = [];
+        let items = []; // {col, row, type:'key'|'food'|'treasure', collected:bool}
+        let projectiles = [];
+        let particles = [];
+        let exitPos = { col: 0, row: 0 };
+        let heroStartPos = { col: 0, row: 0 };
+        let cameraX = 0;
+        let cameraY = 0;
+        let level = 1;
+        let score = 0;
+        let gameTime = 0;
+        let gameOverTimer = 0;
+        let levelTransitionTimer = 0;
+        let isGameOver = false;
+        let isLevelTransition = false;
+        let humanControl = false;
+        let lastHumanInputTime = -999;
+        let shootTimer = 0;
+        let aiGoalReevalTimer = 0;
+        let aiCurrentPath = [];
+        let aiPathIndex = 0;
+        let visitedTiles = [];
+        let keysOnMap = 0;
+        let lockedDoorsOnMap = 0;
+
+        function createHero() {
+            return {
+                col: heroStartPos.col,
+                row: heroStartPos.row,
+                health: HERO_MAX_HEALTH,
+                maxHealth: HERO_MAX_HEALTH,
+                keys: 0,
+                facingDir: { dc: 0, dr: -1 }, // default up
+                speed: HERO_SPEED,
+                radius: 0.35, // tile units
+            };
+        }
+
+        function resetGameState() {
+            hero = createHero();
+            enemies = [];
+            generators = [];
+            items = [];
+            projectiles = [];
+            particles = [];
+            gameTime = 0;
+            gameOverTimer = 0;
+            levelTransitionTimer = 0;
+            isGameOver = false;
+            isLevelTransition = false;
+            shootTimer = 0;
+            aiGoalReevalTimer = 0;
+            aiCurrentPath = [];
+            aiPathIndex = 0;
+            visitedTiles = Array.from({ length: MAP_ROWS }, () => Array(MAP_COLS).fill(false));
+            keysOnMap = 0;
+            lockedDoorsOnMap = 0;
+            level = 1;
+            score = 0;
+            humanControl = false;
+            lastHumanInputTime = -999;
+            heroStartPos = { col: Math.floor(MAP_COLS / 2), row: Math.floor(MAP_ROWS / 2) };
+            hero = createHero();
+        }
+
+        // ──────────────────────────────────────────────
+        // MAP GENERATION
+        // ──────────────────────────────────────────────
+        function generateMap() {
+            // Initialize with walls
+            map = Array.from({ length: MAP_ROWS }, () => Array(MAP_COLS).fill(1));
+            visitedTiles = Array.from({ length: MAP_ROWS }, () => Array(MAP_COLS).fill(false));
+
+            // Place rooms
+            const rooms = [];
+            const minRoomSize = 5;
+            const maxRoomSize = 9;
+            const numRooms = 10 + Math.floor(Math.random() * 6);
+            const attempts = numRooms * 30;
+
+            for (let a = 0; a < attempts && rooms.length < numRooms; a++) {
+                const rw = minRoomSize + Math.floor(Math.random() * (maxRoomSize - minRoomSize + 1));
+                const rh = minRoomSize + Math.floor(Math.random() * (maxRoomSize - minRoomSize + 1));
+                const rx = 2 + Math.floor(Math.random() * (MAP_COLS - rw - 4));
+                const ry = 2 + Math.floor(Math.random() * (MAP_ROWS - rh - 4));
+
+                let overlaps = false;
+                for (const room of rooms) {
+                    if (
+                        rx - 1 < room.col + room.w + 1 &&
+                        rx + rw + 1 > room.col - 1 &&
+                        ry - 1 < room.row + room.h + 1 &&
+                        ry + rh + 1 > room.row - 1
+                    ) {
+                        overlaps = true;
+                        break;
+                    }
+                }
+                if (!overlaps) {
+                    rooms.push({ col: rx, row: ry, w: rw, h: rh });
+                    // Carve room floor
+                    for (let rr = ry; rr < ry + rh; rr++) {
+                        for (let cc = rx; cc < rx + rw; cc++) {
+                            if (rr >= 0 && rr < MAP_ROWS && cc >= 0 && cc < MAP_COLS) {
+                                map[rr][cc] = 0;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (rooms.length < 4) {
+                // Fallback: force-place a few rooms
+                const forced = [
+                    { col: 3, row: 3, w: 7, h: 6 },
+                    { col: MAP_COLS - 11, row: 3, w: 7, h: 6 },
+                    { col: 3, row: MAP_ROWS - 10, w: 7, h: 6 },
+                    { col: MAP_COLS - 11, row: MAP_ROWS - 10, w: 7, h: 6 },
+                    { col: Math.floor(MAP_COLS / 2) - 4, row: Math.floor(MAP_ROWS / 2) - 4, w: 8, h: 8 },
+                ];
+                for (const f of forced) {
+                    rooms.push(f);
+                    for (let rr = f.row; rr < f.row + f.h; rr++) {
+                        for (let cc = f.col; cc < f.col + f.w; cc++) {
+                            if (rr >= 0 && rr < MAP_ROWS && cc >= 0 && cc < MAP_COLS) {
+                                map[rr][cc] = 0;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Connect rooms with corridors (MST-like)
+            const roomCenters = rooms.map(r => ({
+                col: Math.floor(r.col + r.w / 2),
+                row: Math.floor(r.row + r.h / 2),
+                room: r,
+            }));
+
+            // Shuffle and connect all rooms
+            const connected = new Set([0]);
+            const edges = [];
+            while (connected.size < roomCenters.length) {
+                let bestDist = Infinity;
+                let bestFrom = -1;
+                let bestTo = -1;
+                for (const i of connected) {
+                    for (let j = 0; j < roomCenters.length; j++) {
+                        if (connected.has(j)) continue;
+                        const dist = Math.abs(roomCenters[i].col - roomCenters[j].col) +
+                            Math.abs(roomCenters[i].row - roomCenters[j].row);
+                        if (dist < bestDist) {
+                            bestDist = dist;
+                            bestFrom = i;
+                            bestTo = j;
+                        }
+                    }
+                }
+                if (bestTo >= 0) {
+                    edges.push([bestFrom, bestTo]);
+                    connected.add(bestTo);
+                } else break;
+            }
+
+            // Add a few extra random connections for loops
+            const extraConnections = 2 + Math.floor(Math.random() * 3);
+            for (let e = 0; e < extraConnections; e++) {
+                const i = Math.floor(Math.random() * roomCenters.length);
+                let j = Math.floor(Math.random() * roomCenters.length);
+                if (i !== j) {
+                    edges.push([i, j]);
+                }
+            }
+
+            // Carve corridors
+            for (const [a, b] of edges) {
+                carveCorridor(roomCenters[a], roomCenters[b]);
+            }
+
+            // Identify hero start and exit (far apart)
+            let bestDist = -1;
+            let startIdx = 0;
+            let exitIdx = 0;
+            for (let i = 0; i < roomCenters.length; i++) {
+                for (let j = i + 1; j < roomCenters.length; j++) {
+                    const dist = Math.abs(roomCenters[i].col - roomCenters[j].col) +
+                        Math.abs(roomCenters[i].row - roomCenters[j].row);
+                    if (dist > bestDist) {
+                        bestDist = dist;
+                        startIdx = i;
+                        exitIdx = j;
+                    }
+                }
+            }
+
+            heroStartPos = {
+                col: roomCenters[startIdx].col,
+                row: roomCenters[startIdx].row,
+            };
+            exitPos = {
+                col: roomCenters[exitIdx].col,
+                row: roomCenters[exitIdx].row,
+            };
+
+            // Place locked doors (1-3) on corridors away from start
+            lockedDoorsOnMap = 0;
+            keysOnMap = 0;
+            const doorPositions = [];
+            const potentialDoors = findCorridorChokePoints(heroStartPos, exitPos);
+            const numDoors = Math.min(1 + Math.floor(Math.random() * 3), potentialDoors.length);
+
+            // Shuffle potential doors
+            for (let i = potentialDoors.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [potentialDoors[i], potentialDoors[j]] = [potentialDoors[j], potentialDoors[i]];
+            }
+
+            for (let d = 0; d < numDoors; d++) {
+                const dp = potentialDoors[d];
+                if (map[dp.row][dp.col] === 0) {
+                    map[dp.row][dp.col] = 2; // locked door
+                    doorPositions.push(dp);
+                    lockedDoorsOnMap++;
+                }
+            }
+
+            // Place keys in rooms reachable before their doors
+            const keyPositions = [];
+            for (const doorPos of doorPositions) {
+                // Find a floor tile in a room that is reachable from start without passing this door
+                const candidateKeyPos = findKeyPlacement(heroStartPos, doorPos);
+                if (candidateKeyPos) {
+                    keyPositions.push(candidateKeyPos);
+                    keysOnMap++;
+                }
+            }
+
+            // If we have doors but couldn't place all keys, remove excess doors
+            while (keyPositions.length < doorPositions.length && doorPositions.length > 0) {
+                const dp = doorPositions.pop();
+                map[dp.row][dp.col] = 0;
+                lockedDoorsOnMap--;
+            }
+
+            // Place items
+            items = [];
+
+            // Place keys
+            for (const kp of keyPositions) {
+                items.push({ col: kp.col, row: kp.row, type: 'key', collected: false });
+            }
+
+            // Place food (3-6)
+            const numFood = 3 + Math.floor(Math.random() * 4);
+            const foodPositions = findRandomFloorTiles(numFood, heroStartPos, exitPos, [...keyPositions]);
+            for (const fp of foodPositions) {
+                items.push({ col: fp.col, row: fp.row, type: 'food', collected: false });
+            }
+
+            // Place treasure (4-8)
+            const numTreasure = 4 + Math.floor(Math.random() * 5);
+            const treasurePositions = findRandomFloorTiles(numTreasure, heroStartPos, exitPos, [...keyPositions, ...
+                foodPositions
+            ]);
+            for (const tp of treasurePositions) {
+                items.push({ col: tp.col, row: tp.row, type: 'treasure', collected: false });
+            }
+
+            // Place generators (2-4)
+            const numGenerators = 2 + Math.floor(Math.random() * 3);
+            const genPositions = findRandomFloorTiles(numGenerators, heroStartPos, exitPos, [...keyPositions, ...
+                foodPositions, ...treasurePositions
+            ]);
+            generators = [];
+            for (const gp of genPositions) {
+                generators.push({
+                    col: gp.col,
+                    row: gp.row,
+                    spawnTimer: 1 + Math.random() * GENERATOR_SPAWN_INTERVAL,
+                    spawnInterval: GENERATOR_SPAWN_INTERVAL + Math.random() * 1.5,
+                    spawnCount: 0,
+                    maxSpawns: GENERATOR_MAX_SPAWNS + Math.floor(Math.random() * 3),
+                    alive: true,
+                });
+            }
+
+            // Initialize hero
+            hero.col = heroStartPos.col;
+            hero.row = heroStartPos.row;
+            hero.health = hero.maxHealth;
+            hero.keys = 0;
+            hero.facingDir = { dc: 0, dr: -1 };
+
+            // Reset visited tiles
+            visitedTiles = Array.from({ length: MAP_ROWS }, () => Array(MAP_COLS).fill(false));
+            markVisited(hero.col, hero.row);
+
+            // Reset enemies and projectiles
+            enemies = [];
+            projectiles = [];
+            particles = [];
+            aiCurrentPath = [];
+            aiPathIndex = 0;
+            aiGoalReevalTimer = 0;
+        }
+
+        function carveCorridor(a, b) {
+            let cx = a.col;
+            let cy = a.row;
+            const tx = b.col;
+            const ty = b.row;
+
+            // Randomly choose horizontal-first or vertical-first
+            if (Math.random() < 0.5) {
+                // Horizontal then vertical
+                while (cx !== tx) {
+                    carveTile(cx, cy);
+                    cx += cx < tx ? 1 : -1;
+                }
+                while (cy !== ty) {
+                    carveTile(cx, cy);
+                    cy += cy < ty ? 1 : -1;
+                }
+            } else {
+                // Vertical then horizontal
+                while (cy !== ty) {
+                    carveTile(cx, cy);
+                    cy += cy < ty ? 1 : -1;
+                }
+                while (cx !== tx) {
+                    carveTile(cx, cy);
+                    cx += cx < tx ? 1 : -1;
+                }
+            }
+            carveTile(cx, cy);
+            // Widen corridor slightly
+            carveTile(cx + 1, cy);
+            carveTile(cx, cy + 1);
+        }
+
+        function carveTile(col, row) {
+            if (col >= 1 && col < MAP_COLS - 1 && row >= 1 && row < MAP_ROWS - 1) {
+                map[row][col] = 0;
+                // Also clear adjacent for wider corridors
+                if (col + 1 < MAP_COLS - 1 && map[row][col + 1] === 1 && Math.random() < 0.4) map[row][col + 1] = 0;
+                if (row + 1 < MAP_ROWS - 1 && map[row + 1][col] === 1 && Math.random() < 0.4) map[row + 1][col] = 0;
+            }
+        }
+
+        function findCorridorChokePoints(startPos, exitPos) {
+            // Find narrow corridor points (floor tiles with 2+ adjacent walls)
+            const candidates = [];
+            for (let r = 2; r < MAP_ROWS - 2; r++) {
+                for (let c = 2; c < MAP_COLS - 2; c++) {
+                    if (map[r][c] === 0) {
+                        let wallCount = 0;
+                        if (map[r - 1][c] === 1) wallCount++;
+                        if (map[r + 1][c] === 1) wallCount++;
+                        if (map[r][c - 1] === 1) wallCount++;
+                        if (map[r][c + 1] === 1) wallCount++;
+                        if (wallCount >= 2) {
+                            const distToStart = Math.abs(c - startPos.col) + Math.abs(r - startPos.row);
+                            const distToExit = Math.abs(c - exitPos.col) + Math.abs(r - exitPos.row);
+                            if (distToStart > 8 && distToExit > 8) {
+                                candidates.push({ col: c, row: r });
+                            }
+                        }
+                    }
+                }
+            }
+            return candidates;
+        }
+
+        function findKeyPlacement(startPos, doorPos) {
+            // BFS from start, treating the door as a wall, find a floor tile before the door
+            const visited = Array.from({ length: MAP_ROWS }, () => Array(MAP_COLS).fill(false));
+            const queue = [{ col: startPos.col, row: startPos.row }];
+            visited[startPos.row][startPos.col] = true;
+            const candidates = [];
+            const dirs = [
+                { dc: 0, dr: -1 }, { dc: 0, dr: 1 }, { dc: -1, dr: 0 }, { dc: 1, dr: 0 }
+            ];
+
+            while (queue.length > 0) {
+                const curr = queue.shift();
+                // Don't go past the door
+                if (curr.col === doorPos.col && curr.row === doorPos.row) continue;
+                if (map[curr.row][curr.col] === 0) {
+                    const dist = Math.abs(curr.col - startPos.col) + Math.abs(curr.row - startPos.row);
+                    if (dist > 4 && !(curr.col === startPos.col && curr.row === startPos.row)) {
+                        candidates.push({ col: curr.col, row: curr.row, dist });
+                    }
+                }
+                for (const d of dirs) {
+                    const nc = curr.col + d.dc;
+                    const nr = curr.row + d.dr;
+                    if (nc >= 0 && nc < MAP_COLS && nr >= 0 && nr < MAP_ROWS && !visited[nr][nc]) {
+                        if (map[nr][nc] === 0 || (nc === doorPos.col && nr === doorPos.row && map[nr][nc] === 2)) {
+                            visited[nr][nc] = true;
+                            queue.push({ col: nc, row: nr });
+                        }
+                    }
+                }
+            }
+
+            if (candidates.length === 0) return null;
+            // Pick one far from start but not too close to door
+            candidates.sort((a, b) => b.dist - a.dist);
+            const pick = candidates[Math.floor(Math.random() * Math.min(candidates.length, 5))];
+            return { col: pick.col, row: pick.row };
+        }
+
+        function findRandomFloorTiles(count, avoid1, avoid2, extraAvoid) {
+            const floorTiles = [];
+            for (let r = 1; r < MAP_ROWS - 1; r++) {
+                for (let c = 1; c < MAP_COLS - 1; c++) {
+                    if (map[r][c] === 0) {
+                        const tooClose =
+                            (Math.abs(c - avoid1.col) < 3 && Math.abs(r - avoid1.row) < 3) ||
+                            (Math.abs(c - avoid2.col) < 3 && Math.abs(r - avoid2.row) < 3) ||
+                            extraAvoid.some(p => Math.abs(c - p.col) < 2 && Math.abs(r - p.row) < 2);
+                        if (!tooClose) {
+                            floorTiles.push({ col: c, row: r });
+                        }
+                    }
+                }
+            }
+            // Shuffle
+            for (let i = floorTiles.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [floorTiles[i], floorTiles[j]] = [floorTiles[j], floorTiles[i]];
+            }
+            return floorTiles.slice(0, Math.min(count, floorTiles.length));
+        }
+
+        function markVisited(col, row) {
+            const c = Math.round(col);
+            const r = Math.round(row);
+            if (c >= 0 && c < MAP_COLS && r >= 0 && r < MAP_ROWS) {
+                visitedTiles[r][c] = true;
+                // Also mark adjacent
+                for (const dc of [-1, 0, 1]) {
+                    for (const dr of [-1, 0, 1]) {
+                        const nc = c + dc;
+                        const nr = r + dr;
+                        if (nc >= 0 && nc < MAP_COLS && nr >= 0 && nr < MAP_ROWS) {
+                            visitedTiles[nr][nc] = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ──────────────────────────────────────────────
+        // PATHFINDING (BFS)
+        // ──────────────────────────────────────────────
+        function bfs(startCol, startRow, goalCol, goalRow, hasKeys) {
+            const sc = Math.round(startCol);
+            const sr = Math.round(startRow);
+            const gc = Math.round(goalCol);
+            const gr = Math.round(goalRow);
+
+            if (sc === gc && sr === gr) return [{ col: sc, row: sr }];
+            if (gc < 0 || gc >= MAP_COLS || gr < 0 || gr >= MAP_ROWS) return [];
+            if (map[gr][gc] === 1) return [];
+            if (map[gr][gc] === 2 && !hasKeys) return [];
+
+            const visited = Array.from({ length: MAP_ROWS }, () => Array(MAP_COLS).fill(false));
+            const parent = Array.from({ length: MAP_ROWS }, () => Array(MAP_COLS).fill(null));
+            const queue = [{ col: sc, row: sr }];
+            visited[sr][sc] = true;
+            const dirs = [
+                { dc: 0, dr: -1 }, { dc: 0, dr: 1 }, { dc: -1, dr: 0 }, { dc: 1, dr: 0 }
+            ];
+
+            while (queue.length > 0) {
+                const curr = queue.shift();
+                if (curr.col === gc && curr.row === gr) {
+                    // Reconstruct path
+                    const path = [];
+                    let node = curr;
+                    while (node) {
+                        path.unshift({ col: node.col, row: node.row });
+                        node = parent[node.row][node.col];
+                    }
+                    return path;
+                }
+                for (const d of dirs) {
+                    const nc = curr.col + d.dc;
+                    const nr = curr.row + d.dr;
+                    if (nc >= 0 && nc < MAP_COLS && nr >= 0 && nr < MAP_ROWS && !visited[nr][nc]) {
+                        const tile = map[nr][nc];
+                        if (tile === 0 || (tile === 2 && hasKeys)) {
+                            visited[nr][nc] = true;
+                            parent[nr][nc] = { col: curr.col, row: curr.row };
+                            queue.push({ col: nc, row: nr });
+                        }
+                    }
+                }
+            }
+            return []; // No path
+        }
+
+        function findNearestUnexplored(heroCol, heroRow, hasKeys) {
+            let bestDist = Infinity;
+            let bestPos = null;
+            const sc = Math.round(heroCol);
+            const sr = Math.round(heroRow);
+
+            for (let r = 1; r < MAP_ROWS - 1; r++) {
+                for (let c = 1; c < MAP_COLS - 1; c++) {
+                    if (!visitedTiles[r][c] && map[r][c] === 0) {
+                        const dist = Math.abs(c - sc) + Math.abs(r - sr);
+                        if (dist < bestDist) {
+                            // Quick check: is it reachable?
+                            const tile = map[r][c];
+                            if (tile === 0 || (tile === 2 && hasKeys)) {
+                                bestDist = dist;
+                                bestPos = { col: c, row: r };
+                            }
+                        }
+                    }
+                }
+            }
+            return bestPos;
+        }
+
+        // ──────────────────────────────────────────────
+        // AI CONTROLLER
+        // ──────────────────────────────────────────────
+        function aiEvaluateGoal() {
+            const hc = Math.round(hero.col);
+            const hr = Math.round(hero.row);
+            const hasKeys = hero.keys > 0;
+
+            const candidates = [];
+
+            // Food (high priority when low health)
+            if (hero.health < HERO_MAX_HEALTH * 0.4) {
+                for (const item of items) {
+                    if (item.type === 'food' && !item.collected) {
+                        const path = bfs(hc, hr, item.col, item.row, hasKeys);
+                        if (path.length > 0) {
+                            const priority = 120 - path.length;
+                            candidates.push({ type: 'food', col: item.col, row: item.row, path, priority });
+                        }
+                    }
+                }
+            }
+
+            // Keys
+            if (hero.keys < lockedDoorsOnMap) {
+                for (const item of items) {
+                    if (item.type === 'key' && !item.collected) {
+                        const path = bfs(hc, hr, item.col, item.row, hasKeys);
+                        if (path.length > 0) {
+                            const priority = 90 - path.length * 0.5;
+                            candidates.push({ type: 'key', col: item.col, row: item.row, path, priority });
+                        }
+                    }
+                }
+            }
+
+            // Locked doors (when holding keys)
+            if (hero.keys > 0) {
+                for (let r = 0; r < MAP_ROWS; r++) {
+                    for (let c = 0; c < MAP_COLS; c++) {
+                        if (map[r][c] === 2) {
+                            const path = bfs(hc, hr, c, r, true);
+                            if (path.length > 0) {
+                                const priority = 85 - path.length * 0.3;
+                                candidates.push({ type: 'door', col: c, row: r, path, priority });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Unexplored areas
+            const unexplored = findNearestUnexplored(hc, hr, hasKeys);
+            if (unexplored) {
+                const path = bfs(hc, hr, unexplored.col, unexplored.row, hasKeys);
+                if (path.length > 0) {
+                    const priority = 60 - path.length * 0.15;
+                    candidates.push({ type: 'explore', col: unexplored.col, row: unexplored.row, path, priority });
+                }
+            }
+
+            // Treasure
+            for (const item of items) {
+                if (item.type === 'treasure' && !item.collected) {
+                    const path = bfs(hc, hr, item.col, item.row, hasKeys);
+                    if (path.length > 0) {
+                        const priority = 50 - path.length * 0.2;
+                        candidates.push({ type: 'treasure', col: item.col, row: item.row, path, priority });
+                    }
+                }
+            }
+
+            // Exit (always an option, more attractive when explored most of map)
+            const exploredRatio = countVisited() / (MAP_COLS * MAP_ROWS);
+            const exitPath = bfs(hc, hr, exitPos.col, exitPos.row, hasKeys);
+            if (exitPath.length > 0) {
+                const priority = 40 + exploredRatio * 60 - exitPath.length * 0.1;
+                candidates.push({ type: 'exit', col: exitPos.col, row: exitPos.row, path: exitPath, priority });
+            }
+
+            // Sort by priority (highest first)
+            candidates.sort((a, b) => b.priority - a.priority);
+
+            // Add some randomness: occasionally pick second-best
+            if (candidates.length > 1 && Math.random() < 0.2) {
+                return candidates[Math.min(1, candidates.length - 1)];
+            }
+            if (candidates.length > 0) {
+                return candidates[0];
+            }
+
+            // Fallback: random movement
+            return { type: 'wander', col: hc + (Math.random() - 0.5) * 10, row: hr + (Math.random() - 0.5) * 10, path: [],
+                priority: 0 };
+        }
+
+        function countVisited() {
+            let count = 0;
+            for (let r = 0; r < MAP_ROWS; r++) {
+                for (let c = 0; c < MAP_COLS; c++) {
+                    if (visitedTiles[r][c]) count++;
+                }
+            }
+            return count;
+        }
+
+        function aiUpdate(dt) {
+            aiGoalReevalTimer -= dt;
+            if (aiGoalReevalTimer <= 0 || aiCurrentPath.length === 0 || aiPathIndex >= aiCurrentPath.length) {
+                aiGoalReevalTimer = 0.8 + Math.random() * 1.5;
+                const goal = aiEvaluateGoal();
+                aiCurrentPath = goal.path;
+                aiPathIndex = 0;
+                if (aiCurrentPath.length > 0 && aiPathIndex < aiCurrentPath.length) {
+                    // Skip the first node if it's the current position
+                    const hc = Math.round(hero.col);
+                    const hr = Math.round(hero.row);
+                    if (aiCurrentPath[0].col === hc && aiCurrentPath[0].row === hr && aiCurrentPath.length > 1) {
+                        aiPathIndex = 1;
+                    }
+                }
+            }
+
+            if (aiCurrentPath.length > 0 && aiPathIndex < aiCurrentPath.length) {
+                const target = aiCurrentPath[aiPathIndex];
+                const dx = target.col - hero.col;
+                const dy = target.row - hero.row;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+
+                if (dist < 0.15) {
+                    aiPathIndex++;
+                    if (aiPathIndex < aiCurrentPath.length) {
+                        const nextTarget = aiCurrentPath[aiPathIndex];
+                        const ndx = nextTarget.col - hero.col;
+                        const ndy = nextTarget.row - hero.row;
+                        const ndist = Math.sqrt(ndx * ndx + ndy * ndy);
+                        if (ndist > 0.001) {
+                            hero.facingDir = { dc: ndx / ndist, dr: ndy / ndist };
+                        }
+                    }
+                } else {
+                    // Move toward target
+                    const moveSpeed = hero.speed * dt;
+                    const mx = (dx / dist) * moveSpeed;
+                    const my = (dy / dist) * moveSpeed;
+                    const newCol = hero.col + mx;
+                    const newRow = hero.row + my;
+
+                    // Collision check
+                    const tc = Math.round(newCol);
+                    const tr = Math.round(newRow);
+                    if (tc >= 0 && tc < MAP_COLS && tr >= 0 && tr < MAP_ROWS) {
+                        const tile = map[tr][tc];
+                        if (tile === 0 || (tile === 2 && hero.keys > 0)) {
+                            hero.col = newCol;
+                            hero.row = newRow;
+                            if (dist > 0.001) {
+                                hero.facingDir = { dc: dx / dist, dr: dy / dist };
+                            }
+                            markVisited(hero.col, hero.row);
+                        } else if (tile === 2 && hero.keys === 0) {
+                            // Can't pass, stuck; force re-evaluate
+                            aiGoalReevalTimer = 0;
+                        } else {
+                            // Wall collision; try sliding
+                            const slideCol = hero.col + mx;
+                            const slideRow = hero.row;
+                            const stc = Math.round(slideCol);
+                            const str = Math.round(slideRow);
+                            if (stc >= 0 && stc < MAP_COLS && str >= 0 && str < MAP_ROWS &&
+                                (map[str][stc] === 0 || (map[str][stc] === 2 && hero.keys > 0))) {
+                                hero.col = slideCol;
+                                hero.facingDir = { dc: mx > 0 ? 1 : -1, dr: 0 };
+                                markVisited(hero.col, hero.row);
+                            } else {
+                                const slideCol2 = hero.col;
+                                const slideRow2 = hero.row + my;
+                                const stc2 = Math.round(slideCol2);
+                                const str2 = Math.round(slideRow2);
+                                if (stc2 >= 0 && stc2 < MAP_COLS && str2 >= 0 && str2 < MAP_ROWS &&
+                                    (map[str2][stc2] === 0 || (map[str2][stc2] === 2 && hero.keys > 0))) {
+                                    hero.row = slideRow2;
+                                    hero.facingDir = { dc: 0, dr: my > 0 ? 1 : -1 };
+                                    markVisited(hero.col, hero.row);
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Wander: move in facing direction with slight random turns
+                if (Math.random() < 0.03) {
+                    const angle = Math.random() * Math.PI * 2;
+                    hero.facingDir = { dc: Math.cos(angle), dr: Math.sin(angle) };
+                }
+                const moveSpeed = hero.speed * dt * 0.7;
+                const newCol = hero.col + hero.facingDir.dc * moveSpeed;
+                const newRow = hero.row + hero.facingDir.dr * moveSpeed;
+                const tc = Math.round(newCol);
+                const tr = Math.round(newRow);
+                if (tc >= 0 && tc < MAP_COLS && tr >= 0 && tr < MAP_ROWS &&
+                    (map[tr][tc] === 0 || (map[tr][tc] === 2 && hero.keys > 0))) {
+                    hero.col = newCol;
+                    hero.row = newRow;
+                    markVisited(hero.col, hero.row);
+                } else {
+                    // Turn randomly
+                    const angle = Math.random() * Math.PI * 2;
+                    hero.facingDir = { dc: Math.cos(angle), dr: Math.sin(angle) };
+                }
+            }
+
+            // Shoot at nearby enemies
+            let nearestEnemy = null;
+            let nearestDist = 4; // tiles
+            for (const enemy of enemies) {
+                const dx = enemy.col - hero.col;
+                const dy = enemy.row - hero.row;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist < nearestDist) {
+                    nearestDist = dist;
+                    nearestEnemy = enemy;
+                }
+            }
+            if (nearestEnemy && nearestDist < 4) {
+                const dx = nearestEnemy.col - hero.col;
+                const dy = nearestEnemy.row - hero.row;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist > 0.001) {
+                    hero.facingDir = { dc: dx / dist, dr: dy / dist };
+                }
+            }
+        }
+
+        // ──────────────────────────────────────────────
+        // GAME LOGIC
+        // ──────────────────────────────────────────────
+        function spawnEnemy(generator) {
+            const type = Math.random() < 0.55 ? 'ghost' : 'grunt';
+            // Spawn adjacent to generator
+            const dirs = [
+                { dc: 0, dr: -1 }, { dc: 0, dr: 1 }, { dc: -1, dr: 0 }, { dc: 1, dr: 0 },
+                { dc: -1, dr: -1 }, { dc: 1, dr: -1 }, { dc: -1, dr: 1 }, { dc: 1, dr: 1 },
+            ];
+            let spawnCol = generator.col;
+            let spawnRow = generator.row;
+            for (const d of dirs) {
+                const nc = generator.col + d.dc;
+                const nr = generator.row + d.dr;
+                if (nc >= 0 && nc < MAP_COLS && nr >= 0 && nr < MAP_ROWS && map[nr][nc] === 0) {
+                    spawnCol = nc;
+                    spawnRow = nr;
+                    break;
+                }
+            }
+            const enemy = {
+                col: spawnCol,
+                row: spawnRow,
+                type: type,
+                health: type === 'ghost' ? GHOST_HP : GRUNT_HP,
+                maxHealth: type === 'ghost' ? GHOST_HP : GRUNT_HP,
+                speed: type === 'ghost' ? GHOST_SPEED : GRUNT_SPEED,
+                damage: type === 'ghost' ? GHOST_DAMAGE : GRUNT_DAMAGE,
+                radius: type === 'ghost' ? 0.3 : 0.35,
+                path: [],
+                pathIndex: 0,
+                pathRecalcTimer: 0,
+                generatorRef: generator,
+            };
+            enemies.push(enemy);
+            generator.spawnCount++;
+        }
+
+        function fireProjectile() {
+            const proj = {
+                col: hero.col,
+                row: hero.row,
+                dc: hero.facingDir.dc,
+                dr: hero.facingDir.dr,
+                speed: PROJECTILE_SPEED,
+                lifetime: PROJECTILE_LIFETIME,
+                radius: 0.15,
+            };
+            projectiles.push(proj);
+        }
+
+        function spawnParticles(col, row, count, color, speed, life) {
+            for (let i = 0; i < count; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const spd = speed * (0.5 + Math.random());
+                particles.push({
+                    col: col,
+                    row: row,
+                    dc: Math.cos(angle) * spd,
+                    dr: Math.sin(angle) * spd,
+                    life: life * (0.5 + Math.random() * 0.5),
+                    maxLife: life,
+                    color: color,
+                    size: 2 + Math.random() * 4,
+                });
+            }
+        }
+
+        function updateGame(dt) {
+            if (isGameOver) {
+                gameOverTimer -= dt;
+                if (gameOverTimer <= 0) {
+                    resetGameState();
+                    generateMap();
+                }
+                return;
+            }
+
+            if (isLevelTransition) {
+                levelTransitionTimer -= dt;
+                if (levelTransitionTimer <= 0) {
+                    isLevelTransition = false;
+                    generateMap();
+                    hero.health = Math.min(hero.maxHealth, hero.health + 40);
+                    hero.keys = 0;
+                    level++;
+                }
+                return;
+            }
+
+            gameTime += dt;
+
+            // Health drain
+            hero.health -= HEALTH_DRAIN * dt;
+            if (hero.health <= 0) {
+                hero.health = 0;
+                isGameOver = true;
+                gameOverTimer = GAME_OVER_DURATION;
+                spawnParticles(hero.col, hero.row, 30, '#ff3333', 5, 1.5);
+                return;
+            }
+
+            // Update human control timeout
+            if (humanControl && gameTime - lastHumanInputTime > HUMAN_IDLE_TIMEOUT) {
+                humanControl = false;
+                aiCurrentPath = [];
+                aiPathIndex = 0;
+                aiGoalReevalTimer = 0;
+            }
+
+            // AI update
+            if (!humanControl) {
+                aiUpdate(dt);
+            }
+
+            // Shooting
+            shootTimer -= dt;
+            if (shootTimer <= 0) {
+                shootTimer = SHOOT_COOLDOWN;
+                fireProjectile();
+            }
+
+            // Update projectiles
+            for (let i = projectiles.length - 1; i >= 0; i--) {
+                const p = projectiles[i];
+                p.col += p.dc * p.speed * dt;
+                p.row += p.dr * p.speed * dt;
+                p.lifetime -= dt;
+
+                // Check wall collision
+                const tc = Math.round(p.col);
+                const tr = Math.round(p.row);
+                let hitWall = false;
+                if (tc >= 0 && tc < MAP_COLS && tr >= 0 && tr < MAP_ROWS) {
+                    if (map[tr][tc] === 1 || map[tr][tc] === 2) {
+                        hitWall = true;
+                    }
+                } else {
+                    hitWall = true;
+                }
+
+                if (hitWall || p.lifetime <= 0) {
+                    if (hitWall) spawnParticles(p.col, p.row, 4, '#ffaa44', 2, 0.3);
+                    projectiles.splice(i, 1);
+                    continue;
+                }
+
+                // Check generator collision
+                let hitGen = false;
+                for (let g = generators.length - 1; g >= 0; g--) {
+                    const gen = generators[g];
+                    if (!gen.alive) continue;
+                    const dx = p.col - gen.col;
+                    const dy = p.row - gen.row;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    if (dist < 0.6) {
+                        // Destroy generator
+                        gen.alive = false;
+                        spawnParticles(gen.col, gen.row, 20, '#ff6600', 6, 1.0);
+                        score += 100;
+                        hitGen = true;
+                        break;
+                    }
+                }
+                if (hitGen) {
+                    projectiles.splice(i, 1);
+                    continue;
+                }
+
+                // Check enemy collision
+                let hitEnemy = false;
+                for (let e = enemies.length - 1; e >= 0; e--) {
+                    const enemy = enemies[e];
+                    const dx = p.col - enemy.col;
+                    const dy = p.row - enemy.row;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    if (dist < enemy.radius + p.radius) {
+                        enemy.health--;
+                        if (enemy.health <= 0) {
+                            spawnParticles(enemy.col, enemy.row, 12, '#ffffff', 3, 0.6);
+                            score += enemy.type === 'ghost' ? 25 : 40;
+                            enemies.splice(e, 1);
+                        }
+                        hitEnemy = true;
+                        break;
+                    }
+                }
+                if (hitEnemy) {
+                    projectiles.splice(i, 1);
+                }
+            }
+
+            // Update generators
+            for (const gen of generators) {
+                if (!gen.alive) continue;
+                gen.spawnTimer -= dt;
+                if (gen.spawnTimer <= 0 && gen.spawnCount < gen.maxSpawns) {
+                    gen.spawnTimer = gen.spawnInterval;
+                    spawnEnemy(gen);
+                }
+            }
+            // Remove dead generators
+            generators = generators.filter(g => g.alive);
+
+            // Update enemies
+            for (const enemy of enemies) {
+                enemy.pathRecalcTimer -= dt;
+                if (enemy.pathRecalcTimer <= 0 || enemy.path.length === 0 || enemy.pathIndex >= enemy.path.length) {
+                    enemy.pathRecalcTimer = 0.4 + Math.random() * 0.6;
+                    const hc = Math.round(hero.col);
+                    const hr = Math.round(hero.row);
+                    const ec = Math.round(enemy.col);
+                    const er = Math.round(enemy.row);
+                    // Enemies can always pass locked doors (they're ethereal or have their own keys)
+                    const path = bfs(ec, er, hc, hr, true);
+                    enemy.path = path;
+                    enemy.pathIndex = 0;
+                    if (path.length > 0 && path[0].col === ec && path[0].row === er && path.length > 1) {
+                        enemy.pathIndex = 1;
+                    }
+                }
+
+                if (enemy.path.length > 0 && enemy.pathIndex < enemy.path.length) {
+                    const target = enemy.path[enemy.pathIndex];
+                    const dx = target.col - enemy.col;
+                    const dy = target.row - enemy.row;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    if (dist < 0.12) {
+                        enemy.pathIndex++;
+                    } else {
+                        const moveSpeed = enemy.speed * dt;
+                        enemy.col += (dx / dist) * moveSpeed;
+                        enemy.row += (dy / dist) * moveSpeed;
+                        // Clamp to walkable tiles
+                        const tc = Math.round(enemy.col);
+                        const tr = Math.round(enemy.row);
+                        if (tc >= 0 && tc < MAP_COLS && tr >= 0 && tr < MAP_ROWS && map[tr][tc] === 1) {
+                            enemy.col -= (dx / dist) * moveSpeed;
+                            enemy.row -= (dy / dist) * moveSpeed;
+                        }
+                    }
+                }
+
+                // Damage hero on contact
+                const hdx = enemy.col - hero.col;
+                const hdy = enemy.row - hero.row;
+                const hdist = Math.sqrt(hdx * hdx + hdy * hdy);
+                if (hdist < enemy.radius + hero.radius) {
+                    hero.health -= enemy.damage * dt;
+                    if (hero.health <= 0) {
+                        hero.health = 0;
+                        isGameOver = true;
+                        gameOverTimer = GAME_OVER_DURATION;
+                        spawnParticles(hero.col, hero.row, 30, '#ff3333', 5, 1.5);
+                        return;
+                    }
+                }
+            }
+
+            // Check item pickup
+            for (const item of items) {
+                if (item.collected) continue;
+                const dx = item.col - hero.col;
+                const dy = item.row - hero.row;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist < 0.6) {
+                    item.collected = true;
+                    if (item.type === 'key') {
+                        hero.keys++;
+                        spawnParticles(item.col, item.row, 8, '#ffd700', 3, 0.5);
+                    } else if (item.type === 'food') {
+                        const restore = FOOD_RESTORE_MIN + Math.random() * (FOOD_RESTORE_MAX - FOOD_RESTORE_MIN);
+                        hero.health = Math.min(hero.maxHealth, hero.health + restore);
+                        spawnParticles(item.col, item.row, 10, '#ff6666', 3, 0.5);
+                    } else if (item.type === 'treasure') {
+                        score += TREASURE_SCORE;
+                        spawnParticles(item.col, item.row, 10, '#ffd700', 3, 0.5);
+                    }
+                }
+            }
+
+            // Check locked door interaction (hero steps on it with key)
+            const htc = Math.round(hero.col);
+            const htr = Math.round(hero.row);
+            if (htc >= 0 && htc < MAP_COLS && htr >= 0 && htr < MAP_ROWS && map[htr][htc] === 2 && hero.keys > 0) {
+                hero.keys--;
+                map[htr][htc] = 0;
+                lockedDoorsOnMap--;
+                spawnParticles(htc, htr, 15, '#ffcc00', 4, 0.7);
+            }
+
+            // Check exit
+            const exDist = Math.sqrt((hero.col - exitPos.col) ** 2 + (hero.row - exitPos.row) ** 2);
+            if (exDist < 0.7) {
+                isLevelTransition = true;
+                levelTransitionTimer = LEVEL_TRANSITION_DURATION;
+                score += 200;
+                spawnParticles(exitPos.col, exitPos.row, 25, '#44aaff', 5, 1.0);
+            }
+
+            // Update particles
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.col += p.dc * dt;
+                p.row += p.dr * dt;
+                p.life -= dt;
+                if (p.life <= 0) {
+                    particles.splice(i, 1);
+                }
+            }
+
+            // Mark visited
+            markVisited(hero.col, hero.row);
+        }
+
+        // ──────────────────────────────────────────────
+        // RENDERING
+        // ──────────────────────────────────────────────
+        function drawFloorTile(screenX, screenY, size) {
+            if (assetImages.floor && assetImages.floor.complete && assetImages.floor.naturalWidth > 0) {
+                ctx.drawImage(assetImages.floor, screenX, screenY, size, size);
+            } else {
+                // Vector fallback: stone floor
+                ctx.fillStyle = '#3a3028';
+                ctx.fillRect(screenX, screenY, size, size);
+                ctx.strokeStyle = '#2e2620';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(screenX + 0.5, screenY + 0.5, size - 1, size - 1);
+                // Subtle cracks
+                ctx.fillStyle = '#332b24';
+                const seed = Math.floor(screenX / size) * 31 + Math.floor(screenY / size) * 17;
+                if ((seed % 7) === 0) {
+                    ctx.fillRect(screenX + size * 0.3, screenY + size * 0.2, size * 0.15, size * 0.6);
+                }
+                if ((seed % 11) === 0) {
+                    ctx.fillRect(screenX + size * 0.55, screenY + size * 0.35, size * 0.1, size * 0.4);
+                }
+            }
+        }
+
+        function drawWallTile(screenX, screenY, size) {
+            if (assetImages.wall && assetImages.wall.complete && assetImages.wall.naturalWidth > 0) {
+                ctx.drawImage(assetImages.wall, screenX, screenY, size, size);
+            } else {
+                // Vector fallback: dark stone wall
+                ctx.fillStyle = '#1f1f1f';
+                ctx.fillRect(screenX, screenY, size, size);
+                // Beveled edges
+                ctx.fillStyle = '#2a2a2a';
+                ctx.fillRect(screenX + 2, screenY + 2, size - 4, size - 4);
+                ctx.fillStyle = '#1a1a1a';
+                ctx.fillRect(screenX + 4, screenY + 4, size - 8, size - 8);
+                // Brick lines
+                ctx.strokeStyle = '#111';
+                ctx.lineWidth = 1;
+                const hw = size / 2;
+                ctx.strokeRect(screenX + 3, screenY + 3, size - 6, hw - 3);
+                ctx.beginPath();
+                ctx.moveTo(screenX + hw, screenY + 3);
+                ctx.lineTo(screenX + hw, screenY + hw);
+                ctx.stroke();
+            }
+        }
+
+        function drawLockedDoorTile(screenX, screenY, size) {
+            // Draw floor first, then door overlay
+            drawFloorTile(screenX, screenY, size);
+            // Door overlay
+            ctx.fillStyle = '#5c3a1e';
+            ctx.fillRect(screenX + size * 0.15, screenY + size * 0.05, size * 0.7, size * 0.9);
+            ctx.strokeStyle = '#8b5e3c';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(screenX + size * 0.15, screenY + size * 0.05, size * 0.7, size * 0.9);
+            // Lock symbol
+            ctx.fillStyle = '#ffd700';
+            ctx.beginPath();
+            ctx.arc(screenX + size * 0.5, screenY + size * 0.45, size * 0.15, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#5c3a1e';
+            ctx.fillRect(screenX + size * 0.42, screenY + size * 0.45, size * 0.16, size * 0.2);
+        }
+
+        function drawEntityWithAsset(screenX, screenY, size, assetKey, fallbackDraw) {
+            const img = assetImages[assetKey];
+            if (img && img.complete && img.naturalWidth > 0) {
+                ctx.drawImage(img, screenX - size / 2, screenY - size / 2, size, size);
+            } else {
+                fallbackDraw(screenX, screenY, size);
+            }
+        }
+
+        function drawHeroAt(screenX, screenY, size) {
+            drawEntityWithAsset(screenX, screenY, size, 'hero', (sx, sy, sz) => {
+                // Vector hero: blue knight
+                const cx = sx;
+                const cy = sy;
+                const r = sz * 0.45;
+                // Shield/body
+                ctx.fillStyle = '#3366cc';
+                ctx.beginPath();
+                ctx.arc(cx, cy, r, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.strokeStyle = '#1a3388';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                // Inner highlight
+                ctx.fillStyle = '#5588ee';
+                ctx.beginPath();
+                ctx.arc(cx - r * 0.2, cy - r * 0.2, r * 0.5, 0, Math.PI * 2);
+                ctx.fill();
+                // Direction indicator
+                const ang = Math.atan2(hero.facingDir.dr, hero.facingDir.dc);
+                ctx.fillStyle = '#ffffff';
+                ctx.beginPath();
+                ctx.moveTo(cx + Math.cos(ang) * r * 0.7, cy + Math.sin(ang) * r * 0.7);
+                ctx.lineTo(cx + Math.cos(ang + 2.5) * r * 0.35, cy + Math.sin(ang + 2.5) * r * 0.35);
+                ctx.lineTo(cx + Math.cos(ang - 2.5) * r * 0.35, cy + Math.sin(ang - 2.5) * r * 0.35);
+                ctx.closePath();
+                ctx.fill();
+            });
+        }
+
+        function drawGhostAt(screenX, screenY, size) {
+            drawEntityWithAsset(screenX, screenY, size, 'ghost', (sx, sy, sz) => {
+                const r = sz * 0.4;
+                ctx.fillStyle = 'rgba(220,230,255,0.75)';
+                ctx.beginPath();
+                // Ghostly shape
+                const cx = sx;
+                const cy = sy;
+                ctx.arc(cx, cy - r * 0.2, r, Math.PI, 0);
+                ctx.lineTo(cx + r, cy + r * 0.6);
+                // Wavy bottom
+                for (let i = 0; i < 3; i++) {
+                    const wx = cx + r - (i * r * 0.65);
+                    ctx.quadraticCurveTo(wx - r * 0.3, cy + r * 0.9, wx - r * 0.65, cy + r * 0.5);
+                }
+                ctx.closePath();
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(180,200,240,0.8)';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+                // Eyes
+                ctx.fillStyle = '#111';
+                ctx.beginPath();
+                ctx.arc(cx - r * 0.3, cy - r * 0.2, r * 0.18, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.beginPath();
+                ctx.arc(cx + r * 0.3, cy - r * 0.2, r * 0.18, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        function drawGruntAt(screenX, screenY, size) {
+            drawEntityWithAsset(screenX, screenY, size, 'grunt', (sx, sy, sz) => {
+                const r = sz * 0.42;
+                // Body
+                ctx.fillStyle = '#6b4226';
+                ctx.beginPath();
+                ctx.arc(sx, sy, r, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.strokeStyle = '#3d1f0a';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                // Head area
+                ctx.fillStyle = '#5a8a3c';
+                ctx.beginPath();
+                ctx.arc(sx, sy - r * 0.25, r * 0.55, 0, Math.PI * 2);
+                ctx.fill();
+                // Eyes
+                ctx.fillStyle = '#ff0';
+                ctx.beginPath();
+                ctx.arc(sx - r * 0.2, sy - r * 0.35, r * 0.14, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.beginPath();
+                ctx.arc(sx + r * 0.2, sy - r * 0.35, r * 0.14, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = '#000';
+                ctx.beginPath();
+                ctx.arc(sx - r * 0.2, sy - r * 0.35, r * 0.06, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.beginPath();
+                ctx.arc(sx + r * 0.2, sy - r * 0.35, r * 0.06, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        function drawGeneratorAt(screenX, screenY, size) {
+            drawEntityWithAsset(screenX, screenY, size, 'generator', (sx, sy, sz) => {
+                // Pedestal
+                ctx.fillStyle = '#2a2a2a';
+                ctx.fillRect(sx - sz * 0.35, sy - sz * 0.15, sz * 0.7, sz * 0.5);
+                ctx.strokeStyle = '#444';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(sx - sz * 0.35, sy - sz * 0.15, sz * 0.7, sz * 0.5);
+                // Orb
+                const pulse = 0.7 + 0.3 * Math.sin(gameTime * 3);
+                const orbR = sz * 0.25 * pulse;
+                const grad = ctx.createRadialGradient(sx, sy - sz * 0.15, orbR * 0.2, sx, sy - sz * 0.15, orbR);
+                grad.addColorStop(0, '#ff44ff');
+                grad.addColorStop(0.5, '#9900cc');
+                grad.addColorStop(1, '#330044');
+                ctx.fillStyle = grad;
+                ctx.beginPath();
+                ctx.arc(sx, sy - sz * 0.15, orbR, 0, Math.PI * 2);
+                ctx.fill();
+                // Glow
+                ctx.fillStyle = 'rgba(200,50,255,0.25)';
+                ctx.beginPath();
+                ctx.arc(sx, sy - sz * 0.15, orbR * 1.6, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        function drawKeyAt(screenX, screenY, size) {
+            drawEntityWithAsset(screenX, screenY, size, 'key', (sx, sy, sz) => {
+                const ks = sz * 0.35;
+                ctx.fillStyle = '#ffd700';
+                ctx.strokeStyle = '#b8960a';
+                ctx.lineWidth = 2;
+                // Key head (circle)
+                ctx.beginPath();
+                ctx.arc(sx - ks * 0.3, sy, ks * 0.5, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.stroke();
+                // Key shaft
+                ctx.fillRect(sx, sy - ks * 0.12, ks * 1.2, ks * 0.24);
+                ctx.strokeRect(sx, sy - ks * 0.12, ks * 1.2, ks * 0.24);
+                // Teeth
+                ctx.fillRect(sx + ks * 0.6, sy + ks * 0.08, ks * 0.2, ks * 0.3);
+                ctx.fillRect(sx + ks * 0.9, sy + ks * 0.08, ks * 0.2, ks * 0.2);
+            });
+        }
+
+        function drawFoodAt(screenX, screenY, size) {
+            drawEntityWithAsset(screenX, screenY, size, 'food', (sx, sy, sz) => {
+                const fs = sz * 0.4;
+                // Heart shape for health
+                ctx.fillStyle = '#e03030';
+                ctx.beginPath();
+                const cx = sx;
+                const cy = sy;
+                ctx.moveTo(cx, cy + fs * 0.5);
+                ctx.bezierCurveTo(cx - fs, cy - fs * 0.3, cx - fs * 0.5, cy - fs, cx, cy - fs * 0.2);
+                ctx.bezierCurveTo(cx + fs * 0.5, cy - fs, cx + fs, cy - fs * 0.3, cx, cy + fs * 0.5);
+                ctx.fill();
+                ctx.strokeStyle = '#8b0000';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+                // Highlight
+                ctx.fillStyle = 'rgba(255,255,255,0.3)';
+                ctx.beginPath();
+                ctx.arc(cx - fs * 0.2, cy - fs * 0.3, fs * 0.2, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        function drawTreasureAt(screenX, screenY, size) {
+            drawEntityWithAsset(screenX, screenY, size, 'treasure', (sx, sy, sz) => {
+                const ts = sz * 0.35;
+                // Diamond shape
+                ctx.fillStyle = '#ffd700';
+                ctx.beginPath();
+                ctx.moveTo(sx, sy - ts);
+                ctx.lineTo(sx + ts * 0.7, sy);
+                ctx.lineTo(sx, sy + ts);
+                ctx.lineTo(sx - ts * 0.7, sy);
+                ctx.closePath();
+                ctx.fill();
+                ctx.strokeStyle = '#b8960a';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                // Sparkle
+                ctx.fillStyle = '#fff';
+                ctx.beginPath();
+                ctx.arc(sx - ts * 0.15, sy - ts * 0.2, ts * 0.18, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        function drawExitAt(screenX, screenY, size) {
+            drawEntityWithAsset(screenX, screenY, size, 'exit', (sx, sy, sz) => {
+                const es = sz * 0.45;
+                const pulse = 0.85 + 0.15 * Math.sin(gameTime * 4);
+                // Outer ring
+                ctx.fillStyle = 'rgba(40,120,255,0.3)';
+                ctx.beginPath();
+                ctx.arc(sx, sy, es * pulse, 0, Math.PI * 2);
+                ctx.fill();
+                // Middle ring
+                const grad = ctx.createRadialGradient(sx, sy, es * 0.2, sx, sy, es * 0.7);
+                grad.addColorStop(0, '#ffffff');
+                grad.addColorStop(0.4, '#44aaff');
+                grad.addColorStop(1, 'rgba(20,60,180,0.4)');
+                ctx.fillStyle = grad;
+                ctx.beginPath();
+                ctx.arc(sx, sy, es * 0.7, 0, Math.PI * 2);
+                ctx.fill();
+                // Center bright
+                ctx.fillStyle = '#ffffff';
+                ctx.beginPath();
+                ctx.arc(sx, sy, es * 0.2, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        function render() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Camera target
+            const heroPixelX = hero.col * TILE_SIZE;
+            const heroPixelY = hero.row * TILE_SIZE;
+            const targetCamX = heroPixelX - canvas.width / 2;
+            const targetCamY = heroPixelY - canvas.height / 2;
+            const maxCamX = MAP_COLS * TILE_SIZE - canvas.width;
+            const maxCamY = MAP_ROWS * TILE_SIZE - canvas.height;
+            const clampedTargetX = Math.max(0, Math.min(maxCamX, targetCamX));
+            const clampedTargetY = Math.max(0, Math.min(maxCamY, targetCamY));
+
+            cameraX += (clampedTargetX - cameraX) * CAMERA_LERP;
+            cameraY += (clampedTargetY - cameraY) * CAMERA_LERP;
+
+            // Determine visible tile range
+            const startCol = Math.max(0, Math.floor(cameraX / TILE_SIZE) - 1);
+            const startRow = Math.max(0, Math.floor(cameraY / TILE_SIZE) - 1);
+            const endCol = Math.min(MAP_COLS - 1, Math.ceil((cameraX + canvas.width) / TILE_SIZE) + 1);
+            const endRow = Math.min(MAP_ROWS - 1, Math.ceil((cameraY + canvas.height) / TILE_SIZE) + 1);
+
+            // Draw tiles
+            for (let r = startRow; r <= endRow; r++) {
+                for (let c = startCol; c <= endCol; c++) {
+                    const sx = c * TILE_SIZE - cameraX;
+                    const sy = r * TILE_SIZE - cameraY;
+                    const tile = map[r][c];
+                    if (tile === 1) {
+                        drawWallTile(sx, sy, TILE_SIZE);
+                    } else if (tile === 2) {
+                        drawLockedDoorTile(sx, sy, TILE_SIZE);
+                    } else {
+                        drawFloorTile(sx, sy, TILE_SIZE);
+                    }
+                }
+            }
+
+            // Draw exit
+            const exitScreenX = exitPos.col * TILE_SIZE - cameraX;
+            const exitScreenY = exitPos.row * TILE_SIZE - cameraY;
+            if (exitScreenX > -TILE_SIZE && exitScreenX < canvas.width + TILE_SIZE &&
+                exitScreenY > -TILE_SIZE && exitScreenY < canvas.height + TILE_SIZE) {
+                drawExitAt(exitScreenX, exitScreenY, TILE_SIZE);
+            }
+
+            // Draw generators
+            for (const gen of generators) {
+                if (!gen.alive) continue;
+                const sx = gen.col * TILE_SIZE - cameraX;
+                const sy = gen.row * TILE_SIZE - cameraY;
+                if (sx > -TILE_SIZE && sx < canvas.width + TILE_SIZE && sy > -TILE_SIZE && sy < canvas.height + TILE_SIZE) {
+                    drawGeneratorAt(sx, sy, TILE_SIZE);
+                }
+            }
+
+            // Draw items
+            for (const item of items) {
+                if (item.collected) continue;
+                const sx = item.col * TILE_SIZE - cameraX;
+                const sy = item.row * TILE_SIZE - cameraY;
+                if (sx > -TILE_SIZE && sx < canvas.width + TILE_SIZE && sy > -TILE_SIZE && sy < canvas.height + TILE_SIZE) {
+                    if (item.type === 'key') drawKeyAt(sx, sy, TILE_SIZE);
+                    else if (item.type === 'food') drawFoodAt(sx, sy, TILE_SIZE);
+                    else if (item.type === 'treasure') drawTreasureAt(sx, sy, TILE_SIZE);
+                }
+            }
+
+            // Draw enemies
+            for (const enemy of enemies) {
+                const sx = enemy.col * TILE_SIZE - cameraX;
+                const sy = enemy.row * TILE_SIZE - cameraY;
+                if (sx > -TILE_SIZE && sx < canvas.width + TILE_SIZE && sy > -TILE_SIZE && sy < canvas.height + TILE_SIZE) {
+                    if (enemy.type === 'ghost') {
+                        drawGhostAt(sx, sy, TILE_SIZE);
+                    } else {
+                        drawGruntAt(sx, sy, TILE_SIZE);
+                    }
+                    // Health bar for grunts
+                    if (enemy.type === 'grunt' && enemy.health < enemy.maxHealth) {
+                        const barW = TILE_SIZE * 0.5;
+                        const barH = 4;
+                        const barX = sx - barW / 2;
+                        const barY = sy - TILE_SIZE * 0.45;
+                        ctx.fillStyle = '#333';
+                        ctx.fillRect(barX, barY, barW, barH);
+                        ctx.fillStyle = '#ff3333';
+                        ctx.fillRect(barX, barY, barW * (enemy.health / enemy.maxHealth), barH);
+                    }
+                }
+            }
+
+            // Draw projectiles
+            for (const p of projectiles) {
+                const sx = p.col * TILE_SIZE - cameraX;
+                const sy = p.row * TILE_SIZE - cameraY;
+                if (sx > -10 && sx < canvas.width + 10 && sy > -10 && sy < canvas.height + 10) {
+                    ctx.fillStyle = '#ffdd44';
+                    ctx.shadowColor = '#ffaa00';
+                    ctx.shadowBlur = 8;
+                    ctx.beginPath();
+                    ctx.arc(sx, sy, 4, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.shadowBlur = 0;
+                    // Trail
+                    ctx.fillStyle = 'rgba(255,200,50,0.5)';
+                    ctx.beginPath();
+                    ctx.arc(sx - p.dc * 6, sy - p.dr * 6, 3, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+
+            // Draw hero
+            const heroScreenX = hero.col * TILE_SIZE - cameraX;
+            const heroScreenY = hero.row * TILE_SIZE - cameraY;
+            drawHeroAt(heroScreenX, heroScreenY, TILE_SIZE);
+
+            // Draw particles
+            for (const p of particles) {
+                const sx = p.col * TILE_SIZE - cameraX;
+                const sy = p.row * TILE_SIZE - cameraY;
+                const alpha = p.life / p.maxLife;
+                ctx.fillStyle = p.color.replace(')', `,${alpha})`);
+                if (p.color.startsWith('#')) {
+                    const hex = p.color;
+                    const r = parseInt(hex.slice(1, 3), 16);
+                    const g = parseInt(hex.slice(3, 5), 16);
+                    const b = parseInt(hex.slice(5, 7), 16);
+                    ctx.fillStyle = `rgba(${r},${g},${b},${alpha})`;
+                }
+                ctx.beginPath();
+                ctx.arc(sx, sy, p.size * alpha, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // ─── HUD ───────────────────────────────
+            renderHUD();
+
+            // ─── Game Over overlay ────────────────
+            if (isGameOver) {
+                const flash = Math.sin(gameOverTimer * 12) > 0;
+                if (flash) {
+                    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    ctx.fillStyle = '#ff2222';
+                    ctx.font = `bold ${Math.min(canvas.width*0.08,80)}px sans-serif`;
+                    ctx.textAlign = 'center';
+                    ctx.fillText('GAME OVER', canvas.width / 2, canvas.height / 2);
+                    ctx.textAlign = 'start';
+                }
+            }
+
+            // ─── Level transition ────────────────
+            if (isLevelTransition) {
+                ctx.fillStyle = 'rgba(0,0,0,0.5)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = '#ffdd00';
+                ctx.font = `bold ${Math.min(canvas.width*0.06,60)}px sans-serif`;
+                ctx.textAlign = 'center';
+                ctx.fillText(`LEVEL ${level} COMPLETE!`, canvas.width / 2, canvas.height / 2);
+                ctx.textAlign = 'start';
+            }
+        }
+
+        function renderHUD() {
+            const hudHeight = 50;
+            const padX = 20;
+            const padY = 8;
+
+            // Background
+            ctx.fillStyle = 'rgba(0,0,0,0.7)';
+            ctx.fillRect(0, 0, canvas.width, hudHeight);
+            ctx.strokeStyle = '#555';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(0, hudHeight);
+            ctx.lineTo(canvas.width, hudHeight);
+            ctx.stroke();
+
+            // Health bar
+            const barWidth = 180;
+            const barHeight = 18;
+            const barX = padX;
+            const barY = padY;
+            ctx.fillStyle = '#333';
+            ctx.fillRect(barX, barY, barWidth, barHeight);
+            const healthRatio = hero.health / hero.maxHealth;
+            const healthColor =
+                healthRatio > 0.5 ?
+                `rgb(${Math.floor(255*(1-healthRatio)*2)},200,${Math.floor(50)})` :
+                `rgb(255,${Math.floor(200*healthRatio*2)},30)`;
+            ctx.fillStyle = healthColor;
+            ctx.fillRect(barX, barY, barWidth * healthRatio, barHeight);
+            ctx.strokeStyle = '#888';
+            ctx.strokeRect(barX, barY, barWidth, barHeight);
+            ctx.fillStyle = '#fff';
+            ctx.font = 'bold 13px monospace';
+            ctx.fillText(`HP: ${Math.ceil(hero.health)}/${hero.maxHealth}`, barX + 5, barY + 13);
+
+            // Score
+            const scoreX = barX + barWidth + 30;
+            ctx.fillStyle = '#ffd700';
+            ctx.font = 'bold 14px monospace';
+            ctx.fillText(`SCORE: ${score}`, scoreX, barY + 14);
+
+            // Keys
+            const keyX = scoreX + 180;
+            ctx.fillStyle = '#ffd700';
+            ctx.fillText(`KEYS: ${hero.keys}`, keyX, barY + 14);
+
+            // Level
+            const levelX = keyX + 120;
+            ctx.fillStyle = '#ffffff';
+            ctx.fillText(`LEVEL: ${level}`, levelX, barY + 14);
+
+            // Control mode indicator
+            const modeX = levelX + 130;
+            ctx.fillStyle = humanControl ? '#44ff44' : '#888888';
+            ctx.font = 'bold 12px monospace';
+            ctx.fillText(humanControl ? '[HUMAN]' : '[ATTRACT]', modeX, barY + 14);
+
+            // Health drain warning
+            if (hero.health < 30) {
+                const flash = Math.sin(gameTime * 6) > 0;
+                if (flash) {
+                    ctx.fillStyle = '#ff3333';
+                    ctx.font = 'bold 14px monospace';
+                    ctx.fillText('⚠ LOW HEALTH', barX + 5, barY + 32);
+                }
+            }
+        }
+
+        // ──────────────────────────────────────────────
+        // INPUT HANDLING
+        // ──────────────────────────────────────────────
+        const keysPressed = {};
+        window.addEventListener('keydown', (e) => {
+            keysPressed[e.key.toLowerCase()] = true;
+            lastHumanInputTime = gameTime;
+            if (!humanControl) {
+                humanControl = true;
+                aiCurrentPath = [];
+                aiPathIndex = 0;
+                aiGoalReevalTimer = 0;
+            }
+            // Space for manual shoot
+            if (e.key.toLowerCase() === ' ' || e.code === 'Space') {
+                e.preventDefault();
+                fireProjectile();
+                shootTimer = SHOOT_COOLDOWN * 0.5; // shorter cooldown after manual shot
+            }
+        });
+        window.addEventListener('keyup', (e) => {
+            keysPressed[e.key.toLowerCase()] = false;
+        });
+
+        function processHumanInput(dt) {
+            if (!humanControl) return;
+            let moveDc = 0;
+            let moveDr = 0;
+            if (keysPressed['arrowup'] || keysPressed['w']) moveDr = -1;
+            if (keysPressed['arrowdown'] || keysPressed['s']) moveDr = 1;
+            if (keysPressed['arrowleft'] || keysPressed['a']) moveDc = -1;
+            if (keysPressed['arrowright'] || keysPressed['d']) moveDc = 1;
+
+            if (moveDc !== 0 || moveDr !== 0) {
+                const mag = Math.sqrt(moveDc * moveDc + moveDr * moveDr);
+                const ndc = moveDc / mag;
+                const ndr = moveDr / mag;
+                hero.facingDir = { dc: ndc, dr: ndr };
+
+                const moveSpeed = hero.speed * dt;
+                const newCol = hero.col + ndc * moveSpeed;
+                const newRow = hero.row + ndr * moveSpeed;
+                const tc = Math.round(newCol);
+                const tr = Math.round(newRow);
+                if (tc >= 0 && tc < MAP_COLS && tr >= 0 && tr < MAP_ROWS) {
+                    const tile = map[tr][tc];
+                    if (tile === 0 || (tile === 2 && hero.keys > 0)) {
+                        hero.col = newCol;
+                        hero.row = newRow;
+                        markVisited(hero.col, hero.row);
+                    } else if (tile === 2 && hero.keys === 0) {
+                        // Blocked by locked door
+                    } else {
+                        // Try sliding
+                        const slideCol = hero.col + ndc * moveSpeed;
+                        const slideRow = hero.row;
+                        const stc = Math.round(slideCol);
+                        const str = Math.round(slideRow);
+                        if (stc >= 0 && stc < MAP_COLS && str >= 0 && str < MAP_ROWS &&
+                            (map[str][stc] === 0 || (map[str][stc] === 2 && hero.keys > 0))) {
+                            hero.col = slideCol;
+                            markVisited(hero.col, hero.row);
+                        } else {
+                            const slideCol2 = hero.col;
+                            const slideRow2 = hero.row + ndr * moveSpeed;
+                            const stc2 = Math.round(slideCol2);
+                            const str2 = Math.round(slideRow2);
+                            if (stc2 >= 0 && stc2 < MAP_COLS && str2 >= 0 && str2 < MAP_ROWS &&
+                                (map[str2][stc2] === 0 || (map[str2][stc2] === 2 && hero.keys > 0))) {
+                                hero.row = slideRow2;
+                                markVisited(hero.col, hero.row);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ──────────────────────────────────────────────
+        // MAIN GAME LOOP
+        // ──────────────────────────────────────────────
+        let lastTime = performance.now();
+
+        function gameLoop(timestamp) {
+            let dt = (timestamp - lastTime) / 1000;
+            lastTime = timestamp;
+
+            // Clamp dt to avoid huge jumps
+            if (dt > 0.15) dt = 0.15;
+            if (dt <= 0) dt = 0.016;
+
+            // Process human input
+            processHumanInput(dt);
+
+            // Update game
+            updateGame(dt);
+
+            // Render
+            render();
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        // ──────────────────────────────────────────────
+        // INITIALIZATION
+        // ──────────────────────────────────────────────
+        function init() {
+            resetGameState();
+            generateMap();
+            hero.col = heroStartPos.col;
+            hero.row = heroStartPos.row;
+            hero.health = hero.maxHealth;
+            hero.keys = 0;
+            hero.facingDir = { dc: 0, dr: -1 };
+            cameraX = hero.col * TILE_SIZE - canvas.width / 2;
+            cameraY = hero.row * TILE_SIZE - canvas.height / 2;
+            const maxCamX = MAP_COLS * TILE_SIZE - canvas.width;
+            const maxCamY = MAP_ROWS * TILE_SIZE - canvas.height;
+            cameraX = Math.max(0, Math.min(maxCamX, cameraX));
+            cameraY = Math.max(0, Math.min(maxCamY, cameraY));
+            lastTime = performance.now();
+            requestAnimationFrame(gameLoop);
+        }
+
+        init();
+    </script>
+</body>
+</html>

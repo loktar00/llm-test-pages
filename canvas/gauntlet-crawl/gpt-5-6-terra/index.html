@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Gauntlet Attract Mode</title>
+<style>
+html,body{margin:0;overflow:hidden;background:#070912}
+canvas{display:block;width:100vw;height:100vh;image-rendering:pixelated}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+window.ASSET_MANIFEST = {
+  floor:     { file: "assets/floor.png",     prompt: "512x512 seamless dungeon floor tile, top-down orthographic view, worn charcoal slate blocks with subtle cracks, scattered moss and cool blue ambient shadows, crisp hand-painted arcade fantasy style, no objects, tileable game asset framing" },
+  wall:      { file: "assets/wall.png",      prompt: "512x512 seamless dungeon wall tile, top-down orthographic view, tall dark stone blocks with beveled edges, deep blue shadows, moss, warm edge highlights, richly detailed arcade fantasy game asset, square tile framing" },
+  hero:      { file: "assets/hero.png",      prompt: "Top-down heroic dungeon adventurer sprite, centered, armored ranger with blue cloak and gold trim holding a wand, crisp colorful arcade fantasy style, plain dark background, isolated game asset framing" },
+  ghost:     { file: "assets/ghost.png",     prompt: "Top-down floating ghost enemy sprite, centered, pale cyan translucent spirit with angry glowing eyes, crisp arcade fantasy style, plain dark background, isolated game asset framing" },
+  grunt:     { file: "assets/grunt.png",     prompt: "Top-down dungeon grunt enemy sprite, centered, horned red goblin warrior with club, crisp arcade fantasy style, plain dark background, isolated game asset framing" },
+  generator: { file: "assets/generator.png", prompt: "Top-down monster generator game sprite, centered, ominous stone summoning obelisk with violet crystal, skull carvings and green magical glow, arcade fantasy style, plain dark background, isolated asset framing" },
+  key:       { file: "assets/key.png",       prompt: "Top-down golden dungeon key sprite, centered, ornate bright gold key with blue gem, crisp arcade fantasy style, plain dark background, isolated game asset framing" },
+  food:      { file: "assets/food.png",      prompt: "Top-down fantasy dungeon food sprite, centered, roast chicken and red apple on tiny plate, warm colorful arcade style, plain dark background, isolated game asset framing" },
+  treasure:  { file: "assets/treasure.png",  prompt: "Top-down sparkling treasure chest sprite, centered, open gold and wood chest spilling coins and gems, crisp arcade fantasy style, plain dark background, isolated game asset framing" },
+  exit:      { file: "assets/exit.png",      prompt: "Top-down magical dungeon exit portal sprite, centered, stone arch with swirling cyan light, crisp arcade fantasy style, plain dark background, isolated game asset framing" }
+};
+const c=document.getElementById('game'),x=c.getContext('2d');
+let W,H,DPR=1,T=56,cam={x:0,y:0}, imgs={}, keys={}, lastInput=0;
+for(const [n,a] of Object.entries(ASSET_MANIFEST)){let i=new Image;i.onload=()=>imgs[n]=i;i.src=a.file}
+addEventListener('resize',resize); function resize(){DPR=devicePixelRatio||1;W=innerWidth;H=innerHeight;c.width=W*DPR;c.height=H*DPR;x.setTransform(DPR,0,0,DPR,0,0)}resize();
+addEventListener('keydown',e=>{if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," ","w","a","s","d","W","A","S","D"].includes(e.key)){keys[e.key.toLowerCase()]=1;lastInput=performance.now();e.preventDefault()}});
+addEventListener('keyup',e=>keys[e.key.toLowerCase()]=0);
+const dirs=[[1,0],[-1,0],[0,1],[0,-1]], rnd=a=>a[Math.random()*a.length|0], dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+let map,items,enemies,shots,hero,level=1,score=0,over=0,aiPath=[],aiTick=0,flash=0;
+
+function cell(x,y){return x<0||y<0||x>=map[0].length||y>=map.length?1:map[y][x]}
+function openSpot(far=false){
+ let a=[];for(let y=1;y<map.length-1;y++)for(let z=1;z<map[0].length-1;z++)if(map[y][z]===0&&(!far||Math.hypot(z-1,y-1)>15))a.push({x:z+.5,y:y+.5});
+ return rnd(a)
+}
+function makeLevel(){
+ const mw=39,mh=31; map=Array.from({length:mh},()=>Array(mw).fill(1));
+ function carve(px,py){map[py][px]=0;let d=dirs.slice().sort(()=>Math.random()-.5);for(let q of d){let nx=px+q[0]*2,ny=py+q[1]*2;if(nx>0&&ny>0&&nx<mw-1&&ny<mh-1&&map[ny][nx]){map[py+q[1]][px+q[0]]=0;carve(nx,ny)}}}
+ carve(1,1);
+ for(let i=0;i<35;i++){let p=openSpot();for(let d of dirs){if(Math.random()<.35&&cell((p.x|0)+d[0]*2,p.y|0+d[1]*2)===0)map[(p.y|0)+d[1]][(p.x|0)+d[0]]=0}}
+ hero={x:1.5,y:1.5,hp:100,max:100,ks:0,dx:1,dy:0,fire:0,hurt:0};
+ items=[]; enemies=[]; shots=[]; 
+ let exit=openSpot(true);items.push({type:"exit",...exit});
+ for(let i=0;i<4+level;i++){let p=openSpot(true);items.push({type:"gen",...p,hp:6,spawn:1+Math.random()*2})}
+ for(let i=0;i<7;i++){let p=openSpot();items.push({type:"food",...p})}
+ for(let i=0;i<12;i++){let p=openSpot();items.push({type:"treasure",...p})}
+ for(let i=0;i<4;i++){let p=openSpot();items.push({type:"key",...p})}
+ // decorative locked gates in noncritical open spaces
+ for(let i=0;i<3;i++){let p=openSpot(true),gx=p.x|0,gy=p.y|0;if(map[gy][gx]===0){map[gy][gx]=2}}
+ aiPath=[];flash=1;
+}
+makeLevel();
+function walkable(px,py){
+ let q=cell(Math.floor(px),Math.floor(py));
+ return q===0 || (q===2&&hero.ks>0);
+}
+function move(o,dx,dy,dt){
+ let r=.28,nx=o.x+dx*dt,ny=o.y+dy*dt;
+ if(walkable(nx+(dx>0?r:-r),o.y)&&walkable(nx+(dx>0?r:-r),o.y-r)&&walkable(nx+(dx>0?r:-r),o.y+r))o.x=nx;
+ if(walkable(o.x,ny+(dy>0?r:-r))&&walkable(o.x-r,ny+(dy>0?r:-r))&&walkable(o.x+r,ny+(dy>0?r:-r)))o.y=ny;
+}
+function bfs(target){
+ let sx=hero.x|0,sy=hero.y|0,Q=[[sx,sy]],seen=new Set([sx+","+sy]),from={};let end=null;
+ while(Q.length){let [a,b]=Q.shift();if(Math.hypot(a+.5-target.x,b+.5-target.y)<.8){end=[a,b];break}
+  for(let d of dirs){let n=a+d[0],m=b+d[1],id=n+","+m;if(!seen.has(id)&&(cell(n,m)===0||(cell(n,m)===2&&hero.ks))){seen.add(id);from[id]=[a,b];Q.push([n,m])}}
+ }if(!end)return [];let out=[];while(end[0]!==sx||end[1]!==sy){out.unshift({x:end[0]+.5,y:end[1]+.5});end=from[end[0]+","+end[1]]}return out;
+}
+function chooseAI(){
+ let candidates=items.filter(i=>i.type!=="exit"&&i.type!=="food"||i.type==="food"&&hero.hp<72);
+ let gens=items.filter(i=>i.type==="gen"), food=items.filter(i=>i.type==="food"), key=items.filter(i=>i.type==="key"), tr=items.filter(i=>i.type==="treasure");
+ let target=(hero.hp<45&&food.length?rnd(food):gens.length?rnd(gens):key.length?rnd(key):tr.length?rnd(tr):items.find(i=>i.type==="exit"));
+ aiPath=target?bfs(target):[];
+}
+function spawn(g){let d=rnd(dirs),e={x:g.x+d[0]*.45,y:g.y+d[1]*.45,type:Math.random()<.48?"ghost":"grunt",hp:Math.random()<.48?2:3,hit:0};if(walkable(e.x,e.y))enemies.push(e)}
+function shoot(dx,dy){
+ if(hero.fire>0)return;hero.fire=.26;shots.push({x:hero.x+dx*.34,y:hero.y+dy*.34,dx,dy,life:1.1});hero.dx=dx;hero.dy=dy;
+}
+function update(dt,now){
+ if(over){over-=dt;if(over<=0){level=1;score=0;makeLevel()}return}
+ hero.hp-=dt*.72;hero.fire-=dt;hero.hurt-=dt;flash=Math.max(0,flash-dt);
+ let human=now-lastInput<10000,dx=0,dy=0;
+ if(human){dx=(keys.arrowright||keys.d?1:0)-(keys.arrowleft||keys.a?1:0);dy=(keys.arrowdown||keys.s?1:0)-(keys.arrowup||keys.w?1:0)}
+ else {aiTick-=dt;if(aiTick<=0){chooseAI();aiTick=.55}let p=aiPath[0];if(p){let ax=p.x-hero.x,ay=p.y-hero.y;if(Math.hypot(ax,ay)<.13)aiPath.shift();else if(Math.abs(ax)>Math.abs(ay))dx=Math.sign(ax);else dy=Math.sign(ay)}}
+ if(dx||dy){let l=Math.hypot(dx,dy);dx/=l;dy/=l;hero.dx=dx;hero.dy=dy;move(hero,dx*4.2,dy*4.2,dt)}
+ if((human&&keys[" "])||(!human&&(dx||dy)))shoot(hero.dx,hero.dy);
+ let tx=hero.x|0,ty=hero.y|0;if(cell(tx,ty)===2&&hero.ks){map[ty][tx]=0;hero.ks--;score+=50}
+ for(let i=items.length-1;i>=0;i--){let z=items[i];if(z.type==="gen"){z.spawn-=dt;if(z.spawn<=0){spawn(z);z.spawn=1.1+Math.random()*1.8}continue}
+  if(dist(hero,z)<.46){if(z.type==="food"){hero.hp=Math.min(100,hero.hp+28);score+=25}if(z.type==="key"){hero.ks++;score+=75}if(z.type==="treasure")score+=150;if(z.type==="exit"){level++;score+=500;makeLevel();return}items.splice(i,1)}
+ }
+ for(let i=shots.length-1;i>=0;i--){let s=shots[i];s.x+=s.dx*11*dt;s.y+=s.dy*11*dt;s.life-=dt;if(cell(s.x|0,s.y|0)!==0||s.life<0){shots.splice(i,1);continue}
+  let hit=false;for(let j=items.length-1;j>=0;j--){let z=items[j];if(z.type==="gen"&&dist(s,z)<.5){z.hp--;hit=true;if(z.hp<=0){items.splice(j,1);score+=300}break}}
+  for(let e of enemies)if(dist(s,e)<.42){e.hp--;e.hit=.2;hit=true;if(e.hp<=0){score+=35;e.dead=1}break}if(hit)shots.splice(i,1)
+ }enemies=enemies.filter(e=>!e.dead);
+ for(let e of enemies){let ax=hero.x-e.x,ay=hero.y-e.y,l=Math.hypot(ax,ay)||1,sp=e.type==="ghost"?1.65:1.25;move(e,ax/l*sp,ay/l*sp,dt);if(l<.55&&hero.hurt<=0){hero.hp-=e.type==="ghost"?7:10;hero.hurt=.38}}
+ if(hero.hp<=0){over=2;flash=1}
+}
+function image(slot,X,Y,S){let i=imgs[slot];if(i){x.drawImage(i,X,Y,S,S);return true}return false}
+function tileArt(kind,X,Y){
+ if(kind==="floor"){x.fillStyle="#17202b";x.fillRect(X,Y,T,T);x.strokeStyle="#263746";x.lineWidth=1;x.strokeRect(X+.5,Y+.5,T-1,T-1);x.fillStyle="rgba(92,131,125,.12)";x.fillRect(X+8,Y+11,3,3);x.fillRect(X+39,Y+39,2,2)}
+ else {x.fillStyle="#253041";x.fillRect(X,Y,T,T);x.fillStyle="#17202d";x.fillRect(X+4,Y+4,T-8,T-8);x.strokeStyle="#526074";x.lineWidth=2;x.strokeRect(X+3,Y+3,T-6,T-6);x.strokeStyle="#364457";x.beginPath();x.moveTo(X,Y+T*.5);x.lineTo(X+T,Y+T*.5);x.moveTo(X+T*.5,Y);x.lineTo(X+T*.5,Y+T);x.stroke()}
+}
+function sprite(slot,o,X,Y){
+ if(image(slot,X,Y,T))return;let cx=X+T/2,cy=Y+T/2;
+ x.save();x.translate(cx,cy);
+ if(slot==="hero"){x.fillStyle="#193d69";x.beginPath();x.arc(0,2,17,0,7);x.fill();x.fillStyle="#e6c38a";x.beginPath();x.arc(0,-6,10,0,7);x.fill();x.fillStyle="#d5e9f5";x.fillRect(-8,-10,16,5);x.strokeStyle="#ffc850";x.lineWidth=4;x.beginPath();x.moveTo(0,3);x.lineTo(o.dx*22,o.dy*22);x.stroke()}
+ if(slot==="ghost"){x.globalAlpha=.82;x.fillStyle="#b9efff";x.beginPath();x.arc(0,-3,15,Math.PI,0);x.lineTo(15,15);x.lineTo(7,10);x.lineTo(0,16);x.lineTo(-7,10);x.lineTo(-15,15);x.closePath();x.fill();x.fillStyle="#172037";x.fillRect(-8,-5,4,5);x.fillRect(4,-5,4,5)}
+ if(slot==="grunt"){x.fillStyle="#9b3544";x.beginPath();x.arc(0,0,16,0,7);x.fill();x.fillStyle="#f0bf78";x.beginPath();x.arc(0,-6,10,0,7);x.fill();x.fillStyle="#432330";x.fillRect(-10,-13,7,4);x.fillRect(3,-13,7,4)}
+ if(slot==="gen"){x.fillStyle="#352553";x.fillRect(-16,-16,32,32);x.fillStyle="#8c4ee8";x.beginPath();x.moveTo(0,-18);x.lineTo(13,0);x.lineTo(0,18);x.lineTo(-13,0);x.fill();x.fillStyle="#e6cbff";x.beginPath();x.arc(0,0,5,0,7);x.fill()}
+ if(slot==="key"){x.strokeStyle="#ffd957";x.lineWidth=6;x.beginPath();x.arc(-7,0,7,0,7);x.moveTo(0,0);x.lineTo(16,0);x.moveTo(10,0);x.lineTo(10,6);x.stroke()}
+ if(slot==="food"){x.fillStyle="#d97735";x.beginPath();x.arc(0,4,14,0,7);x.fill();x.fillStyle="#69ad4c";x.fillRect(-2,-15,6,8)}
+ if(slot==="treasure"){x.fillStyle="#8c5229";x.fillRect(-16,-2,32,17);x.fillStyle="#e7b847";x.fillRect(-17,-7,34,10);x.fillStyle="#fff09a";x.fillRect(-3,-3,6,8)}
+ if(slot==="exit"){x.strokeStyle="#63e8ff";x.lineWidth=6;x.beginPath();x.arc(0,1,16,Math.PI,0);x.lineTo(16,16);x.moveTo(-16,16);x.lineTo(-16,1);x.stroke();x.fillStyle="rgba(77,207,255,.35)";x.fillRect(-12,0,24,16)}
+ x.restore()
+}
+function draw(){
+ x.fillStyle="#071019";x.fillRect(0,0,W,H);cam.x=hero.x*T-W/2;cam.y=hero.y*T-H/2;
+ let sx=Math.floor(cam.x/T)-1,sy=Math.floor(cam.y/T)-1,ex=Math.ceil((cam.x+W)/T)+1,ey=Math.ceil((cam.y+H)/T)+1;
+ for(let y=sy;y<=ey;y++)for(let z=sx;z<=ex;z++){let X=z*T-cam.x,Y=y*T-cam.y,k=cell(z,y);if(k===0||k===2){if(!image("floor",X,Y,T))tileArt("floor",X,Y)}else if(!image("wall",X,Y,T))tileArt("wall",X,Y);if(k===2){x.fillStyle="#744329";x.fillRect(X+8,Y+3,T-16,T-6);x.strokeStyle="#e4ad48";x.lineWidth=3;x.strokeRect(X+9,Y+4,T-18,T-8);x.fillStyle="#24151a";x.fillRect(X+T/2-4,Y+T/2,8,11)}}
+ for(let z of items)sprite(z.type==="gen"?"generator":z.type,z,z.x*T-cam.x-T/2,z.y*T-cam.y-T/2);
+ for(let e of enemies)sprite(e.type,e,e.x*T-cam.x-T/2,e.y*T-cam.y-T/2);
+ for(let s of shots){x.fillStyle="#ffe77d";x.beginPath();x.arc(s.x*T-cam.x,s.y*T-cam.y,5,0,7);x.fill()}
+ sprite("hero",hero,hero.x*T-cam.x-T/2,hero.y*T-cam.y-T/2);
+ let g=x.createLinearGradient(0,0,W,0);g.addColorStop(0,"rgba(4,7,14,.92)");g.addColorStop(.5,"rgba(9,14,25,.84)");g.addColorStop(1,"rgba(4,7,14,.92)");x.fillStyle=g;x.fillRect(0,0,W,62);
+ x.font="bold 18px monospace";x.textBaseline="middle";x.fillStyle="#e9f4ff";x.fillText("HEALTH",18,22);x.fillStyle="#321d27";x.fillRect(101,14,190,16);x.fillStyle=hero.hp>35?"#4be36c":"#eb4e54";x.fillRect(101,14,190*Math.max(0,hero.hp)/100,16);x.strokeStyle="#d7e8ff";x.strokeRect(101,14,190,16);
+ x.fillStyle="#ffd85b";x.fillText("SCORE "+score,18,48);x.fillStyle="#9ee5ff";x.fillText("KEYS "+hero.ks,245,48);x.fillStyle="#cda8ff";x.fillText("LEVEL "+level,390,48);
+ x.textAlign="right";x.fillStyle=performance.now()-lastInput<10000?"#ffd965":"#89a6bf";x.font="14px monospace";x.fillText(performance.now()-lastInput<10000?"PLAYER CONTROL":"ATTRACT MODE • PRESS WASD / ARROWS",W-18,30);x.textAlign="left";
+ if(flash){x.fillStyle="rgba(210,240,255,"+(flash*.22)+")";x.fillRect(0,0,W,H)}
+ if(over>0){x.fillStyle="rgba(0,0,0,.62)";x.fillRect(0,0,W,H);x.textAlign="center";x.font="bold 58px monospace";x.fillStyle="#ff5964";x.fillText("GAME OVER",W/2,H/2);x.font="18px monospace";x.fillStyle="#fff2c2";x.fillText("THE QUEST BEGINS ANEW...",W/2,H/2+42);x.textAlign="left"}
+}
+let prev=performance.now();function loop(n){let dt=Math.min(.05,(n-prev)/1000);prev=n;update(dt,n);draw();requestAnimationFrame(loop)}requestAnimationFrame(loop);
+</script>
+</body>
+</html>

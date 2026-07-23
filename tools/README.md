@@ -9,12 +9,10 @@ scripts regenerate everything from it plus a staging directory of run folders.
   prompt compare page and section grid. Staging layout:
   `<staging>/<section>/<stem>/<runId>/{index.html,meta.json}`. Edit the SRC /
   REPO constants at the top when running from a new machine or session.
-- `record_previews.py` — serves the repo and records a 6s 480x300 preview.webm
-  via headless Chromium for every manifest run missing one.
 - `audit_runs.py` — the execution audit: loads every run headlessly, fails
   anything with uncaught JS errors or nothing visibly rendered. Site policy:
   only audit-passing runs stay in the manifest.
 
 Flow for adding a model's runs (see the `new-llm-bench` skill): stage run
 dirs and merge manifest entries, run build_site.py, audit if not already
-audited, run record_previews.py, then commit and push.
+audited, record previews, then commit and push.
